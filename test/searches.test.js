@@ -3,7 +3,7 @@ import test from "node:test";
 import { applyIntent, providerRoutes } from "../src/searches.js";
 import { defaultAccounts, publicAccountStatus } from "../src/providers.js";
 
-test("public account status preserves a Work browser session and selected-address state", () => {
+test("a recorded Work browser session never replaces direct CLI provider routing", () => {
   const accounts = defaultAccounts();
   accounts.providers.ubereats.authenticated = true;
   accounts.providers.ubereats.transport = "browser";
@@ -13,8 +13,8 @@ test("public account status preserves a Work browser session and selected-addres
   assert.equal(uber.addressSelected, true);
   assert.equal(uber.authenticated, true);
   assert.deepEqual(providerRoutes(["justeat", "glovo", "ubereats"], accounts), {
-    apiProviders: ["justeat", "glovo"],
-    browserProviders: ["ubereats"],
+    apiProviders: ["justeat", "glovo", "ubereats"],
+    browserProviders: [],
   });
 });
 

@@ -46,8 +46,11 @@ export async function startSearch(intent, options = {}) {
 
 export function providerRoutes(enabled, accounts) {
   return {
-    apiProviders: enabled.filter((provider) => (accounts.providers[provider].transport ?? PROVIDERS[provider].transport) === "api"),
-    browserProviders: enabled.filter((provider) => accounts.providers[provider].transport === "browser"),
+    // Provider operations are always executed by OrderScout's CLI adapters.
+    // A previously recorded browser session must never turn the browser into
+    // a search, menu, basket, or checkout execution backend.
+    apiProviders: enabled.filter((provider) => PROVIDERS[provider].transport === "api"),
+    browserProviders: [],
   };
 }
 

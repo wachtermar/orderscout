@@ -5,29 +5,26 @@ description: Find, compare, prepare, and safely place deliveries across Just Eat
 
 # Order with OrderScout
 
-Use the `orderscout_*` tools as the comparison and safety engine. In ChatGPT Work desktop, use the bundled in-app Browser for Glovo and Uber Eats authentication and for any provider operation backed by that browser session. Do not launch external Chrome, guess profiles, or import cookies in Work. The standalone CLI may use its native Chrome session-import fallback.
+Use only the `orderscout_*` tools for provider account verification, search, menus, baskets, checkout quotes, comparison, and guarded order placement. All three providers have direct CLI adapters. Never use the Browser as a fallback execution engine for these operations and never scrape or ingest provider offers from visible pages.
 
-Never inspect or export browser cookies, local storage, passwords, tokens, profiles, or session stores. The in-app Browser keeps authentication isolated; OrderScout records only that the visible provider UI was verified and whether a delivery address is selected.
+The Browser is limited to two handoffs: the user completing login on an official provider page opened by an OrderScout auth tool, and optional visual review or manual editing of an already-prepared official checkout. Never inspect or export browser cookies, local storage, passwords, tokens, profiles, or session stores.
 
 ## Accounts and login
 
-1. Call `orderscout_context` and `orderscout_accounts_status`.
+1. Call `orderscout_context` and `orderscout_accounts_status`. Treat account status as cached configuration only.
 2. Save providers and memberships stated by the user with `orderscout_accounts_configure`. Exclude disabled providers from every search.
-3. Verify enabled accounts with the relevant auth-status tool and the account's recorded `transport`.
+3. Verify every enabled account with the relevant live auth-status tool before claiming it is logged in. A saved `authenticated` value, visible browser session, or selected address is not proof that the CLI is authenticated.
 4. For Just Eat, call `orderscout_justeat_auth_status` first. Status refreshes a saved OAuth session when possible. Call `orderscout_justeat_auth_login` only when status remains unauthenticated. If it returns `opened: true`, tell the user to finish on the official page and return; after they say it is finished, call `orderscout_justeat_auth_complete`. The start call returns immediately and never leaves chat waiting on the browser.
-5. In ChatGPT Work, use the in-app Browser for Glovo and Uber Eats. Claim an already-open official provider tab when available; otherwise open the official provider page in a new in-app tab. Inspect only visible page state.
-6. If the visible UI is signed in, preserve any already-selected address. Do not ask the user to select it again. Call `orderscout_provider_browser_session` with the visible authentication and address-selected booleans. Never include the address itself.
-7. If sign-in is required, show the in-app browser and ask the user to finish passwords, verification codes, or CAPTCHA on the official page. After the user says it is done, re-inspect the same tab and record the browser session. Do not call `orderscout_provider_auth_login` or `orderscout_provider_auth_complete` in Work; those are standalone CLI fallbacks only.
+5. For Glovo or Uber Eats, call `orderscout_provider_auth_status`. If unauthenticated, call `orderscout_provider_auth_login`. Tell the user to complete sign-in on the official page opened by OrderScout. After the user says it is finished, call `orderscout_provider_auth_complete`, then call `orderscout_provider_auth_status` again. Do not claim success unless that final direct API verification succeeds.
+6. Never call `orderscout_provider_browser_session` to authenticate a CLI account. It is deprecated compatibility state and cannot authorize direct provider requests.
 
 Never ask for account credentials in chat. Never expose saved session material.
 
 ## Search and compare
 
-1. Call `orderscout_search_begin` with the complete intent, enabled providers, objective, and a location only when neither the API nor visible browser UI has a selected address.
-2. The tool searches providers whose account transport is `api`. It returns `browserProviders` for providers verified in the Work browser.
-3. For every browser provider, reuse its official in-app tab, use the site's visible search UI, and collect a compact set of visible matching offers. Do not inspect hidden session state or protected network credentials.
-4. Normalize visible offers with provider, merchant, item, quantity, displayed price, ETA, rating, URL, and `source.adapter: "work-browser"`, then call `orderscout_ingest_offers` for that provider.
-5. Call `orderscout_results` and show a compact provider-labelled shortlist. Continue when one provider fails.
+1. Call `orderscout_search_begin` with the complete intent, enabled providers, objective, and a location only when the adapters cannot use a saved address.
+2. The tool directly calls every enabled provider's CLI adapter and continues when one provider fails.
+3. Call `orderscout_results` and show a compact provider-labelled shortlist. Never replace a failed CLI provider with browser search.
 
 Preserve quantity, budget, timing, diet, taste, health, and still/sparkling constraints. For water, parse the entire pack expression and meet or exceed requested litres. For meals, describe health and taste as ranking signals, not medical facts.
 
@@ -36,12 +33,10 @@ Rank cheapest by delivered checkout total, fastest by displayed ETA, best by rat
 ## Baskets and exact totals
 
 - Do not modify a non-empty unrelated cart without explaining the conflict and receiving approval.
-- For API-backed offers, call `orderscout_prepare_basket` before mutation, resolve required modifiers, then call `orderscout_create_basket` and `orderscout_checkout_review_task`.
-- For `source.adapter: "work-browser"` offers, reuse the provider tab and add the selected item through the visible official UI. Resolve modifiers with the user and do not replace a conflicting cart without approval.
-- Read the browser checkout's visible subtotal, fees, discount, total, ETA, address-selected state, and payment-method summary without exposing private details.
+- Call `orderscout_prepare_basket` before mutation, resolve required modifiers, then call `orderscout_create_basket` and `orderscout_checkout_review_task` through the CLI.
 - Record its subtotal, fees, discount, and total with `orderscout_record_checkout_quote`, then call `orderscout_results` again.
 - Only count Prime or Uber One savings when the provider quote shows them.
-- For API baskets in Work, call `orderscout_open_basket` to obtain the trusted checkout URL, then navigate an in-app Browser tab to it. The tool must not launch an external browser. For Work-browser baskets, keep the existing checkout tab as the handoff.
+- In Work, call `orderscout_open_basket` only after the CLI created the basket. Navigate the in-app Browser to its trusted checkout URL for optional visual review or manual edits. The Browser must not create the basket or replace CLI checkout quoting.
 
 ## Checkout review and changes
 

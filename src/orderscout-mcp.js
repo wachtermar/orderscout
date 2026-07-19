@@ -22,7 +22,7 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_accounts_status",
-    description: "Show which of Just Eat, Glovo, and Uber Eats are enabled, authenticated, and have a declared or detected membership. Never exposes credentials.",
+    description: "Show saved account configuration and the last known authentication result. This is cached state, not proof of a current login. Before claiming a provider is logged in, call its live auth-status tool. Never exposes credentials.",
     inputSchema: objectSchema(), annotations: readOnly, command: () => ["accounts", "status"],
   },
   {
@@ -52,7 +52,7 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_provider_auth_login",
-    description: "Standalone CLI fallback only: open Glovo or Uber Eats in native Chrome for later cookie import. In ChatGPT Work, use its in-app Browser and orderscout_provider_browser_session instead; do not call this tool.",
+    description: "Start the OrderScout CLI login handoff for Glovo or Uber Eats. It opens the official provider page; the user handles credentials and verification there. After completion call orderscout_provider_auth_complete. The browser is never used for search, menu, cart, or checkout execution.",
     inputSchema: objectSchema({
       provider: { type: "string", enum: ["glovo", "ubereats"] },
     }, ["provider"]), annotations: remoteWrite,
@@ -60,13 +60,13 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_provider_auth_complete",
-    description: "Standalone CLI fallback only: import the provider cookies from native Chrome and verify through the direct API. In ChatGPT Work, use orderscout_provider_browser_session and never import browser cookies.",
+    description: "Finish Glovo or Uber Eats CLI login by importing only provider-domain cookies from the selected native Chrome profile, then verify through the direct account API. Never returns cookie values. A successful live verification is required before search.",
     inputSchema: objectSchema({ provider: { type: "string", enum: ["glovo", "ubereats"] }, profile: string("Chrome profile name; normally Default.") }, ["provider"]), annotations: remoteWrite,
     command: (input) => ["auth", "complete", input.provider, "--profile", input.profile ?? "Default", "--agent"],
   },
   {
     name: "orderscout_provider_browser_session",
-    description: "Record that ChatGPT Work visibly verified a provider account in the in-app browser, including whether a delivery address is selected. Stores no cookie, token, address, or browser data. Browser-backed providers are searched through their visible official UI and normalized with orderscout_ingest_offers instead of direct API calls.",
+    description: "Deprecated compatibility tool. Recording visible browser state does not authenticate the OrderScout CLI and must never be used to claim login or to route provider operations through a browser. Use the provider login, completion, and live auth-status tools instead.",
     inputSchema: objectSchema({
       provider: { type: "string", enum: ["glovo", "ubereats"] },
       authenticated: boolean("Whether the official provider UI visibly shows a signed-in account."),
