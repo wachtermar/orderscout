@@ -12,7 +12,7 @@ Use only the `orderscout_*` tools. All three providers have direct CLI adapters 
 1. Call `orderscout_context` and `orderscout_accounts_status`.
 2. Save providers and memberships stated by the user with `orderscout_accounts_configure`. Exclude disabled providers from every search.
 3. Verify enabled accounts with the relevant auth-status tool.
-4. For Just Eat, call `orderscout_justeat_auth_login` when needed. The official OAuth page opens and credentials remain there.
+4. For Just Eat, call `orderscout_justeat_auth_status` first. Status refreshes a saved OAuth session when possible. Call `orderscout_justeat_auth_login` only when status remains unauthenticated; login also rechecks the saved session before opening the official OAuth page, so an existing refreshable session never opens a browser.
 5. For Glovo or Uber Eats, call `orderscout_provider_auth_login`. Tell the user to sign in and select the delivery address in the official Chrome page. After the user says it is complete, call `orderscout_provider_auth_complete`. This imports only cookies valid for that provider domain and verifies them through the account API. There is no terminal step and the user never pastes cookies, tokens, URLs, passwords, or OTPs into chat.
 
 Never ask for account credentials in chat. Never expose saved session material.

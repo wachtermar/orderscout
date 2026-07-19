@@ -35,7 +35,7 @@ The computer needs [Node.js 20 or newer](https://nodejs.org/) once. Restart Chat
 
 ### Signing in—no Terminal
 
-- Just Eat opens its official OAuth page in your normal browser.
+- Just Eat first reuses or refreshes its saved OAuth session. It opens the official OAuth page in your normal browser only when a fresh login is actually required.
 - Glovo and Uber Eats open their official login page in normal Chrome.
 - Enter passwords and verification codes only on the official website.
 - Return to ChatGPT and say, “I finished signing in.”

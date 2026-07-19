@@ -105,10 +105,25 @@ export async function getAuthToken({ required = false, fetchImpl = fetch } = {})
   return auth.token;
 }
 
-export async function authStatus() {
+export async function authStatus({ fetchImpl = fetch, refresh = true } = {}) {
   const auth = await loadAuth();
   if (!auth) return { authenticated: false, source: null };
-  return { ...decodeToken(auth.token), source: auth.source, capturedAt: auth.capturedAt ?? null };
+  let status = decodeToken(auth.token);
+  let refreshed = false;
+  if (status.expired && refresh && auth.refreshToken) {
+    const token = await refreshAuth(auth, fetchImpl).catch(() => null);
+    if (token) {
+      status = decodeToken(token);
+      refreshed = true;
+    }
+  }
+  return {
+    ...status,
+    authenticated: status.authenticated && status.expired !== true,
+    source: auth.source,
+    capturedAt: refreshed ? (await loadAuth()).capturedAt ?? null : auth.capturedAt ?? null,
+    refreshed,
+  };
 }
 
 export async function logout() {
@@ -325,7 +340,19 @@ export async function loginWithSystemBrowser({
   openUrl = openSystemUrl,
   getCurrentUrl = currentMacBrowserCallback,
   fetchImpl = fetch,
+  reuseExisting = true,
 } = {}) {
+  if (reuseExisting) {
+    const existing = await authStatus({ fetchImpl });
+    if (existing.authenticated) {
+      return {
+        ...existing,
+        opened: false,
+        reused: true,
+        next: "Already signed in; no browser login was needed.",
+      };
+    }
+  }
   const authorization = createAuthorizationRequest();
   try {
     openUrl(authorization.url.toString());

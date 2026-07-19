@@ -33,6 +33,38 @@ test("saved OAuth authentication uses an owner-only file", async () => {
   assert.equal(fileStatus.mode & 0o777, 0o600);
 });
 
+test("status refreshes an expired OAuth session before declaring login necessary", async () => {
+  const expired = fakeJwt({ sub: "refresh-user", tenant: ["es"], exp: Math.floor(Date.now() / 1000) - 60 });
+  const current = fakeJwt({ sub: "refresh-user", tenant: ["es"], exp: Math.floor(Date.now() / 1000) + 3600 });
+  await saveAuth(expired, { refreshToken: "saved-refresh" });
+  const status = await authStatus({
+    fetchImpl: async (input, options) => {
+      assert.equal(new URL(input).pathname, "/connect/token");
+      const form = new URLSearchParams(options.body);
+      assert.equal(form.get("grant_type"), "refresh_token");
+      assert.equal(form.get("refresh_token"), "saved-refresh");
+      return Response.json({ access_token: current, refresh_token: "rotated-refresh" });
+    },
+  });
+  assert.equal(status.authenticated, true);
+  assert.equal(status.expired, false);
+  assert.equal(status.refreshed, true);
+});
+
+test("system-browser login reuses a refreshable session without opening a browser", async () => {
+  const expired = fakeJwt({ sub: "reuse-user", tenant: ["es"], exp: Math.floor(Date.now() / 1000) - 60 });
+  const current = fakeJwt({ sub: "reuse-user", tenant: ["es"], exp: Math.floor(Date.now() / 1000) + 3600 });
+  await saveAuth(expired, { refreshToken: "reuse-refresh" });
+  const completed = await loginWithSystemBrowser({
+    openUrl: () => { throw new Error("browser must not open"); },
+    getCurrentUrl: async () => { throw new Error("browser must not be inspected"); },
+    fetchImpl: async () => Response.json({ access_token: current, refresh_token: "reuse-refresh" }),
+  });
+  assert.equal(completed.authenticated, true);
+  assert.equal(completed.reused, true);
+  assert.equal(completed.opened, false);
+});
+
 test("email OTP login completes authorization-code PKCE without a browser", async () => {
   const token = fakeJwt({ sub: "oauth-user", tenant: ["es"], exp: Math.floor(Date.now() / 1000) + 3600 });
   let state;
@@ -162,6 +194,7 @@ test("system browser login observes the callback and completes in one call", asy
   let authorizationUrl;
   let polls = 0;
   const completed = await loginWithSystemBrowser({
+    reuseExisting: false,
     pollIntervalMs: 1,
     openUrl: (url) => { authorizationUrl = new URL(url); },
     getCurrentUrl: async () => {

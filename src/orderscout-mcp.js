@@ -32,7 +32,7 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_justeat_auth_login",
-    description: "Open Just Eat's official OAuth page in the normal system browser and complete login automatically after the official callback. Never request a password, cookie, callback URL, or token in chat.",
+    description: "Reuse or refresh the saved Just Eat session when possible. Only if that fails, open Just Eat's official OAuth page in the normal system browser and complete login after the official callback. Never request a password, cookie, callback URL, or token in chat.",
     inputSchema: objectSchema(), annotations: remoteWrite, command: () => ["justeat", "auth", "work-login", "--agent"],
   },
   {
