@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { openSystemUrl } from "./auth.js";
 import { beginBrowserLogin, importChromeSession, loadBrowserSession, logoutBrowserSession } from "./browser-session.js";
 import {
-  createGlovoBasket, glovoAddresses, glovoBaskets, glovoCheckoutUrl, glovoMe, glovoMenu, quoteGlovoBasket, searchGlovo,
+  createGlovoBasket, glovoAddresses, glovoBaskets, glovoCheckoutUrl, glovoMe, glovoMenu, placeGlovoOrder, quoteGlovoBasket, searchGlovo,
 } from "./glovo.js";
 import { CliError, parseArgs, resolveLocation } from "./lib.js";
 import { errorEnvelope, exitCodeFor, writeOutput } from "./output.js";
@@ -15,7 +15,7 @@ import { PROVIDERS, configureAccounts, loadAccounts, parseProviderList, publicAc
 import {
   ingestOffers, loadSearch, recordProviderError, recordQuote, searchResults, startSearch,
 } from "./searches.js";
-import { runPideMcpServer } from "./pide-mcp.js";
+import { runOrderScoutMcpServer } from "./orderscout-mcp.js";
 import {
   createUberEatsBasket, placeUberEatsOrder, quoteUberEatsBasket, searchUberEats, uberEatsCarts, uberEatsMe, uberEatsMenu,
 } from "./ubereats.js";
@@ -24,25 +24,25 @@ const execFileAsync = promisify(execFile);
 const JUSTEAT_CLI = fileURLToPath(new URL("./cli.js", import.meta.url));
 const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 
-const HELP = `pide — compare Just Eat, Glovo, and Uber Eats in Spain
+const HELP = `orderscout — compare Just Eat, Glovo, and Uber Eats in Spain
 
 Usage:
-  pide context
-  pide auth login|complete|status|logout <provider> [--profile Default]
-  pide accounts status
-  pide accounts set --providers justeat,glovo,ubereats [--accounts JSON] [--memberships JSON]
-  pide accounts record <provider> --authenticated true [--membership true]
-  pide recommend <what you want> [--providers list] [--at location] [--objective cheapest|fastest|best|value]
-  pide search begin <what you want> [the same flags]
-  pide search ingest <search-id> <provider> --json '[normalized offers]'
-  pide search error <search-id> <provider> --message text
-  pide search results <search-id>
-  pide quote record <search-id> <offer-id> --json '{"subtotal":10,"fees":{"delivery":2},"total":12}'
-  pide basket prepare|create|checkout|open <search-id> <offer-id>
-  pide order place <search-id> <offer-id> [--confirm fingerprint]
-  pide offer open <search-id> <offer-id>
-  pide justeat <existing justeat command...>
-  pide mcp
+  orderscout context
+  orderscout auth login|complete|status|logout <provider> [--profile Default]
+  orderscout accounts status
+  orderscout accounts set --providers justeat,glovo,ubereats [--accounts JSON] [--memberships JSON]
+  orderscout accounts record <provider> --authenticated true [--membership true]
+  orderscout recommend <what you want> [--providers list] [--at location] [--objective cheapest|fastest|best|value]
+  orderscout search begin <what you want> [the same flags]
+  orderscout search ingest <search-id> <provider> --json '[normalized offers]'
+  orderscout search error <search-id> <provider> --message text
+  orderscout search results <search-id>
+  orderscout quote record <search-id> <offer-id> --json '{"subtotal":10,"fees":{"delivery":2},"total":12}'
+  orderscout basket prepare|create|checkout|open <search-id> <offer-id>
+  orderscout order place <search-id> <offer-id> [--confirm fingerprint]
+  orderscout offer open <search-id> <offer-id>
+  orderscout justeat <existing justeat command...>
+  orderscout mcp
 
 All three providers use direct HTTP adapters. Glovo and Uber Eats login opens the official site in native
 Chrome and imports only that provider's domain cookies after sign-in; Playwright is not used. Search, menu,
@@ -151,18 +151,18 @@ async function collectUberEats(searchId, intent, flags) {
   }
 }
 
-export async function runPide(argv) {
+export async function runOrderScout(argv) {
   const { positionals, flags } = parseArgs(argv);
   if (flags.agent) flags.compact = true;
   const [command, ...rest] = positionals;
   if (flags.version) return process.stdout.write(`${packageJson.version}\n`);
   if (!command || command === "help" || flags.help) return process.stdout.write(HELP);
 
-  if (command === "mcp") return runPideMcpServer();
+  if (command === "mcp") return runOrderScoutMcpServer();
   if (command === "context") {
     const accounts = publicAccountStatus(await loadAccounts());
     return writeOutput({
-      name: "Pide ES",
+      name: "OrderScout",
       country: "ES",
       providers: Object.values(PROVIDERS),
       accounts,
@@ -174,7 +174,7 @@ export async function runPide(argv) {
 
   if (command === "auth") {
     const [action, provider] = rest;
-    if (!provider || !PROVIDERS[provider]) throw new CliError("Use `pide auth login|complete|status|logout justeat|glovo|ubereats`");
+    if (!provider || !PROVIDERS[provider]) throw new CliError("Use `orderscout auth login|complete|status|logout justeat|glovo|ubereats`");
     if (provider === "justeat") {
       const legacyAction = action === "login" ? "work-login" : action;
       return writeOutput(await runLegacyJustEat(["auth", legacyAction, "--agent"]), flags);
@@ -203,7 +203,7 @@ export async function runPide(argv) {
       await recordProviderStatus(provider, { authenticated: false });
       return writeOutput(result, flags);
     }
-    throw new CliError("Use `pide auth login|complete|status|logout <provider>`");
+    throw new CliError("Use `orderscout auth login|complete|status|logout <provider>`");
   }
 
   if (command === "accounts") {
@@ -223,7 +223,7 @@ export async function runPide(argv) {
         membershipActive: booleanFlag(flags, "membership"),
       }), flags);
     }
-    throw new CliError("Use `pide accounts status|set|record`");
+    throw new CliError("Use `orderscout accounts status|set|record`");
   }
 
   if (command === "recommend" || command === "search") {
@@ -256,7 +256,7 @@ export async function runPide(argv) {
       return writeOutput(await recordProviderError(searchId, provider, flags.message ?? "Provider search failed"), flags);
     }
     if (action === "results" || action === "show") return writeOutput(await searchResults(args[0]), flags);
-    throw new CliError("Use `pide search begin|ingest|error|results`");
+    throw new CliError("Use `orderscout search begin|ingest|error|results`");
   }
 
   if (command === "quote" && rest[0] === "record") {
@@ -265,15 +265,19 @@ export async function runPide(argv) {
 
   if (command === "basket") {
     const [action, searchId, offerId] = rest;
-    if (!["prepare", "create", "checkout", "open"].includes(action)) throw new CliError("Use `pide basket prepare|create|checkout|open`");
+    if (!["prepare", "create", "checkout", "open"].includes(action)) throw new CliError("Use `orderscout basket prepare|create|checkout|open`");
     const search = await loadSearch(searchId);
     const offer = search.offers.find((entry) => entry.id === offerId);
     if (!offer) throw new CliError("Offer not found", "OFFER_NOT_FOUND");
     if (action === "open") {
+      if (offer.provider === "justeat") {
+        if (!offer.source?.planId) throw new CliError("Just Eat offer is missing its source plan", "SOURCE_PLAN_MISSING");
+        return writeOutput(await runLegacyJustEat(["order", "open", offer.source.planId, "--agent"]), flags);
+      }
       const url = offer.provider === "glovo" ? glovoCheckoutUrl(offer)
         : offer.provider === "ubereats" ? "https://www.ubereats.com/checkout?mod=checkout"
           : null;
-      if (!url) throw new CliError("Use `pide justeat order open` for a Just Eat browser handoff", "BASKET_HANDOFF_REQUIRED");
+      if (!url) throw new CliError("This provider has no basket handoff", "BASKET_HANDOFF_REQUIRED");
       await openSystemUrl(url);
       return writeOutput({ provider: offer.provider, opened: true, url, submitted: false }, flags);
     }
@@ -323,8 +327,12 @@ export async function runPide(argv) {
       return writeOutput(await placeUberEatsOrder(id, quoted.quote, { confirm: flags.confirm }), flags);
     }
     if (offer.provider === "glovo") {
-      const url = glovoCheckoutUrl(offer);
-      return writeOutput({ provider: "glovo", submitted: false, automatedPlacement: false, checkoutHandoffAvailable: true, url, warning: "Glovo's final purchase call is not exposed until its payment protocol can be verified safely. Use `pide basket open` for the official checkout." }, flags);
+      const baskets = await glovoBaskets();
+      const basket = baskets.baskets.find((entry) => String(entry.storeId) === String(offer.source?.storeId));
+      const basketId = basket?.basketId ?? basket?.id;
+      if (!basketId) throw new CliError("Create this Glovo basket first", "BASKET_REQUIRED");
+      const quoted = await quoteGlovoBasket(basketId);
+      return writeOutput(await placeGlovoOrder(offer, { basketId, ...quoted.quote }, { confirm: flags.confirm }), flags);
     }
     const source = offer.source;
     if (!source?.planId) throw new CliError("Just Eat offer is missing its source plan", "SOURCE_PLAN_MISSING");
@@ -347,7 +355,7 @@ export async function runPide(argv) {
       return writeOutput(await searchGlovo(intent, location, { raw: Boolean(flags.raw), limit: flags.limit }), flags);
     }
     if (action === "menu") return writeOutput(await glovoMenu(args[0]), flags);
-    throw new CliError("Use `pide glovo me|addresses|search|menu|baskets`");
+    throw new CliError("Use `orderscout glovo me|addresses|search|menu|baskets`");
   }
 
   if (command === "ubereats") {
@@ -356,7 +364,7 @@ export async function runPide(argv) {
     if (action === "carts") return writeOutput(await uberEatsCarts(), flags);
     if (action === "search") return writeOutput(await searchUberEats(args.join(" "), { raw: Boolean(flags.raw), limit: flags.limit }), flags);
     if (action === "menu") return writeOutput(await uberEatsMenu(args[0], { raw: Boolean(flags.raw) }), flags);
-    throw new CliError("Use `pide ubereats me|search|menu|carts`");
+    throw new CliError("Use `orderscout ubereats me|search|menu|carts`");
   }
 
   if (command === "offer" && rest[0] === "open") {
@@ -386,7 +394,7 @@ function isMainModule() {
 }
 
 if (isMainModule()) {
-  runPide(process.argv.slice(2)).catch((error) => {
+  runOrderScout(process.argv.slice(2)).catch((error) => {
     process.stderr.write(`${JSON.stringify(errorEnvelope(error))}\n`);
     process.exitCode = exitCodeFor(error);
   });

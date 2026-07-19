@@ -6,7 +6,7 @@ import test from "node:test";
 import { importChromeSession } from "../src/browser-session.js";
 
 test("native Chrome login imports provider cookies into an owner-only session", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "pide-auth-test-"));
+  const directory = await mkdtemp(join(tmpdir(), "orderscout-auth-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const cookiePath = join(directory, "Cookies");
   const sessionsDirectory = join(directory, "sessions");

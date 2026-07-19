@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createGlovoBasket, glovoInternals } from "../src/glovo.js";
+import { createGlovoBasket, glovoInternals, glovoOrderConfirmation, glovoSubmissionRequest, placeGlovoOrder } from "../src/glovo.js";
 
 test("Glovo browser cookie token is parsed without exposing other cookies", () => {
   const encoded = encodeURIComponent(JSON.stringify({ access: { accessToken: "a".repeat(40) } }));
@@ -36,3 +36,60 @@ test("Glovo basket prepare is a non-mutating direct API payload", async () => {
   assert.equal(prepared.payload.storeAddressId, 34);
 });
 
+test("Glovo checkout prefers the submit action returned by validation", () => {
+  const request = glovoSubmissionRequest("basket-1", {
+    actions: [{ type: "SUBMIT_ORDER", data: { method: "POST", path: "/v2/checkout/orders", body: { checkoutSessionId: "session-1", basketId: "basket-1" } } }],
+  });
+  assert.deepEqual(request, {
+    method: "POST",
+    path: "/v2/checkout/orders",
+    body: { checkoutSessionId: "session-1", basketId: "basket-1" },
+    source: "checkout-action",
+  });
+});
+
+test("Glovo final order is preview-first and fingerprint protected", async () => {
+  const offer = { source: { storeId: "12" } };
+  const quote = { basketId: "basket-1", total: 18.09, currency: "EUR" };
+  const confirmation = glovoOrderConfirmation(offer, quote);
+  const preview = await placeGlovoOrder(offer, quote);
+  assert.equal(preview.submitted, false);
+  assert.equal(preview.experimental, true);
+  assert.equal(preview.requiresConfirmation, confirmation.fingerprint);
+  await assert.rejects(() => placeGlovoOrder(offer, quote, { confirm: "wrong" }), { code: "CONFIRMATION_MISMATCH" });
+  await assert.rejects(() => placeGlovoOrder(offer, quote, { confirm: confirmation.fingerprint }), { code: "ORDER_PLACEMENT_DISABLED" });
+});
+
+test("Glovo confirmed checkout submits the validated action through the direct API", async (t) => {
+  const previousGate = process.env.ORDERSCOUT_ENABLE_ORDER_PLACEMENT;
+  const previousCookie = process.env.ORDERSCOUT_GLOVO_COOKIE;
+  t.after(() => {
+    if (previousGate === undefined) delete process.env.ORDERSCOUT_ENABLE_ORDER_PLACEMENT;
+    else process.env.ORDERSCOUT_ENABLE_ORDER_PLACEMENT = previousGate;
+    if (previousCookie === undefined) delete process.env.ORDERSCOUT_GLOVO_COOKIE;
+    else process.env.ORDERSCOUT_GLOVO_COOKIE = previousCookie;
+  });
+  process.env.ORDERSCOUT_ENABLE_ORDER_PLACEMENT = "1";
+  process.env.ORDERSCOUT_GLOVO_COOKIE = `glovo_auth_info=${encodeURIComponent(JSON.stringify({ accessToken: "a".repeat(40) }))}`;
+  const offer = { source: { storeId: "12" } };
+  const quote = {
+    basketId: "basket-1",
+    total: 18.09,
+    actions: [{ type: "SUBMIT_ORDER", data: { path: "/v2/checkout/orders", body: { basketId: "basket-1", checkoutSessionId: "session-1" } } }],
+  };
+  const confirmation = glovoOrderConfirmation(offer, quote);
+  let submitted;
+  const result = await placeGlovoOrder(offer, quote, {
+    confirm: confirmation.fingerprint,
+    fetchImpl: async (url, options) => {
+      submitted = { url: String(url), method: options.method, body: JSON.parse(options.body) };
+      return Response.json({ orderId: "synthetic-order" });
+    },
+  });
+  assert.equal(result.submitted, true);
+  assert.deepEqual(submitted, {
+    url: "https://api.glovoapp.com/v2/checkout/orders",
+    method: "POST",
+    body: { basketId: "basket-1", checkoutSessionId: "session-1" },
+  });
+});

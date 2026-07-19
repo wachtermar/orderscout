@@ -75,7 +75,7 @@ function headers(location = {}, token) {
 async function request(path, { method = "GET", body, location, auth = false, fetchImpl = fetch } = {}) {
   const session = await loadBrowserSession("glovo");
   const token = accessToken(session);
-  if (auth && !token) throw new CliError("Sign in with `pide auth login glovo` first", "AUTH_REQUIRED");
+  if (auth && !token) throw new CliError("Sign in with `orderscout auth login glovo` first", "AUTH_REQUIRED");
   const response = await fetchImpl(new URL(path, API), {
     method,
     headers: headers(location, token),
@@ -283,8 +283,106 @@ export function glovoCheckoutUrl(offer) {
 }
 
 export function glovoOrderConfirmation(offer, quote) {
-  const request = { provider: "glovo", storeId: offer.source?.storeId, basketId: quote?.basketId ?? quote?.id, total: quote?.total ?? quote?.basketPrice?.final?.major ?? null, currency: quote?.currency ?? "EUR" };
+  const basketId = quote?.basketId ?? quote?.id;
+  const submission = glovoSubmissionRequest(basketId, quote);
+  const request = {
+    provider: "glovo",
+    storeId: offer.source?.storeId,
+    basketId,
+    total: findAmount(quote, ["total", "totalAmount", "payableAmount", "finalPrice"]),
+    currency: quote?.currencyCode ?? quote?.currency ?? "EUR",
+    endpoint: submission.path,
+    method: submission.method,
+    requestBody: submission.body,
+    protocolSource: submission.source,
+  };
   return { ...request, fingerprint: createHash("sha256").update(JSON.stringify(request)).digest("hex").slice(0, 16) };
 }
 
-export const glovoInternals = { accessToken, offersFromSearch, nextFlightText, objectsOfType, headers };
+function findAmount(value, keys) {
+  if (!value || typeof value !== "object") return null;
+  for (const key of keys) {
+    if (value[key] !== undefined) {
+      const amount = numericText(value[key]?.major ?? value[key]?.amount ?? value[key]);
+      if (amount !== null) return amount;
+    }
+  }
+  for (const child of Object.values(value)) {
+    const amount = findAmount(child, keys);
+    if (amount !== null) return amount;
+  }
+  return null;
+}
+
+function findSubmitAction(value) {
+  if (!value || typeof value !== "object") return null;
+  if (Array.isArray(value)) {
+    for (const child of value) {
+      const action = findSubmitAction(child);
+      if (action) return action;
+    }
+    return null;
+  }
+  const kind = String(value.type ?? value.name ?? value.actionType ?? value.id ?? "");
+  const data = value.data ?? value;
+  const endpoint = data.path ?? data.url ?? data.endpoint ?? data.uri;
+  if (/(SUBMIT|CREATE|PLACE|CONFIRM).*(ORDER|CHECKOUT)|(ORDER|CHECKOUT).*(SUBMIT|CREATE|PLACE|CONFIRM)/i.test(kind) && endpoint) {
+    return {
+      method: String(data.method ?? "POST").toUpperCase(),
+      path: trustedApiPath(endpoint),
+      body: data.body ?? data.payload ?? data.requestBody ?? data.request ?? {},
+      source: "checkout-action",
+    };
+  }
+  for (const child of Object.values(value)) {
+    const action = findSubmitAction(child);
+    if (action) return action;
+  }
+  return null;
+}
+
+function trustedApiPath(value) {
+  const url = new URL(value, API);
+  if (url.origin !== API) throw new CliError("Glovo checkout returned an untrusted submission endpoint", "UNTRUSTED_CHECKOUT_ENDPOINT");
+  return `${url.pathname}${url.search}`;
+}
+
+export function glovoSubmissionRequest(basketId, quote) {
+  const observed = findSubmitAction(quote);
+  if (observed) return observed;
+  const checkoutSessionId = quote?.checkoutSessionId ?? quote?.checkoutSession?.id ?? quote?.id;
+  const configuredPath = process.env.ORDERSCOUT_GLOVO_ORDER_PATH ?? "/v1/authenticated/customers/orders";
+  return {
+    method: "POST",
+    path: trustedApiPath(configuredPath),
+    body: { basketId, ...(checkoutSessionId ? { checkoutSessionId } : {}) },
+    source: process.env.ORDERSCOUT_GLOVO_ORDER_PATH ? "environment-override" : "experimental-fallback",
+  };
+}
+
+export async function placeGlovoOrder(offer, quote, options = {}) {
+  const confirmation = glovoOrderConfirmation(offer, quote);
+  if (!options.confirm) {
+    return {
+      ...confirmation,
+      submitted: false,
+      experimental: true,
+      requiresConfirmation: confirmation.fingerprint,
+      warning: "Experimental Glovo final-submit protocol. Confirm the exact current order, total, address, and payment method before re-running with this fingerprint.",
+    };
+  }
+  if (options.confirm !== confirmation.fingerprint) throw new CliError("Confirmation fingerprint does not match the current Glovo checkout", "CONFIRMATION_MISMATCH");
+  if (process.env.ORDERSCOUT_ENABLE_ORDER_PLACEMENT !== "1") throw new CliError("Order placement is disabled; set ORDERSCOUT_ENABLE_ORDER_PLACEMENT=1 only after explicit approval", "ORDER_PLACEMENT_DISABLED");
+  const submission = glovoSubmissionRequest(confirmation.basketId, quote);
+  try {
+    const response = await request(submission.path, { method: submission.method, body: submission.body, auth: true, location: options.location, fetchImpl: options.fetchImpl });
+    return { provider: "glovo", submitted: true, experimental: true, response };
+  } catch (error) {
+    if (!error.details?.status || error.details.status >= 500) {
+      throw new CliError("The Glovo checkout outcome is unknown. Do not retry automatically; inspect active orders in Glovo.", "ORDER_STATUS_UNKNOWN", { basketId: confirmation.basketId });
+    }
+    throw error;
+  }
+}
+
+export const glovoInternals = { accessToken, offersFromSearch, nextFlightText, objectsOfType, headers, findSubmitAction, trustedApiPath };

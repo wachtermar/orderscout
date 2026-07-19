@@ -9,11 +9,11 @@ import test from "node:test";
 
 const execFileAsync = promisify(execFile);
 
-test("the npm-style pide symlink executes the CLI", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "pide-bin-test-"));
+test("the npm-style orderscout symlink executes the CLI", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "orderscout-bin-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const link = join(directory, "pide");
-  await symlink(fileURLToPath(new URL("../src/pide.js", import.meta.url)), link);
+  const link = join(directory, "orderscout");
+  await symlink(fileURLToPath(new URL("../src/orderscout.js", import.meta.url)), link);
 
   const { stdout } = await execFileAsync(link, ["--version"], { encoding: "utf8" });
   assert.match(stdout, /^\d+\.\d+\.\d+\n$/);

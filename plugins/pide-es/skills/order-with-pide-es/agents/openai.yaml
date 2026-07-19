@@ -1,4 +1,0 @@
-interface:
-  display_name: "Pide ES"
-  short_description: "Compare food delivery across Spain"
-  default_prompt: "Use $order-with-pide-es to find the best delivery option across my enabled Spanish providers."

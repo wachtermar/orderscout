@@ -27,10 +27,11 @@ export function parseIntent(text) {
   const budgetMatch = normalized.match(/(?:under|below|less than|max(?:imum)?|hasta|menos de|por debajo de)\s*(?:€|eur)?\s*(\d+(?:\.\d+)?)/)
     ?? normalized.match(/(?:€|eur)\s*(\d+(?:\.\d+)?)\s*(?:max)?/);
   const water = /\b(?:agua|water)\b/.test(normalized);
+  const meal = /\b(?:food|meal|dinner|lunch|breakfast|restaurant|pizza|burger|kebab|sushi|tacos?|comida|cena|almuerzo|desayuno|restaurante|hamburguesa|saludable|healthy|tasty|vegetarian|vegetariano|vegan|vegano|halal)\b/.test(normalized);
   return {
     text: String(text).trim(),
     normalized,
-    kind: water ? "water" : "meal",
+    kind: water ? "water" : meal ? "meal" : "product",
     targetLiters: water ? Number(volumeMatch?.[1] ?? 1.5) : null,
     healthy: /\b(?:healthy|healthier|saludable|sano|sana|light|ligero)\b/.test(normalized),
     tasty: /\b(?:tasty|delicious|rico|rica|sabroso|sabrosa|best rated|mejor valorado)\b/.test(normalized),
@@ -206,6 +207,46 @@ function mealCandidates(restaurant, menuData, menu, intent) {
   return candidates;
 }
 
+function productCandidates(restaurant, menuData, menu, intent) {
+  const ignored = new Set([
+    "find", "get", "buy", "order", "deliver", "delivery", "cheap", "cheapest", "fast", "fastest", "best", "rated",
+    "buscar", "comprar", "pedir", "entregar", "entrega", "barato", "barata", "mejor", "rapido", "rapida",
+    "under", "below", "hasta", "menos", "para", "with", "con", "from", "the", "and", "que", "mis", "apps",
+    "just", "eat", "glovo", "uber", "eats", "eur", "max",
+  ]);
+  const terms = intent.normalized.split(/[^a-z0-9áéíóúüñ]+/).filter((term) => term.length > 2 && !ignored.has(term) && !/^\d/.test(term));
+  const candidates = [];
+  for (const category of menu.categories) {
+    for (const item of category.items) {
+      const text = normalizedText(`${category.name} ${item.name} ${item.description ?? ""}`);
+      const matched = terms.filter((term) => text.includes(term));
+      if (terms.length && !matched.length) continue;
+      for (const variation of item.variations) {
+        const price = Number(variation.price);
+        if (!Number.isFinite(price) || (intent.budget !== null && price > intent.budget)) continue;
+        const merchantScore = tasteScore(restaurant);
+        const valueScore = Math.max(0, 25 - price);
+        candidates.push({
+          ...baseCandidate(restaurant, menuData, menu, category, item, variation),
+          quantity: 1,
+          itemTotal: price,
+          estimatedDeliveredTotal: null,
+          ranking: {
+            score: Math.round((merchantScore + valueScore) * 10) / 10,
+            tasteScore: merchantScore,
+            reasons: [
+              ...(matched.length ? [`matched: ${matched.slice(0, 4).join(", ")}`] : []),
+              restaurant.rating?.starRating ? `merchant rating ${restaurant.rating.starRating}/5` : "merchant is unrated",
+              `item price €${price.toFixed(2)} before delivery and service fees`,
+            ],
+          },
+        });
+      }
+    }
+  }
+  return candidates;
+}
+
 async function mapConcurrent(values, concurrency, mapper) {
   const result = new Array(values.length);
   let nextIndex = 0;
@@ -230,13 +271,13 @@ export async function recommend(location, text, options = {}) {
   if (!Number.isInteger(resultLimit) || resultLimit < 1 || resultLimit > 100) {
     throw new CliError("--limit must be an integer between 1 and 100");
   }
-  const vertical = options.vertical ?? (intent.kind === "water" ? "groceries" : "restaurants");
+  const vertical = options.vertical ?? (intent.kind === "meal" ? "restaurants" : "all");
   const discovery = await discoverRestaurants(location, {
     serviceType: "delivery",
     vertical,
     token: options.token,
   }, options.fetchImpl);
-  const storeLimit = Number(options.stores ?? (intent.kind === "water" ? 20 : 12));
+  const storeLimit = Number(options.stores ?? (intent.kind === "meal" ? 12 : 20));
   if (!Number.isInteger(storeLimit) || storeLimit < 1 || storeLimit > 50) {
     throw new CliError("--stores must be an integer between 1 and 50");
   }
@@ -253,7 +294,9 @@ export async function recommend(location, text, options = {}) {
       restaurant,
       candidates: intent.kind === "water"
         ? waterCandidates(restaurant, menuData, menu, intent)
-        : mealCandidates(restaurant, menuData, menu, intent),
+        : intent.kind === "meal"
+          ? mealCandidates(restaurant, menuData, menu, intent)
+          : productCandidates(restaurant, menuData, menu, intent),
     };
   });
   const uniqueCandidates = new Map();

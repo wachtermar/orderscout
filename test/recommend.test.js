@@ -50,6 +50,11 @@ test("parseIntent extracts quantity, budget, health, taste, and dietary needs", 
   assert.equal(meal.budget, 18);
 });
 
+test("parseIntent routes arbitrary platform products beyond restaurants", () => {
+  assert.equal(parseIntent("find AA batteries under €12").kind, "product");
+  assert.equal(parseIntent("healthy dinner").kind, "meal");
+});
+
 function menuData(items, name = "Test Store") {
   return {
     slug: "test-store",
@@ -124,4 +129,25 @@ test("recommend explains health and taste heuristics", async () => {
   assert.equal(result.candidates[0].item.id, "healthy");
   assert.ok(result.candidates[0].ranking.healthScore > 0);
   assert.ok(result.candidates[0].ranking.reasons.some((reason) => reason.includes("restaurant rating")));
+});
+
+test("recommend finds arbitrary non-food products across all verticals", async () => {
+  let requestedUrl;
+  const fetchImpl = async (url) => {
+    requestedUrl = new URL(url);
+    return Response.json({ restaurants: [restaurant()], metaData: {} });
+  };
+  const result = await recommend(
+    { latitude: 36.5, longitude: -4.8, postcode: "29603" },
+    "find AA batteries under €12",
+    {
+      fetchImpl,
+      fetchMenuImpl: async () => menuData([
+        { Id: "batteries", Name: "AA Batteries 8 pack", Variations: [{ Id: "batteries", BasePrice: 7.5 }] },
+        { Id: "snack", Name: "Chocolate bar", Variations: [{ Id: "snack", BasePrice: 2 }] },
+      ]),
+    },
+  );
+  assert.equal(requestedUrl.searchParams.get("vertical"), "all");
+  assert.deepEqual(result.candidates.map((candidate) => candidate.item.id), ["batteries"]);
 });

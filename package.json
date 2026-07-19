@@ -1,5 +1,5 @@
 {
-  "name": "pide-es-cli",
+  "name": "orderscout-cli",
   "version": "0.1.0",
   "description": "Compare Just Eat, Glovo, and Uber Eats in Spain from one agent-friendly CLI",
   "keywords": [
@@ -14,11 +14,11 @@
   "author": "Marcel Wachter",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/wachtermar/pide-es.git"
+    "url": "git+https://github.com/wachtermar/orderscout.git"
   },
-  "homepage": "https://github.com/wachtermar/pide-es#readme",
+  "homepage": "https://github.com/wachtermar/orderscout#readme",
   "bugs": {
-    "url": "https://github.com/wachtermar/pide-es/issues"
+    "url": "https://github.com/wachtermar/orderscout/issues"
   },
   "type": "module",
   "files": [
@@ -29,13 +29,14 @@
     "THIRD_PARTY_NOTICES.md"
   ],
   "bin": {
-    "pide": "./src/pide.js",
+    "orderscout": "./src/orderscout.js",
+    "pide": "./src/orderscout.js",
     "justeat": "./src/cli.js"
   },
   "scripts": {
     "test": "node --test",
     "test:coverage": "node --experimental-test-coverage --test",
-    "check": "node --check src/pide.js && node --check src/pide-mcp.js && node --check src/browser-session.js && node --check src/glovo.js && node --check src/ubereats.js && node --check src/providers.js && node --check src/ranking.js && node --check src/cli.js && node --check src/lib.js && node --check src/auth.js && node --check src/doctor.js && node --check src/output.js && node --check src/recommend.js && node --check src/order.js && node --check src/mcp.js && node --test",
+    "check": "node --check src/orderscout.js && node --check src/orderscout-mcp.js && node --check src/browser-session.js && node --check src/glovo.js && node --check src/ubereats.js && node --check src/providers.js && node --check src/ranking.js && node --check src/cli.js && node --check src/lib.js && node --check src/auth.js && node --check src/doctor.js && node --check src/output.js && node --check src/recommend.js && node --check src/order.js && node --check src/mcp.js && node --test",
     "pack:check": "npm pack --dry-run"
   },
   "dependencies": {

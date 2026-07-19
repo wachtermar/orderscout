@@ -30,9 +30,12 @@ export const PROVIDERS = Object.freeze({
 
 export const PROVIDER_IDS = Object.freeze(Object.keys(PROVIDERS));
 
-const CONFIG_DIRECTORY = process.env.PIDE_CONFIG_DIR
-  ?? join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "pide-es-cli");
+const CONFIG_ROOT = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config");
+const LEGACY_CONFIG_DIRECTORY = join(CONFIG_ROOT, "pide-es-cli");
+const CONFIG_DIRECTORY = process.env.ORDERSCOUT_CONFIG_DIR ?? process.env.PIDE_CONFIG_DIR
+  ?? join(CONFIG_ROOT, "orderscout-cli");
 const ACCOUNTS_FILE = join(CONFIG_DIRECTORY, "accounts.json");
+const LEGACY_ACCOUNTS_FILE = join(LEGACY_CONFIG_DIRECTORY, "accounts.json");
 const SEARCHES_DIRECTORY = join(CONFIG_DIRECTORY, "searches");
 
 const defaultAccount = (provider) => ({
@@ -65,7 +68,13 @@ export async function loadAccounts() {
     stored = JSON.parse(await readFile(ACCOUNTS_FILE, "utf8"));
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
-    return defaultAccounts();
+    try {
+      stored = JSON.parse(await readFile(LEGACY_ACCOUNTS_FILE, "utf8"));
+      await atomicPrivateWrite(ACCOUNTS_FILE, stored);
+    } catch (legacyError) {
+      if (legacyError.code !== "ENOENT") throw legacyError;
+      return defaultAccounts();
+    }
   }
   const defaults = defaultAccounts();
   for (const id of PROVIDER_IDS) {
@@ -155,5 +164,5 @@ function cryptoRandom() {
   return `${Math.random()}:${process.hrtime.bigint()}`;
 }
 
-export const providerPaths = { configDirectory: CONFIG_DIRECTORY, accountsFile: ACCOUNTS_FILE, searchesDirectory: SEARCHES_DIRECTORY };
+export const providerPaths = { configDirectory: CONFIG_DIRECTORY, legacyConfigDirectory: LEGACY_CONFIG_DIRECTORY, accountsFile: ACCOUNTS_FILE, searchesDirectory: SEARCHES_DIRECTORY };
 export { atomicPrivateWrite };

@@ -1,0 +1,33 @@
+{
+  "name": "orderscout",
+  "version": "0.1.0",
+  "description": "Find and compare anything deliverable through Just Eat, Glovo, and Uber Eats in Spain, then prepare or safely place the selected order.",
+  "author": {
+    "name": "Marcel Wachter",
+    "email": "marcel.wachter@gmail.com",
+    "url": "https://github.com/wachtermar"
+  },
+  "homepage": "https://github.com/wachtermar/orderscout#readme",
+  "repository": "https://github.com/wachtermar/orderscout",
+  "license": "MIT",
+  "keywords": ["delivery", "food", "groceries", "pharmacy", "spain", "just-eat", "glovo", "uber-eats", "comparison"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "OrderScout",
+    "shortDescription": "Compare anything across delivery apps",
+    "longDescription": "Search enabled Just Eat, Glovo, and Uber Eats accounts for restaurant meals, groceries, pharmacy products, convenience items, and other available products; compare totals, memberships, ETA, ratings, and quantity; then prepare or safely place the selected order.",
+    "developerName": "Marcel Wachter",
+    "category": "Lifestyle",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://github.com/wachtermar/orderscout",
+    "defaultPrompt": [
+      "Find the best-rated healthy dinner under €25 across my delivery apps. Do not order.",
+      "Find the cheapest delivered groceries on my list across Just Eat, Glovo, and Uber Eats.",
+      "Find a pharmacy or convenience store that can deliver the product I need fastest.",
+      "I only use Just Eat and Uber Eats, and I have Uber One. Save that preference.",
+      "Prepare the best option in my basket, but stop before ordering."
+    ],
+    "brandColor": "#E54B4B"
+  },
+  "mcpServers": "./.mcp.json"
+}

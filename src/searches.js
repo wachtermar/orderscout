@@ -11,7 +11,7 @@ import { parseIntent, parsePackVolume } from "./recommend.js";
 const searchPath = (id) => join(providerPaths.searchesDirectory, `${validateId(id)}.json`);
 
 function validateId(id) {
-  if (!/^[a-f0-9]{24}$/.test(String(id ?? ""))) throw new CliError("Invalid Pide search ID", "INVALID_SEARCH_ID");
+  if (!/^[a-f0-9]{24}$/.test(String(id ?? ""))) throw new CliError("Invalid OrderScout search ID", "INVALID_SEARCH_ID");
   return id;
 }
 
@@ -46,7 +46,7 @@ export async function startSearch(intent, options = {}) {
 export async function loadSearch(id) {
   try { return JSON.parse(await readFile(searchPath(id), "utf8")); }
   catch (error) {
-    if (error.code === "ENOENT") throw new CliError("Pide search not found", "SEARCH_NOT_FOUND");
+    if (error.code === "ENOENT") throw new CliError("OrderScout search not found", "SEARCH_NOT_FOUND");
     throw error;
   }
 }

@@ -1,14 +1,14 @@
 {
-  "name": "pide-es-marketplace",
+  "name": "orderscout-marketplace",
   "interface": {
-    "displayName": "Pide ES"
+    "displayName": "OrderScout"
   },
   "plugins": [
     {
-      "name": "pide-es",
+      "name": "orderscout",
       "source": {
         "source": "local",
-        "path": "./plugins/pide-es"
+        "path": "./plugins/orderscout"
       },
       "policy": {
         "installation": "AVAILABLE",

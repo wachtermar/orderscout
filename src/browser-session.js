@@ -6,6 +6,7 @@ import { CliError } from "./lib.js";
 import { atomicPrivateWrite, providerPaths } from "./providers.js";
 
 const SESSIONS_DIRECTORY = join(providerPaths.configDirectory, "sessions");
+const LEGACY_SESSIONS_DIRECTORY = join(providerPaths.legacyConfigDirectory, "sessions");
 const LOGIN_URLS = Object.freeze({
   glovo: "https://glovoapp.com/es/login",
   ubereats: "https://www.ubereats.com/es",
@@ -40,7 +41,7 @@ export function beginBrowserLogin(provider) {
     opened: true,
     url,
     next: `Sign in on the official ${provider === "glovo" ? "Glovo" : "Uber Eats"} page in Chrome, select your delivery address, then ask the agent to finish ${provider} login.`,
-    security: "Pide imports only cookies valid for the provider domain. It never imports browsing history or cookies for other sites.",
+    security: "OrderScout imports only cookies valid for the provider domain. It never imports browsing history or cookies for other sites.",
   };
 }
 
@@ -84,7 +85,7 @@ function cookieHeader(cookies) {
 
 export async function importChromeSession(provider, { profile = "Default", cookiePath, timeout = 30_000, cookieReader, sessionsDirectory = SESSIONS_DIRECTORY } = {}) {
   const source = await cookieFileFrom(cookiePath || profile);
-  const temporary = await mkdtemp(join(tmpdir(), "pide-cookies-"));
+  const temporary = await mkdtemp(join(tmpdir(), "orderscout-cookies-"));
   try {
     await copyFile(source, join(temporary, "Cookies"));
     const read = cookieReader ?? (async (url, directory) => {
@@ -116,26 +117,40 @@ export async function importChromeSession(provider, { profile = "Default", cooki
 }
 
 export async function loadBrowserSession(provider) {
-  const environment = process.env[`PIDE_${provider.toUpperCase()}_COOKIE`];
+  const environment = process.env[`ORDERSCOUT_${provider.toUpperCase()}_COOKIE`] ?? process.env[`PIDE_${provider.toUpperCase()}_COOKIE`];
   if (environment) return { version: 1, provider, cookieHeader: environment, source: "environment" };
   try {
     const stored = JSON.parse(await readFile(sessionPath(provider), "utf8"));
     if (!stored.cookieHeader) throw new Error("missing cookie header");
     return stored;
   } catch (error) {
-    if (error.code === "ENOENT") return null;
+    if (error.code === "ENOENT") {
+      try {
+        const stored = JSON.parse(await readFile(sessionPath(provider, LEGACY_SESSIONS_DIRECTORY), "utf8"));
+        if (!stored.cookieHeader) throw new Error("missing cookie header");
+        await mkdir(SESSIONS_DIRECTORY, { recursive: true, mode: 0o700 });
+        await atomicPrivateWrite(sessionPath(provider), stored);
+        return { ...stored, migratedFrom: "pide-es-cli" };
+      } catch (legacyError) {
+        if (legacyError.code === "ENOENT") return null;
+        throw new CliError(`Saved ${provider} session is unreadable; sign in again`, "INVALID_AUTH");
+      }
+    }
     throw new CliError(`Saved ${provider} session is unreadable; sign in again`, "INVALID_AUTH");
   }
 }
 
 export async function logoutBrowserSession(provider) {
-  try {
-    await unlink(sessionPath(provider));
-    return { provider, authenticated: Boolean(process.env[`PIDE_${provider.toUpperCase()}_COOKIE`]), removed: true };
-  } catch (error) {
-    if (error.code === "ENOENT") return { provider, authenticated: false, removed: false };
-    throw error;
-  }
+  const remove = async (file) => {
+    try { await unlink(file); return true; }
+    catch (error) { if (error.code === "ENOENT") return false; throw error; }
+  };
+  const removed = (await Promise.all([
+    remove(sessionPath(provider)),
+    remove(sessionPath(provider, LEGACY_SESSIONS_DIRECTORY)),
+  ])).some(Boolean);
+  const authenticated = Boolean(process.env[`ORDERSCOUT_${provider.toUpperCase()}_COOKIE`] ?? process.env[`PIDE_${provider.toUpperCase()}_COOKIE`]);
+  return { provider, authenticated, removed };
 }
 
 export const browserSessionPaths = { sessionsDirectory: SESSIONS_DIRECTORY, sessionPath };

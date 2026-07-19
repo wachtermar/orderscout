@@ -19,7 +19,7 @@ function apiHeaders(cookieHeader) {
 
 async function request(operation, body = {}, { auth = false, fetchImpl = fetch } = {}) {
   const session = await loadBrowserSession("ubereats");
-  if (auth && !session) throw new CliError("Sign in with `pide auth login ubereats` first", "AUTH_REQUIRED");
+  if (auth && !session) throw new CliError("Sign in with `orderscout auth login ubereats` first", "AUTH_REQUIRED");
   const response = await fetchImpl(`${BASE}/_p/api/${operation}`, {
     method: "POST",
     headers: apiHeaders(session?.cookieHeader),
@@ -225,7 +225,7 @@ export async function placeUberEatsOrder(draftOrderUuid, quote, options = {}) {
   const confirmation = uberEatsOrderConfirmation(draftOrderUuid, quote);
   if (!options.confirm) return { ...confirmation, submitted: false, requiresConfirmation: confirmation.fingerprint, warning: "Final purchase boundary. Confirm the current exact total and payment method before re-running with this fingerprint." };
   if (options.confirm !== confirmation.fingerprint) throw new CliError("Confirmation fingerprint does not match the current checkout", "CONFIRMATION_MISMATCH");
-  if (process.env.PIDE_ENABLE_ORDER_PLACEMENT !== "1") throw new CliError("Order placement is disabled; set PIDE_ENABLE_ORDER_PLACEMENT=1 only after explicit approval", "ORDER_PLACEMENT_DISABLED");
+  if (process.env.ORDERSCOUT_ENABLE_ORDER_PLACEMENT !== "1") throw new CliError("Order placement is disabled; set ORDERSCOUT_ENABLE_ORDER_PLACEMENT=1 only after explicit approval", "ORDER_PLACEMENT_DISABLED");
   try {
     const response = await request("checkoutOrdersByDraftOrdersV1", confirmation.requestBody, { ...options, auth: true });
     return { submitted: true, response };
