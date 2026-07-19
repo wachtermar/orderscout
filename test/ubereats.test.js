@@ -99,6 +99,50 @@ test("Uber Eats basket prepare preserves distinct meal lines", async () => {
   ]);
 });
 
+test("Uber Eats basket prepare ignores optional-only customization groups", async () => {
+  const prepared = await createUberEatsBasket({
+    item: { name: "Açaí smoothie", unitPrice: 8.4 }, quantity: 1,
+    source: { storeUuid: "store-1", itemUuid: "smoothie", rawPrice: 840, requiresCustomizations: true },
+  }, {
+    prepareOnly: true,
+    cookieHeader: "sid=test",
+    fetchImpl: async () => Response.json({ data: { customizationsList: [
+      { title: "Extras", minPermitted: 0, options: [{ title: "Extra fruit", price: 100 }] },
+    ] } }),
+  });
+  assert.deepEqual(prepared.payload.shoppingCartItems[0].customizations, {});
+});
+
+test("Uber Eats basket prepare reports genuinely required customization groups", async () => {
+  await assert.rejects(() => createUberEatsBasket({
+    item: { name: "Breakfast bowl", unitPrice: 10 }, quantity: 1,
+    source: { storeUuid: "store-1", itemUuid: "bowl", rawPrice: 1000, requiresCustomizations: true },
+  }, {
+    prepareOnly: true,
+    cookieHeader: "sid=test",
+    fetchImpl: async () => Response.json({ data: { customizationsList: [
+      { title: "Choose a base", minPermitted: 1, options: [{ title: "Yogurt", price: 0 }] },
+    ] } }),
+  }), { code: "MODIFIERS_REQUIRED" });
+});
+
+test("Uber Eats checkout schedule hours reject an unavailable requested time", () => {
+  const quote = { validationErrors: [{
+    type: "STORE_UNAVAILABLE_BUT_SCHEDULABLE",
+    alert: { primaryButton: { params: { scheduleTimePickerParams: {
+      orderForLaterInfo: { isSchedulable: true },
+      deliveryHoursInfos: [{ date: "2026-07-21", openHours: [{ startTime: 660, endTime: 1440, durationOffset: 60 }] }],
+    } } } },
+  }] };
+  assert.throws(
+    () => uberEatsInternals.uberEatsScheduleAvailability(quote, "2026-07-21T08:00:00.000Z", "Europe/Madrid"),
+    { code: "SCHEDULE_UNAVAILABLE" },
+  );
+  const available = uberEatsInternals.uberEatsScheduleAvailability(quote, "2026-07-21T09:00:00.000Z", "Europe/Madrid");
+  assert.equal(available.status, "available_unconfigured");
+  assert.equal(available.selectedWindow.startMinute, 660);
+});
+
 test("Uber Eats quote uses the current official checkout payload and normalizes totals", async () => {
   let requestBody;
   const result = await quoteUberEatsBasket("draft-1", {

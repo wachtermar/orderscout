@@ -40,6 +40,7 @@ import {
   createBasket,
   createBrowserHandoff,
   getCheckout,
+  getAvailableFulfilmentTimes,
   loadPlan,
   normalizeCheckout,
   optimizeWaterBasket,
@@ -47,6 +48,7 @@ import {
   placeOrder,
   savePlan,
   saveOptimization,
+  selectFulfilmentWindow,
 } from "./order.js";
 import { runMcpServer } from "./mcp.js";
 
@@ -359,19 +361,23 @@ async function run(argv) {
         postcode: savedAddress.postcode ?? resolved.postcode,
         city: savedAddress.city ?? resolved.city,
       } : savedAddress;
-      const patch = buildCheckoutPatch(profile, address, { scheduled: flags.scheduled });
+      const scheduledWindow = flags.scheduled
+        ? selectFulfilmentWindow(await getAvailableFulfilmentTimes(await loadPlan(planId), { token }), flags.scheduled)
+        : null;
+      const patch = buildCheckoutPatch(profile, address, { scheduled: scheduledWindow });
       if (!flags.apply) {
         writeOutput({
           applied: false,
           planId,
           addressIndex,
+          selectedWindow: scheduledWindow,
           patch,
           next: `justeat order configure ${planId} --address-index ${addressIndex} --apply`,
         }, flags);
         return;
       }
       const response = await patchCheckout(await loadPlan(planId), patch, { token });
-      writeOutput({ applied: true, planId, response, next: `justeat order quote ${planId}` }, flags);
+      writeOutput({ applied: true, planId, selectedWindow: scheduledWindow, response, next: `justeat order quote ${planId}` }, flags);
       return;
     }
     if (action === "patch") {

@@ -60,9 +60,11 @@ Glovo and Uber Eats read operations make one safe automatic attempt to refresh a
 
 Search-card prices are estimates. OrderScout only calls a result the exact cheapest after obtaining a current checkout quote for the best suitable offer from every provider that returned a match. Checkout review records the normalized subtotal, every available fee, applied promotions or membership savings, and exact total back into the comparison; exact totals over a hard budget are disqualified.
 
+Scheduled requests use the local Spain timezone and preserve the requested instant through search, basket creation, and checkout. A provider cannot win until both its exact delivered total and the requested delivery window are verified. If a provider cannot configure that slot, OrderScout tries its next suitable result and otherwise reports the comparison as provisional—never as a confirmed winner.
+
 Provider-listed deals are retained: struck-through item prices and savings, percentage discounts, 2-for-1 listings, free delivery, merchant offers, and membership eligibility. Listed deals influence provisional value ranking, while only savings actually shown by checkout affect an exact comparison.
 
-Product matching is general. Quantity-aware helpers add extra understanding where useful—for example bottle sizes, multipacks, total litres, still versus sparkling, and price per litre for water. Multi-person meal results contain explicit distinct dish lines, or one item explicitly sold for sharing; OrderScout does not multiply one ordinary dish by the party size. “Healthy” and “tasty” remain transparent ranking signals, not medical or nutritional claims.
+Product matching is general. Quantity-aware helpers add extra understanding where useful—for example bottle sizes, multipacks, total litres, still versus sparkling, and price per litre for water. Multi-person meal results contain explicit distinct dish lines, or one item explicitly sold for sharing; OrderScout does not multiply one ordinary dish by the party size. Breakfast searches require prepared breakfast dishes rather than raw egg packs or a keyword found in an unrelated product. “Healthy” and “tasty” remain transparent ranking signals, not medical or nutritional claims.
 
 ## Will it accidentally order?
 

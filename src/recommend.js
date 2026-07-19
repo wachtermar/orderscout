@@ -4,6 +4,8 @@ const HEALTHY_TERMS = [
   "ensalada", "salad", "poke", "bowl", "plancha", "grilled", "verdura", "vegetable",
   "pollo", "chicken", "pavo", "turkey", "salmón", "salmon", "atún", "tuna", "quinoa",
   "integral", "healthy", "saludable", "sana", "vegan", "vegano", "vegetariano",
+  "fruta", "fruit", "huevo", "egg", "yogur", "yogurt", "avena", "oat", "granola",
+  "aguacate", "avocado", "tostada", "toast", "açaí", "acai", "chia",
 ];
 const INDULGENT_TERMS = [
   "frito", "fried", "burger", "hamburgues", "pizza", "donut", "tarta", "cake", "helado",
@@ -11,7 +13,7 @@ const INDULGENT_TERMS = [
   "breaded", "battered", "croqueta", "crispy", "creamy", "chips",
 ];
 const STRONGLY_INDULGENT_TERMS = ["frito", "fried", "empanado", "breaded", "battered", "croqueta", "burger", "hamburgues", "pizza", "donut", "cake", "chips"];
-const HEALTHY_ANCHOR_TERMS = ["ensalada", "salad", "poke", "bowl", "plancha", "grilled", "verdura", "vegetable", "quinoa", "integral", "healthy", "saludable", "vegan", "vegano", "vegetar"];
+const HEALTHY_ANCHOR_TERMS = ["ensalada", "salad", "poke", "bowl", "plancha", "grilled", "verdura", "vegetable", "quinoa", "integral", "healthy", "saludable", "vegan", "vegano", "vegetar", "fruta", "fruit", "huevo", "egg", "yogur", "avena", "oat", "granola", "aguacate", "avocado", "tostada", "toast", "acai", "chia"];
 const DIETARY = {
   vegan: ["vegan", "vegano", "vegana"],
   vegetarian: ["vegetarian", "vegetariano", "vegetariana"],
@@ -24,7 +26,90 @@ function normalizedText(value) {
   return String(value ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
 
-export function parseIntent(text) {
+export function isPreparedBreakfastItem(value, context = "") {
+  const text = normalizedText(value);
+  const contextualText = `${text} ${normalizedText(context)}`;
+  const packagedIngredient = /\b(pulpa|puree?|congelad[oa]?|frozen)\b/.test(text)
+    && /\b(pack|paquete|\d+(?:[.,]\d+)?\s*(?:g|kg))\b/.test(text)
+    && !/\b(bowl|vaso|smoothie)\b/.test(text);
+  if (packagedIngredient) return false;
+  const strongBreakfast = /\b(desayuno|breakfast|brunch|tostadas?|toast|avena|oatmeal|porridge|granola|yogur|yogurt|acai|bagel|pancakes?|croissants?)\b/.test(text);
+  const breakfastBowl = /\bbowl\b/.test(text)
+    && /\b(acai|avena|oats?|granola|yogur|yogurt|fruta|fruit|chia)\b/.test(text);
+  const preparedFruit = /\b(macedonia|fruit salad|ensalada de fruta|fruta cortada|cut fruit)\b/.test(text);
+  const egg = /\b(huevos?|eggs?)\b/.test(text);
+  const preparedEgg = egg
+    && /\b(revueltos?|scrambled|tortilla|omelette?|benedict|benedictinos?|poche|poached|fritos?|fried|shakshuka)\b/.test(text);
+  const rawOrNonFoodEgg = /\b(pack|paquete|docena|unidades?|uds?|gallina|camperos?|ecologicos?|frescos?|juego|playmobil|isbn|ean|pasta|tagliatelle|tallarines?)\b/.test(text);
+  const nonBreakfastEggContext = /\b(chino|chinese|wok|sushi|thai|tandoori|kebab|gambas?|prawns?|cangrejo|crab)\b/.test(contextualText);
+  return strongBreakfast || breakfastBowl || preparedFruit
+    || (preparedEgg && !rawOrNonFoodEgg && !nonBreakfastEggContext);
+}
+
+export function isHealthyBreakfastItem(value) {
+  const text = normalizedText(value);
+  const positive = /\b(integral|wholegrain|aguacate|avocado|tomate|tomato|semillas?|seeds?|fruta|fruit|acai|avena|oats?|oatmeal|porridge|granola|yogur|yogurt|chia|huevos?|eggs?|tortilla|omelette?|smoothie)\b/.test(text);
+  const indulgent = /\b(frito|fried|bacon|chocolate|donut|cake|tarta|croissant|mantequilla|butter|mermelada|jam)\b/.test(text);
+  return positive && !indulgent;
+}
+
+function zonedParts(date, timeZone) {
+  return Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+  }).formatToParts(date).filter((part) => part.type !== "literal").map((part) => [part.type, Number(part.value)]));
+}
+
+function zonedDate(year, month, day, hour, minute, timeZone) {
+  const target = Date.UTC(year, month - 1, day, hour, minute, 0);
+  let instant = target;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const observed = zonedParts(new Date(instant), timeZone);
+    const observedUtc = Date.UTC(observed.year, observed.month - 1, observed.day, observed.hour, observed.minute, observed.second);
+    instant += target - observedUtc;
+  }
+  return new Date(instant);
+}
+
+const MONTHS = {
+  january: 1, enero: 1, february: 2, febrero: 2, march: 3, marzo: 3, april: 4, abril: 4,
+  may: 5, mayo: 5, june: 6, junio: 6, july: 7, julio: 7, august: 8, agosto: 8,
+  september: 9, septiembre: 9, october: 10, octubre: 10, november: 11, noviembre: 11,
+  december: 12, diciembre: 12,
+};
+
+function scheduledInstant(normalized, options = {}) {
+  const timeZone = options.timeZone ?? "Europe/Madrid";
+  const now = options.now instanceof Date ? options.now : new Date(options.now ?? Date.now());
+  const explicitDate = normalized.match(/\b(\d{1,2})\s+(january|enero|february|febrero|march|marzo|april|abril|may|mayo|june|junio|july|julio|august|agosto|september|septiembre|october|octubre|november|noviembre|december|diciembre)(?:\s+(\d{4}))?\b/);
+  const isoDate = normalized.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
+  const relative = /\b(?:tomorrow|manana)\b/.test(normalized) ? 1 : /\b(?:today|hoy|tonight)\b/.test(normalized) ? 0 : null;
+  const clock = normalized.match(/\b(?:at|a\s+las?|sobre)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/)
+    ?? normalized.match(/\b(\d{1,2}):(\d{2})\s*(am|pm)?\b/);
+  if (!clock || (!explicitDate && !isoDate && relative === null)) return null;
+  let hour = Number(clock[1]);
+  const minute = Number(clock[2] ?? 0);
+  const meridiem = clock[3];
+  if (meridiem === "pm" && hour < 12) hour += 12;
+  if (meridiem === "am" && hour === 12) hour = 0;
+  if (hour > 23 || minute > 59) return null;
+  let year; let month; let day;
+  if (isoDate) [, year, month, day] = isoDate.map(Number);
+  else if (explicitDate) {
+    day = Number(explicitDate[1]); month = MONTHS[explicitDate[2]];
+    year = Number(explicitDate[3] ?? zonedParts(now, timeZone).year);
+  } else {
+    const local = zonedParts(now, timeZone);
+    const noon = zonedDate(local.year, local.month, local.day, 12, 0, timeZone);
+    noon.setUTCDate(noon.getUTCDate() + relative);
+    const target = zonedParts(noon, timeZone);
+    ({ year, month, day } = target);
+  }
+  const result = zonedDate(Number(year), Number(month), Number(day), hour, minute, timeZone);
+  return Number.isNaN(result.getTime()) ? null : result.toISOString();
+}
+
+export function parseIntent(text, options = {}) {
   const normalized = normalizedText(text).replace(/,/g, ".");
   const volumeMatch = normalized.match(/(\d+(?:\.\d+)?)\s*(?:l|litro|litros|litre|litres)\b/);
   const budgetMatch = normalized.match(/(?:under|below|less than|max(?:imum)?|hasta|menos de|por debajo de)\s*(?:€|eur)?\s*(\d+(?:\.\d+)?)/)
@@ -35,6 +120,10 @@ export function parseIntent(text) {
     ?? normalized.match(/\b(\d+)\s*(?:people|persons?|personas?|comensales?)\b/);
   const peopleWordMatch = normalized.match(/\b(?:for|para)\s+(one|two|three|four|uno|una|dos|tres|cuatro)\b/);
   const peopleWords = { one: 1, uno: 1, una: 1, two: 2, dos: 2, three: 3, tres: 3, four: 4, cuatro: 4 };
+  const scheduledAt = scheduledInstant(normalized, options);
+  const occasion = /\b(?:breakfast|desayuno|brunch)\b/.test(normalized) ? "breakfast"
+    : /\b(?:lunch|almuerzo)\b/.test(normalized) ? "lunch"
+      : /\b(?:dinner|cena)\b/.test(normalized) ? "dinner" : null;
   return {
     text: String(text).trim(),
     normalized,
@@ -42,11 +131,14 @@ export function parseIntent(text) {
     targetLiters: water ? Number(volumeMatch?.[1] ?? 1.5) : null,
     people: meal ? Number(peopleMatch?.[1] ?? peopleWords[peopleWordMatch?.[1]] ?? 1) : null,
     healthy: /\b(?:healthy|healthier|saludable|sano|sana|light|ligero)\b/.test(normalized),
-    tasty: /\b(?:tasty|delicious|rico|rica|sabroso|sabrosa|best rated|mejor valorado)\b/.test(normalized),
+    tasty: /\b(?:tasty|delicious|rico|rica|sabroso|sabrosa|best[ -]rated|mejor valorado)\b/.test(normalized),
     cheap: /\b(?:cheap|cheapest|budget|barato|barata|economico|economica|best deal|mejor oferta)\b/.test(normalized),
     budget: budgetMatch ? Number(budgetMatch[1]) : null,
     sparkling: /\b(?:sparkling|con gas|gaseosa)\b/.test(normalized),
-    deliveryTime: /\b(?:tomorrow|manana|later|despues|preorder|programar)\b/.test(normalized) ? "scheduled" : "now",
+    occasion,
+    deliveryTime: scheduledAt || /\b(?:tomorrow|manana|later|despues|preorder|programar)\b/.test(normalized) ? "scheduled" : "now",
+    scheduledAt,
+    timeZone: options.timeZone ?? "Europe/Madrid",
     allergyMentioned: /\b(?:allergy|allergic|allergen|alergia|alergico|alergica|anaphyl)/.test(normalized),
     dietary: Object.fromEntries(Object.entries(DIETARY).map(([key, terms]) =>
       [key, terms.some((term) => normalized.includes(term))])),
@@ -67,6 +159,12 @@ export function providerSearchQueries(text) {
   if (intent.kind === "water") return ["agua"];
   const explicit = EXPLICIT_MEAL_QUERIES.filter(([, pattern]) => pattern.test(intent.normalized)).map(([query]) => query);
   if (intent.kind === "meal") {
+    if (intent.occasion === "breakfast") {
+      const breakfast = intent.healthy
+        ? ["desayuno saludable", "açaí", "tostada aguacate", "huevos"]
+        : ["desayuno", "brunch", "tostada", "huevos"];
+      return [...new Set([...explicit, ...breakfast])].slice(0, 4);
+    }
     const healthy = intent.healthy ? ["poke", "ensalada", "pollo a la plancha"] : [];
     const dietary = intent.dietary.vegan ? ["vegano"]
       : intent.dietary.vegetarian ? ["vegetariano"]
@@ -219,10 +317,14 @@ function mealCandidates(restaurant, menuData, menu, intent) {
   const candidates = [];
   for (const category of menu.categories) {
     for (const item of category.items) {
-      const text = `${restaurant.cuisines?.map((entry) => entry.name).join(" ")} ${category.name} ${item.name} ${item.description ?? ""}`;
+      const itemTitle = `${category.name} ${item.name}`;
+      const itemText = `${itemTitle} ${item.description ?? ""}`;
+      const text = `${restaurant.cuisines?.map((entry) => entry.name).join(" ")} ${itemText}`;
       if (!matchesDietary(text, intent.dietary)) continue;
       const health = healthScore(text);
       const normalized = normalizedText(text);
+      if (intent.occasion === "breakfast" && !isPreparedBreakfastItem(itemTitle, `${item.description ?? ""} ${restaurant.cuisines?.map((entry) => entry.name).join(" ")}`)) continue;
+      if (intent.occasion === "breakfast" && intent.healthy && !isHealthyBreakfastItem(itemText)) continue;
       if (intent.healthy && (health.score <= 0
         || !HEALTHY_ANCHOR_TERMS.some((term) => normalized.includes(term))
         || STRONGLY_INDULGENT_TERMS.some((term) => normalized.includes(term)))) continue;

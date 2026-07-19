@@ -110,6 +110,24 @@ test("Glovo checkout normalizes exact itemized pricing", () => {
   assert.equal(pricing.exact, true);
 });
 
+test("Glovo checkout template honors applied free fees and the final total", () => {
+  const pricing = normalizeGlovoQuote({
+    orderDetails: { purchaseTotalCents: 1050, currencyCode: "EUR" },
+    components: [{ id: "priceBreakdown", type: "priceBreakdown", priceBreakdownData: { breakDown: [
+      { type: "OTHER", title: "Productos", value: "10,50 €" },
+      { type: "DELIVERY", title: "Entrega", value: "2,99 €", valuePrefix: "GRATIS", valueStyle: "STRIKETHROUGH" },
+      { type: "OTHER", title: "Servicios", value: "0,73 €", valuePrefix: "GRATIS", valueStyle: "STRIKETHROUGH" },
+      { type: "OTHER", title: "Pedido pequeño", value: "1,50 €" },
+      { type: "TOTAL", title: "TOTAL", value: "12,00 €" },
+    ] } }],
+  });
+  assert.deepEqual(pricing, {
+    currency: "EUR", subtotal: 10.5,
+    fees: { delivery: 0, service: 0, smallOrder: 1.5, bag: null, other: null },
+    discount: 0, total: 12, exact: true,
+  });
+});
+
 test("Glovo checkout infers an applied promotion from the exact payable total", () => {
   const pricing = normalizeGlovoQuote({
     subtotal: 20,

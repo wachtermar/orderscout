@@ -2,6 +2,15 @@
 
 This project follows Semantic Versioning. It is currently pre-1.0; command and normalized response changes may occur between minor releases and will be listed here.
 
+## 0.1.1 - 2026-07-20
+
+- Parse natural-language scheduled requests into a timezone-aware provider target and require every compared provider to verify that exact slot before confirming a winner.
+- Add breakfast-specific discovery and reject raw groceries, non-food keyword matches, and unrelated dishes; multi-person results retain distinct dish lines.
+- Repair current Glovo basket customizations and checkout-template quoting, including scheduled slots, small-order fees, free fees, and exact delivered totals.
+- Repair Just Eat scheduled-window configuration and validate only provider-returned fulfilment windows.
+- Add Uber Eats scheduled availability checks and explicitly keep quotes provisional when the consumer API cannot persist the requested slot.
+- Make `winnerReady` a hard exact-total and scheduled-time gate, retain listed promotions, and pin the Work plugin to the `v0.1.1` CLI release to prevent stale `npx` cache reuse.
+
 ## 0.1.0 - 2026-07-19
 
 - Renamed the project and command to the descriptive OrderScout / `orderscout` identity.

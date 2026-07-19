@@ -6,7 +6,7 @@ import {
   providerPaths, publicAccountStatus, searchId,
 } from "./providers.js";
 import { normalizeOffer, parseObjective, rankOffers } from "./ranking.js";
-import { parseIntent, parsePackVolume } from "./recommend.js";
+import { isHealthyBreakfastItem, isPreparedBreakfastItem, parseIntent, parsePackVolume } from "./recommend.js";
 
 const searchPath = (id) => join(providerPaths.searchesDirectory, `${validateId(id)}.json`);
 
@@ -21,10 +21,17 @@ export async function startSearch(intent, options = {}) {
   const accounts = await loadAccounts();
   const enabled = PROVIDER_IDS.filter((id) => accounts.providers[id].enabled && accounts.providers[id].hasAccount !== false);
   if (!enabled.length) throw new CliError("No enabled providers have an account", "NO_ENABLED_PROVIDERS");
+  const parsedIntent = parseIntent(text, options);
   const search = {
     id: searchId(),
     version: 2,
     intent: text,
+    parsedIntent,
+    fulfilment: {
+      mode: parsedIntent.deliveryTime,
+      requestedAt: parsedIntent.scheduledAt,
+      timeZone: parsedIntent.timeZone,
+    },
     objective: options.objective ?? parseObjective(text),
     locationHint: options.locationHint ?? null,
     providers: enabled,
@@ -72,7 +79,20 @@ export async function ingestOffers(id, provider, inputs, options = {}) {
   const search = await loadSearch(id);
   if (!search.providers.includes(provider)) throw new CliError(`${provider} is not enabled for this search`, "PROVIDER_NOT_ENABLED");
   const accounts = await loadAccounts();
-  const values = applyIntent(Array.isArray(inputs) ? inputs : [inputs], search.intent);
+  let values = applyIntent(Array.isArray(inputs) ? inputs : [inputs], search.intent);
+  if (search.fulfilment?.mode === "scheduled") {
+    values = values.map((input) => ({
+      ...input,
+      available: input.fulfilment?.status === "unavailable" ? false : true,
+      fulfilment: {
+        requestedAt: search.fulfilment.requestedAt,
+        timeZone: search.fulfilment.timeZone,
+        status: input.fulfilment?.status ?? "unverified",
+        selectedWindow: input.fulfilment?.selectedWindow ?? null,
+        source: input.fulfilment?.source ?? null,
+      },
+    }));
+  }
   const normalized = values.map((input) => normalizeOffer(provider, input, {
     membership: accounts.providers[provider].membership,
   }));
@@ -91,17 +111,21 @@ export async function ingestOffers(id, provider, inputs, options = {}) {
 export function applyIntent(inputs, text) {
   const intent = parseIntent(text);
   if (intent.kind === "meal") {
-    const positive = ["ensalada", "salad", "poke", "bowl", "plancha", "grilled", "verdura", "vegetable", "pollo", "chicken", "pavo", "salm", "atun", "tuna", "quinoa", "integral", "healthy", "saludable", "vegan", "vegano", "vegetar"];
+    const positive = ["ensalada", "salad", "poke", "bowl", "plancha", "grilled", "verdura", "vegetable", "pollo", "chicken", "pavo", "salm", "atun", "tuna", "quinoa", "integral", "healthy", "saludable", "vegan", "vegano", "vegetar", "fruta", "fruit", "huevo", "egg", "yogur", "avena", "oat", "granola", "aguacate", "avocado", "tostada", "toast", "acai", "chia"];
     const negative = ["frito", "fried", "burger", "hamburgues", "pizza", "donut", "tarta", "cake", "helado", "chocolate", "bacon", "patatas", "fries", "mayonesa", "empanado", "breaded", "battered", "croqueta", "crispy", "creamy", "chips"];
     const stronglyIndulgent = ["frito", "fried", "burger", "hamburgues", "pizza", "donut", "cake", "empanado", "breaded", "battered", "croqueta", "chips"];
-    const healthyAnchors = ["ensalada", "salad", "poke", "bowl", "plancha", "grilled", "verdura", "vegetable", "quinoa", "integral", "healthy", "saludable", "vegan", "vegano", "vegetar"];
+    const healthyAnchors = ["ensalada", "salad", "poke", "bowl", "plancha", "grilled", "verdura", "vegetable", "quinoa", "integral", "healthy", "saludable", "vegan", "vegano", "vegetar", "fruta", "fruit", "huevo", "egg", "yogur", "avena", "oat", "granola", "aguacate", "avocado", "tostada", "toast", "acai", "chia"];
     const dietaryTerms = {
       vegan: ["vegan", "vegano", "vegana"], vegetarian: ["vegetarian", "vegetariano", "vegetariana"],
       halal: ["halal"], glutenFree: ["gluten free", "sin gluten"], lactoseFree: ["lactose free", "sin lactosa"],
     };
     const eligible = inputs.flatMap((input) => {
-      const itemText = `${input.item?.name ?? input.itemName ?? ""} ${input.item?.description ?? ""}`
+      const itemName = `${input.item?.name ?? input.itemName ?? ""}`
         .normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+      const itemText = `${itemName} ${input.item?.description ?? ""}`
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+      if (intent.occasion === "breakfast" && !isPreparedBreakfastItem(itemName, `${input.item?.description ?? ""} ${input.merchant?.name ?? input.merchantName ?? ""}`)) return [];
+      if (intent.occasion === "breakfast" && intent.healthy && !isHealthyBreakfastItem(itemText)) return [];
       if (Object.entries(intent.dietary).some(([key, required]) => required && !dietaryTerms[key].some((term) => itemText.includes(term)))) return [];
       const health = positive.filter((term) => itemText.includes(term)).length * 12
         - negative.filter((term) => itemText.includes(term)).length * 9;
@@ -164,7 +188,8 @@ function mealText(input) {
 function isMainCourse(input) {
   const value = mealText(input);
   const unitPrice = Number(input.item?.unitPrice ?? input.unitPrice ?? 0);
-  const complete = /\b(menu|meal|combo|plato|plate|poke|bowl|ramen|sushi|pasta|noodles?|tallarines?|curry|tikka|tandoori|kebab|kabse|paella)\b/.test(value);
+  const complete = /\b(menu|meal|combo|plato|plate|poke|bowl|ramen|sushi|pasta|noodles?|tallarines?|curry|tikka|tandoori|kebab|kabse|paella|desayuno|breakfast|brunch|tostada|toast|avena|oatmeal|porridge|granola|yogur|yogurt|bagel|pancakes?)\b/.test(value)
+    || isPreparedBreakfastItem(value);
   const protein = /\b(pollo|chicken|pavo|turkey|salmon|atun|tuna|tofu|seitan|ternera|beef|carne|cordero|lamb|pescado|fish|gambas?|prawns?)\b/.test(value);
   const preparation = /\b(plancha|grilled|roast|asado|verduras?|vegetables?)\b/.test(value);
   const salad = /\b(ensalada|salad)\b/.test(value);
@@ -312,6 +337,7 @@ export async function recordQuote(id, offerId, pricing) {
   search.offers[index] = normalizeOffer(search.offers[index].provider, {
     ...search.offers[index],
     pricing: { ...search.offers[index].pricing, ...pricing, exact: true },
+    ...(pricing.fulfilment ? { fulfilment: pricing.fulfilment } : {}),
   });
   await writeSearch(search);
   return resultsFor(search);
@@ -356,6 +382,8 @@ export function resultsFor(search) {
       ...(!coverage.allConfiguredAttempted ? ["Not every configured provider has been attempted yet."] : []),
       ...(failedProviders.length ? [`Provider search failed: ${failedProviders.join(", ")}. It was attempted and was not silently omitted.`] : []),
       ...(Object.values(search.providerStatus).some((status) => status.state === "pending") ? ["Some enabled providers are still pending."] : []),
+      ...(search.fulfilment?.mode === "scheduled" && !ranking.winnerReady
+        ? [`No winner is confirmed until the requested time (${search.fulfilment.requestedAt ?? "unspecified"}) and exact delivered total are verified for every matching provider.`] : []),
     ],
   };
 }
@@ -368,6 +396,8 @@ function summarizeSearch(search) {
   return {
     id: search.id,
     intent: search.intent,
+    parsedIntent: search.parsedIntent ?? parseIntent(search.intent),
+    fulfilment: search.fulfilment ?? null,
     objective: search.objective,
     providers: search.providers,
     providerStatus: search.providerStatus,

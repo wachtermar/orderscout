@@ -305,11 +305,18 @@ async function mapConcurrent(values, concurrency, mapper) {
 }
 
 export async function searchUberEats(query, options = {}) {
+  const requestedAt = options.scheduledAt ? new Date(options.scheduledAt) : null;
+  const scheduled = requestedAt && !Number.isNaN(requestedAt.getTime());
+  const date = scheduled ? new Intl.DateTimeFormat("en-CA", {
+    timeZone: options.timeZone ?? "Europe/Madrid", year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(requestedAt) : "";
+  const startTime = scheduled ? Math.floor(requestedAt.getTime() / 1_000) : 0;
+  const endTime = scheduled ? startTime + Math.max(900, Number(options.windowMinutes ?? 30) * 60) : 0;
   const payload = await request("getSearchFeedV1", {
     userQuery: query,
-    date: "",
-    startTime: 0,
-    endTime: 0,
+    date,
+    startTime,
+    endTime,
     sortAndFilters: [],
     vertical: "ALL",
     searchSource: "SEARCH_BAR",
@@ -340,6 +347,7 @@ export async function searchUberEats(query, options = {}) {
     .map((offer) => [`${offer.merchant.id}:${offer.item.id}`, offer])).values()].slice(0, limit);
   return {
     offers,
+    fulfilment: scheduled ? { requestedAt: requestedAt.toISOString(), date, startTime, endTime, status: offers.length ? "candidate" : "unavailable", source: "uber-scheduled-search" } : null,
     searchedStores: collectUberStores(payload).length,
     expandedStores: expandedOffers.length ? new Set(expandedOffers.map((offer) => offer.merchant.id)).size : 0,
     raw: options.raw ? payload : undefined,
@@ -381,7 +389,16 @@ function collectCatalog(payload) {
 }
 
 export async function uberEatsMenu(storeUuid, options = {}) {
-  const payload = await request("getStoreV1", { storeUuid, sfNuggetCount: 0 }, options);
+  const requestedAt = options.scheduledAt ? new Date(options.scheduledAt) : null;
+  const scheduled = requestedAt && !Number.isNaN(requestedAt.getTime());
+  const payload = await request("getStoreV1", {
+    storeUuid, sfNuggetCount: 0,
+    ...(scheduled ? {
+      date: new Intl.DateTimeFormat("en-CA", { timeZone: options.timeZone ?? "Europe/Madrid", year: "numeric", month: "2-digit", day: "2-digit" }).format(requestedAt),
+      startTime: Math.floor(requestedAt.getTime() / 1_000),
+      endTime: Math.floor(requestedAt.getTime() / 1_000) + Math.max(900, Number(options.windowMinutes ?? 30) * 60),
+    } : {}),
+  }, options);
   return { storeUuid, title: payload.title ?? payload.store?.title ?? "", isOpen: payload.isOpen !== false, items: collectCatalog(payload), raw: options.raw ? payload : undefined };
 }
 
@@ -422,10 +439,15 @@ export async function createUberEatsBasket(offer, options = {}) {
       ?? (lines.length === 1 ? options.customizations : null);
     if (source.requiresCustomizations && !customizations) {
       const details = await uberEatsItem(source, options);
-      throw new CliError(`"${line.item?.name}" requires customization choices`, "MODIFIERS_REQUIRED", {
-        itemId: source.itemUuid,
-        customizations: details.customizationsList ?? [],
-      });
+      const groups = details.customizationsList ?? [];
+      const required = groups.filter((group) => Number(group.minPermitted ?? group.minPermittedUnique ?? 0) > 0);
+      if (required.length) {
+        throw new CliError(`"${line.item?.name}" requires customization choices`, "MODIFIERS_REQUIRED", {
+          itemId: source.itemUuid,
+          customizations: groups,
+          requiredCustomizations: required,
+        });
+      }
     }
     shoppingCartItems.push({
       uuid: source.itemUuid,
@@ -440,6 +462,12 @@ export async function createUberEatsBasket(offer, options = {}) {
     });
   }
   const requestBody = { isMulticart: true, shoppingCartItems };
+  if (options.scheduledAt) {
+    const start = new Date(options.scheduledAt);
+    if (Number.isNaN(start.getTime())) throw new CliError("Scheduled delivery requires a valid ISO date and time", "INVALID_SCHEDULE");
+    const end = new Date(start.getTime() + Math.max(900, Number(options.windowMinutes ?? 30) * 60) * 1_000);
+    requestBody.targetDeliveryTimeRange = { asap: false, startTime: start.toISOString(), endTime: end.toISOString() };
+  }
   if (options.prepareOnly) return { mutated: false, payload: requestBody, submitted: false };
   const payload = await request("createDraftOrderV2", requestBody, { ...options, auth: true });
   return { mutated: true, draftOrder: payload.draftOrder ?? payload, submitted: false };
@@ -458,7 +486,45 @@ export async function quoteUberEatsBasket(draftOrderUuid, options = {}) {
     webGiftingPersonalizationEnabled: true,
   };
   const quote = await request("getCheckoutPresentationV1", requestBody, { ...options, auth: true });
-  return { provider: "ubereats", draftOrderUuid, quote, pricing: normalizeUberEatsQuote(quote), submitted: false };
+  const pricing = normalizeUberEatsQuote(quote);
+  if (!options.scheduledAt) return { provider: "ubereats", draftOrderUuid, quote, pricing, submitted: false };
+  const fulfilment = uberEatsScheduleAvailability(quote, options.scheduledAt, options.timeZone);
+  return {
+    provider: "ubereats", draftOrderUuid, quote, fulfilment,
+    pricing: { ...pricing, exact: false, missing: ["scheduled checkout configuration"] },
+    submitted: false,
+    warning: "Uber Eats exposed the requested slot, but its web API did not persist that slot into the draft checkout. Open the prepared checkout, select the time, and requote before treating the total as exact.",
+  };
+}
+
+function uberEatsScheduleAvailability(quote, requestedAt, timeZone = "Europe/Madrid") {
+  const requested = new Date(requestedAt);
+  if (Number.isNaN(requested.getTime())) throw new CliError("Scheduled delivery requires a valid ISO date and time", "INVALID_SCHEDULE");
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(requested).filter((part) => part.type !== "literal").map((part) => [part.type, Number(part.value)]));
+  const date = `${String(parts.year).padStart(4, "0")}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
+  const minute = parts.hour * 60 + parts.minute;
+  const errors = quote?.validationErrors ?? [];
+  const schedulable = errors.find((error) => error.type === "STORE_UNAVAILABLE_BUT_SCHEDULABLE");
+  const hours = schedulable?.alert?.primaryButton?.params?.scheduleTimePickerParams?.orderForLaterInfo?.isSchedulable === false
+    ? [] : schedulable?.alert?.primaryButton?.params?.scheduleTimePickerParams?.deliveryHoursInfos ?? [];
+  const day = hours.find((entry) => entry.date === date);
+  const window = day?.openHours?.find((entry) => minute >= Number(entry.startTime)
+    && minute + Number(entry.durationOffset ?? entry.incrementStep ?? 0) <= Number(entry.endTime));
+  if (window) return {
+    requestedAt: requested.toISOString(), timeZone, status: "available_unconfigured",
+    selectedWindow: { date, startMinute: minute, durationMinutes: Number(window.durationOffset ?? window.incrementStep ?? 0) },
+    source: "uber-checkout-schedule-hours",
+  };
+  if (schedulable || errors.some((error) => /STORE_UNAVAILABLE/.test(error.type))) {
+    throw new CliError("The Uber Eats store cannot deliver at the requested time", "SCHEDULE_UNAVAILABLE", {
+      requestedAt: requested.toISOString(), hours: day?.openHours ?? [],
+    });
+  }
+  throw new CliError("Uber Eats did not return verifiable delivery hours for the requested time", "SCHEDULE_UNVERIFIED", {
+    requestedAt: requested.toISOString(),
+  });
 }
 
 function findNumber(value, keys) {
@@ -546,4 +612,4 @@ export async function placeUberEatsOrder(draftOrderUuid, quote, options = {}) {
   }
 }
 
-export const uberEatsInternals = { apiHeaders, checkoutPayloadTypes: CHECKOUT_PAYLOAD_TYPES, collectCatalog, itemPromotion, menuOffers, mergePromotions, price, request, storeValue, storeWidePromotion };
+export const uberEatsInternals = { apiHeaders, checkoutPayloadTypes: CHECKOUT_PAYLOAD_TYPES, collectCatalog, itemPromotion, menuOffers, mergePromotions, price, request, storeValue, storeWidePromotion, uberEatsScheduleAvailability };

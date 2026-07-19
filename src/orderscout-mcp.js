@@ -72,7 +72,7 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_search_begin",
-    description: "Directly and concurrently search every provider enabled in OrderScout account settings—never a caller-selected subset—then rank restaurant meals, groceries, pharmacy or convenience products, household supplies, drinks, or any other available item. Provider-listed deals, item savings, free delivery, memberships, fees, and exact checkout discounts are retained. Multi-person meals contain explicit distinct dish lines or a genuine sharing item. It never creates a basket.",
+    description: "Directly and concurrently search every provider enabled in OrderScout account settings—never a caller-selected subset—then rank any deliverable item. Natural-language dates such as tomorrow at 10am become a timezone-aware requestedAt timestamp and meal occasions such as breakfast constrain both provider queries and dishes. Deals and memberships are retained. Multi-person meals contain distinct dish lines or a genuine sharing item. It never creates a basket.",
     inputSchema: objectSchema({
       intent: string("Complete natural-language request including quantity, budget, dietary needs, and cheapest/fastest/best preference."),
       objective: { type: "string", enum: ["cheapest", "fastest", "best", "value"] },
@@ -99,7 +99,7 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_results",
-    description: "Rank all collected offers and return provider coverage, promotion and membership signals, and exact-price coverage. Exact cheapest requires a current checkout total from every provider that returned a suitable match.",
+    description: "Rank all collected offers and return explicit status for every configured provider, promotion and membership signals, structured fulfilment, exact-price coverage, and winnerReady. For scheduled requests, winnerReady stays false until the requested slot and current exact delivered total are both verified for every provider that returned a suitable match. Never call an unready result the winner.",
     inputSchema: objectSchema({ searchId: string("OrderScout search ID.") }, ["searchId"]), annotations: readOnly,
     command: (input) => ["search", "results", input.searchId, "--agent"],
   },
@@ -118,19 +118,19 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_prepare_basket",
-    description: "Preview the exact direct-provider basket payload and all meal lines for the selected offer. No basket is changed and no exact checkout total is available yet.",
-    inputSchema: objectSchema({ searchId: string("OrderScout search ID."), offerId: string("Offer ID.") }, ["searchId", "offerId"]), annotations: readOnly,
-    command: (input) => ["basket", "prepare", input.searchId, input.offerId, "--agent"],
+    description: "Preview the direct-provider basket payload, every meal line, required modifier groups, and selected comparison defaults. Glovo uses disclosed minimum-price required defaults unless explicit choices are supplied. No basket is changed and no exact checkout total is available yet.",
+    inputSchema: objectSchema({ searchId: string("OrderScout search ID."), offerId: string("Offer ID."), customizations: { type: "object", description: "Optional provider customization selections keyed by item and modifier-group IDs.", additionalProperties: true } }, ["searchId", "offerId"]), annotations: readOnly,
+    command: (input) => ["basket", "prepare", input.searchId, input.offerId, ...(input.customizations ? ["--customizations", JSON.stringify(input.customizations)] : []), "--agent"],
   },
   {
     name: "orderscout_create_basket",
-    description: "Create the selected provider basket directly. Never configures payment or places an order.",
-    inputSchema: objectSchema({ searchId: string("OrderScout search ID."), offerId: string("Offer ID.") }, ["searchId", "offerId"]), annotations: remoteWrite,
-    command: (input) => ["basket", "create", input.searchId, input.offerId, "--agent"],
+    description: "Create the selected provider basket directly with every distinct meal line and required modifier selection. For scheduled Just Eat requests it configures only a provider-returned available delivery window. Never configures payment or places an order.",
+    inputSchema: objectSchema({ searchId: string("OrderScout search ID."), offerId: string("Offer ID."), customizations: { type: "object", description: "Optional provider customization selections keyed by item and modifier-group IDs.", additionalProperties: true } }, ["searchId", "offerId"]), annotations: remoteWrite,
+    command: (input) => ["basket", "create", input.searchId, input.offerId, ...(input.customizations ? ["--customizations", JSON.stringify(input.customizations)] : []), "--agent"],
   },
   {
     name: "orderscout_checkout_review_task",
-    description: "Read the selected provider's current checkout quote directly, including fees and total, and attach the normalized exact pricing to the comparison. It does not submit checkout or change the remote basket.",
+    description: "Read the selected provider's current checkout quote directly, including scheduled-slot availability, subtotal, each fee, applied discounts, and total, then attach verified data to the comparison. A requested schedule failure is explicit and cannot become a winner. It never submits checkout.",
     inputSchema: objectSchema({ searchId: string("OrderScout search ID."), offerId: string("Offer ID.") }, ["searchId", "offerId"]), annotations: localWrite,
     command: (input) => ["basket", "checkout", input.searchId, input.offerId, "--agent"],
   },
@@ -174,7 +174,7 @@ export function placementEnvironment(name, input = {}, base = {}) {
 
 export async function handleOrderScoutMcpMessage(message) {
   const id = message.id ?? null;
-  if (message.method === "initialize") return { jsonrpc: "2.0", id, result: { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "orderscout", version: "0.1.0" } } };
+  if (message.method === "initialize") return { jsonrpc: "2.0", id, result: { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "orderscout", version: "0.1.1" } } };
   if (message.method === "notifications/initialized") return null;
   if (message.method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: ORDERSCOUT_MCP_TOOLS.map(({ command, ...tool }) => tool) } };
   if (message.method === "tools/call") {

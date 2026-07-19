@@ -22,25 +22,28 @@ Never ask for account credentials in chat. Never expose saved session material.
 ## Search and compare
 
 1. Call `orderscout_search_begin` with the complete intent, objective, and a location only when the adapters cannot use a saved address. Do not select providers in the search call; the CLI fans out to every enabled account.
-2. The tool converts conversational intent into bounded provider-appropriate queries and calls every enabled provider's CLI adapter concurrently. It expands store-only results through direct menu APIs and continues when one provider fails.
+2. The tool converts conversational intent into bounded provider-appropriate queries and calls every enabled provider's CLI adapter concurrently. Dates such as “tomorrow at 10am” must appear as `search.fulfilment.requestedAt`; occasions such as breakfast must appear as `parsedIntent.occasion`. If either is missing or wrong, stop and report a parsing defect—do not continue with current-time or generic-meal results.
 3. Inspect `coverage`. Do not present a cross-provider result until `allConfiguredAttempted` is true. State any provider in `failedProviders`; never silently omit it or replace it with browser search.
-4. Call `orderscout_results` and show a compact provider-labelled shortlist.
+4. Call `orderscout_results` and always show Just Eat, Glovo, and Uber Eats status explicitly: matched, no suitable match, failed, disabled, or not authenticated. Never describe “all apps” while omitting a configured provider.
 
 Preserve quantity, budget, timing, diet, taste, health, and still/sparkling constraints. For water, parse the entire pack expression and meet or exceed requested litres. For meals, describe health and taste as ranking signals, not medical facts.
 
 For two or more people, prefer offers with `composition.kind: distinct-dishes` and show every line. A valid result contains different mains with quantity 1 each, or one item explicitly sold for that party size. Never silently turn a single ordinary dish into quantity N. Do not present sides, sauces, drinks, or appetizers as a complete meal. If no complete composition is available from a merchant, omit it instead of improvising.
 
+For breakfast, require breakfast-specific dishes such as eggs, toast, oats, yogurt, fruit, granola, açaí, or an explicitly named breakfast/brunch item. A restaurant name or café category alone does not turn a salad, sushi, or grilled dinner into breakfast.
+
 Retain provider-listed item discounts, original prices, 2-for-1 or percentage promotions, free delivery, and membership eligibility. A listed promotion is a candidate signal, not guaranteed savings. Distinguish `listed deal—validate checkout` from an exact discount that the checkout actually applied. Never invent a discount amount from a text-only promotion.
 
-Rank cheapest by delivered checkout total after applied discounts and membership savings, fastest by displayed ETA, best by rating confidence plus request-specific quality signals, and default requests by balanced value. Do not call a result exact-cheapest until `exactPriceCoverage.missingQuoteProviders` is empty: every provider that returned a suitable offer must have a current exact checkout quote.
+Rank cheapest by delivered checkout total after applied discounts and membership savings, fastest by displayed ETA, best by rating confidence plus request-specific quality signals, and default requests by balanced value. Do not call any result the winner, best, exact-cheapest, or confirmed recommendation until `winnerReady` is true. This requires `exactPriceCoverage.missingQuoteProviders` to be empty and, for scheduled requests, `fulfilment.status: verified` at the exact requested time for every compared provider.
 
 ## Baskets and exact totals
 
 - Do not modify a non-empty unrelated cart without explaining the conflict and receiving approval.
 - `orderscout_prepare_basket` only previews a payload. Never describe it as a created or quoted basket.
-- A hard delivered budget cannot be verified from search-card prices. When the request explicitly requires an all-in delivered limit or exact provider comparison, use an isolated draft basket for the best suitable offer from every provider that returned one. Call `orderscout_prepare_basket`, resolve required modifiers, then call `orderscout_create_basket` and `orderscout_checkout_review_task` through the CLI. Stop on `CART_CONFLICT`; never append comparison items to an unrelated cart.
+- A hard delivered budget cannot be verified from search-card prices. When the request explicitly requires an all-in delivered limit, a future time, or an exact provider comparison, use an isolated draft basket for the best suitable offer from every provider that returned one. Process providers independently (calls may run in parallel): `orderscout_prepare_basket`, resolve required modifiers, then `orderscout_create_basket` and `orderscout_checkout_review_task`. If a candidate is unavailable at the requested time or over budget, try that provider’s next suitable offer. Stop on `CART_CONFLICT`; never append comparison items to an unrelated cart.
+- Glovo preparation returns `customizationReview`. Minimum-price required defaults are acceptable only for comparison and must be listed in the answer. Let the user change them before final approval, then recreate/requote. Never treat an empty provider basket as success.
 - `orderscout_checkout_review_task` normalizes and records subtotal, fees, discount, and total automatically. Use `orderscout_record_checkout_quote` only for an exact quote obtained outside the normal CLI review.
-- After quoting, call `orderscout_results` again. Exclude offers whose exact total exceeds the requested budget. Never substitute “about,” a fee guess, or the food subtotal when an exact quote failed.
+- After quoting all matched providers, call `orderscout_results` again. Exclude offers whose exact total exceeds the requested budget. If `winnerReady` is false, return a provisional comparison with the exact missing provider/slot/quote reason; never substitute “about,” a fee guess, or the food subtotal and never select a winner.
 - Only count promotions, Prime, or Uber One savings in an exact comparison when the provider quote shows that they were applied.
 - In Work, call `orderscout_open_basket` only after the CLI created the basket. Navigate the in-app Browser to its trusted checkout URL for optional visual review or manual edits. Verify that the displayed merchant and every line match the selected basket; if a provider shows another active cart, stop and report the mismatch instead of implying that it synced. The Browser must not create the basket or replace CLI checkout quoting.
 

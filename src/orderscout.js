@@ -19,7 +19,7 @@ import { runOrderScoutMcpServer } from "./orderscout-mcp.js";
 import {
   createUberEatsBasket, placeUberEatsOrder, quoteUberEatsBasket, searchUberEats, uberEatsCarts, uberEatsMe, uberEatsMenu,
 } from "./ubereats.js";
-import { providerSearchQueries } from "./recommend.js";
+import { parseIntent, providerSearchQueries } from "./recommend.js";
 
 const execFileAsync = promisify(execFile);
 const JUSTEAT_CLI = fileURLToPath(new URL("./cli.js", import.meta.url));
@@ -146,7 +146,9 @@ function justEatPricing(result) {
 }
 
 async function saveCheckoutResult(searchId, offerId, result, pricing) {
-  if (pricing?.exact && Number.isFinite(Number(pricing.total))) await recordQuote(searchId, offerId, pricing);
+  if (pricing?.exact && Number.isFinite(Number(pricing.total))) await recordQuote(searchId, offerId, {
+    ...pricing, ...(result.fulfilment ? { fulfilment: result.fulfilment } : {}),
+  });
   const current = await searchResults(searchId);
   const quotedOffer = current.comparison.offers.find((offer) => offer.id === offerId) ?? null;
   const { quote, ...summary } = result;
@@ -194,6 +196,9 @@ function compactSearchResult(result, flags) {
 
 async function collectJustEat(intent, flags) {
   const args = ["recommend", intent, "--agent"];
+  const parsed = parseIntent(intent);
+  if (parsed.deliveryTime === "scheduled") args.push("--include-closed");
+  if (parsed.occasion === "breakfast" && flags.stores === undefined) args.push("--stores", "40");
   for (const [flag, value] of [["at", flags.at], ["stores", flags.stores], ["limit", flags.limit], ["vertical", flags.vertical]]) {
     if (value !== undefined) args.push(`--${flag}`, String(value));
   }
@@ -210,21 +215,31 @@ async function collectGlovo(intent, flags) {
     location = addresses.find((address) => address.isDefault) ?? addresses[0];
     if (!location) throw new CliError("Glovo has no usable saved delivery address; pass --at once", "LOCATION_REQUIRED");
   }
-  const queries = providerSearchQueries(intent);
+  const parsed = parseIntent(intent);
+  const queries = providerSearchQueries(parsed);
   const results = await Promise.allSettled(queries.map((query) => searchGlovo(query, location, { limit: flags.limit })));
   const fulfilled = results.filter((result) => result.status === "fulfilled");
   if (!fulfilled.length) throw results[0].reason;
   return [...new Map(fulfilled.flatMap((result) => result.value.offers)
-    .map((offer) => [`${offer.merchant?.id}:${offer.item?.id}`, offer])).values()];
+    .map((offer) => [`${offer.merchant?.id}:${offer.item?.id}`, {
+      ...offer,
+      ...(parsed.deliveryTime === "scheduled" ? { fulfilment: { requestedAt: parsed.scheduledAt, timeZone: parsed.timeZone, status: "unverified", source: "glovo-scheduled-search" } } : {}),
+    }])).values()];
 }
 
 async function collectUberEats(intent, flags) {
-  const queries = providerSearchQueries(intent);
-  const results = await Promise.allSettled(queries.map((query) => searchUberEats(query, { limit: flags.limit })));
+  const parsed = parseIntent(intent);
+  const queries = providerSearchQueries(parsed);
+  const results = await Promise.allSettled(queries.map((query) => searchUberEats(query, {
+    limit: flags.limit, scheduledAt: parsed.scheduledAt, timeZone: parsed.timeZone,
+  })));
   const fulfilled = results.filter((result) => result.status === "fulfilled");
   if (!fulfilled.length) throw results[0].reason;
   return [...new Map(fulfilled.flatMap((result) => result.value.offers)
-    .map((offer) => [`${offer.merchant?.id}:${offer.item?.id}`, offer])).values()];
+    .map((offer) => [`${offer.merchant?.id}:${offer.item?.id}`, {
+      ...offer,
+      ...(parsed.deliveryTime === "scheduled" ? { fulfilment: { requestedAt: parsed.scheduledAt, timeZone: parsed.timeZone, status: "candidate", source: "uber-scheduled-search" } } : {}),
+    }])).values()];
 }
 
 export async function runConcurrentProviderTasks(providers, task) {
@@ -477,8 +492,10 @@ export async function runOrderScout(argv) {
           basketId = basket?.basketId ?? basket?.id;
         }
         if (!basketId) throw new CliError("Create this Glovo basket before requesting checkout", "BASKET_REQUIRED");
-        const quoted = await quoteGlovoBasket(basketId);
-        return writeOutput(await saveCheckoutResult(searchId, offerId, quoted, quoted.pricing), flags);
+        const quoted = await quoteGlovoBasket(basketId, {
+          scheduledAt: search.fulfilment?.requestedAt, timeZone: search.fulfilment?.timeZone,
+        });
+        return writeOutput(await saveCheckoutResult(searchId, offerId, { ...quoted, fulfilment: offer.basket?.fulfilment ?? offer.fulfilment }, quoted.pricing), flags);
       }
       const result = await createGlovoBasket(offer, { prepareOnly: action === "prepare", customizations: jsonFlag(flags, "customizations") });
       if (action === "create") {
@@ -496,10 +513,15 @@ export async function runOrderScout(argv) {
           id = draft?.uuid ?? draft?.draftOrderUUID ?? draft?.draftOrderUuid;
         }
         if (!id) throw new CliError("Create this Uber Eats basket before requesting checkout", "BASKET_REQUIRED");
-        const quoted = await quoteUberEatsBasket(id);
-        return writeOutput(await saveCheckoutResult(searchId, offerId, quoted, quoted.pricing), flags);
+        const quoted = await quoteUberEatsBasket(id, {
+          scheduledAt: search.fulfilment?.requestedAt, timeZone: search.fulfilment?.timeZone,
+        });
+        return writeOutput(await saveCheckoutResult(searchId, offerId, { ...quoted, fulfilment: offer.basket?.fulfilment ?? offer.fulfilment }, quoted.pricing), flags);
       }
-      const result = await createUberEatsBasket(offer, { prepareOnly: action === "prepare", customizations: jsonFlag(flags, "customizations") });
+      const result = await createUberEatsBasket(offer, {
+        prepareOnly: action === "prepare", customizations: jsonFlag(flags, "customizations"),
+        scheduledAt: search.fulfilment?.requestedAt, timeZone: search.fulfilment?.timeZone,
+      });
       if (action === "create") {
         const draft = result.draftOrder;
         const id = draft?.uuid ?? draft?.draftOrderUUID ?? draft?.draftOrderUuid;
@@ -513,7 +535,7 @@ export async function runOrderScout(argv) {
     }
     if (action === "checkout") {
       const quote = await runLegacyJustEat(["order", "quote", source.planId, "--agent"]);
-      const result = { provider: "justeat", offerId, quote, submitted: false };
+      const result = { provider: "justeat", offerId, quote, fulfilment: offer.basket?.fulfilment ?? offer.fulfilment, submitted: false };
       return writeOutput(await saveCheckoutResult(searchId, offerId, result, justEatPricing(result)), flags);
     }
     const args = ["order", "prepare", source.planId, "--candidate", String(source.candidateIndex), "--agent"];
@@ -531,9 +553,15 @@ export async function runOrderScout(argv) {
     if (action === "create") {
       configuration = await runLegacyJustEat([
         "order", "configure", source.planId,
-        "--address-index", String(source.addressIndex ?? 0), "--apply", "--agent",
+        "--address-index", String(source.addressIndex ?? 0),
+        ...(search.fulfilment?.requestedAt ? ["--scheduled", search.fulfilment.requestedAt] : []),
+        "--apply", "--agent",
       ], { allowFailure: true });
-      if (result?.basketId) await recordBasket(searchId, offerId, { provider: "justeat", id: String(result.basketId) });
+      if (configuration?.error) throw new CliError(configuration.error.message ?? "Just Eat checkout configuration failed", configuration.error.code ?? "CHECKOUT_CONFIGURATION_FAILED", configuration.error.details);
+      if (result?.basketId) await recordBasket(searchId, offerId, {
+        provider: "justeat", id: String(result.basketId),
+        ...(configuration?.selectedWindow ? { fulfilment: { requestedAt: search.fulfilment.requestedAt, timeZone: search.fulfilment.timeZone, status: "verified", selectedWindow: configuration.selectedWindow, source: "justeat-availabletimes" } } : {}),
+      });
     }
     return writeOutput({ provider: "justeat", offerId, action, result, configuration, submitted: false }, flags);
   }
@@ -550,7 +578,10 @@ export async function runOrderScout(argv) {
         id = draft?.uuid ?? draft?.draftOrderUUID ?? draft?.draftOrderUuid;
       }
       if (!id) throw new CliError("Create this Uber Eats basket first", "BASKET_REQUIRED");
-      const quoted = await quoteUberEatsBasket(id);
+      const quoted = await quoteUberEatsBasket(id, {
+        scheduledAt: search.fulfilment?.requestedAt, timeZone: search.fulfilment?.timeZone,
+      });
+      if (!quoted.pricing.exact) throw new CliError("The scheduled Uber Eats checkout must be configured and requoted in the official checkout before placement", "SCHEDULED_CHECKOUT_REQUIRED");
       return writeOutput(await placeUberEatsOrder(id, quoted.quote, { confirm: flags.confirm }), flags);
     }
     if (offer.provider === "glovo") {
@@ -561,7 +592,9 @@ export async function runOrderScout(argv) {
         basketId = basket?.basketId ?? basket?.id;
       }
       if (!basketId) throw new CliError("Create this Glovo basket first", "BASKET_REQUIRED");
-      const quoted = await quoteGlovoBasket(basketId);
+      const quoted = await quoteGlovoBasket(basketId, {
+        scheduledAt: search.fulfilment?.requestedAt, timeZone: search.fulfilment?.timeZone,
+      });
       return writeOutput(await placeGlovoOrder(offer, { basketId, ...quoted.quote }, { confirm: flags.confirm }), flags);
     }
     const source = offer.source;

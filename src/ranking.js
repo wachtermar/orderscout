@@ -34,7 +34,7 @@ function normalizePromotion(value, pricing) {
 export function parseObjective(intent) {
   const text = String(intent ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
   if (/\b(fastest|quickest|rapido|rapida|antes|asap)\b/.test(text)) return "fastest";
-  if (/\b(best rated|highest rated|mejor valorad|calidad|best quality|tasty|delicious|sabros|rico|rica)\b/.test(text)) return "best";
+  if (/\b(best[ -]rated|highest[ -]rated|mejor valorad|calidad|best quality|tasty|delicious|sabros|rico|rica)\b/.test(text)) return "best";
   if (/\b(cheapest|lowest price|cheap|barat|econom|mejor oferta)\b/.test(text)) return "cheapest";
   return "value";
 }
@@ -121,6 +121,13 @@ export function normalizeOffer(provider, input, context = {}) {
     suppliedLiters,
     etaMinutes: numberOrNull(input.etaMinutes),
     available: input.available !== false,
+    fulfilment: input.fulfilment ? {
+      requestedAt: input.fulfilment.requestedAt ?? null,
+      timeZone: input.fulfilment.timeZone ?? "Europe/Madrid",
+      status: input.fulfilment.status ?? "unverified",
+      selectedWindow: input.fulfilment.selectedWindow ?? null,
+      source: input.fulfilment.source ?? null,
+    } : null,
     pricing: normalizedPricing,
     membership: membership ? {
       ...membership,
@@ -148,7 +155,8 @@ function trustedProviderUrl(provider, value) {
 function ratingScore(offer) {
   const rating = offer.merchant.rating;
   if (rating === null) return 45;
-  const count = offer.merchant.ratingCount ?? 0;
+  if (offer.merchant.ratingCount === null) return (rating / 5) * 100;
+  const count = offer.merchant.ratingCount;
   const confidence = Math.min(1, Math.log10(count + 1) / 3);
   return ((rating / 5) * confidence + 0.7 * (1 - confidence)) * 100;
 }
@@ -158,7 +166,7 @@ function priceForRanking(offer) {
   return offer.pricing.total + (offer.pricing.exact ? 0 : 4);
 }
 
-function scoreOffer(offer, objective) {
+function scoreOffer(offer, objective, parsed) {
   const price = priceForRanking(offer);
   const eta = offer.etaMinutes ?? 120;
   const rating = ratingScore(offer);
@@ -169,7 +177,10 @@ function scoreOffer(offer, objective) {
   if (!offer.available) return -1_000_000;
   if (objective === "cheapest") return -price * 20 - eta * 0.08 + rating * 0.08;
   if (objective === "fastest") return -eta * 8 - price * 0.35 + rating * 0.08;
-  if (objective === "best") return rating * 2 + healthTaste + dealSignal * 0.35 - price * 0.8 - eta * 0.12;
+  if (objective === "best") {
+    const ratingWeight = /\b(best[ -]rated|highest[ -]rated|mejor valorad)\b/.test(parsed.normalized) ? 20 : 2;
+    return rating * ratingWeight + healthTaste + dealSignal * 0.35 - price * 0.8 - eta * 0.12;
+  }
   return rating + healthTaste + dealSignal - price * 2.4 - eta * 0.45;
 }
 
@@ -178,14 +189,16 @@ export function rankOffers(offers, intent, objective = parseObjective(intent), o
   const ranked = offers.map((offer) => {
     const overBudget = parsed.budget !== null && offer.pricing.exact
       && offer.pricing.total !== null && offer.pricing.total > parsed.budget;
-    return { ...offer, ranking: { objective, score: overBudget ? -999_999 : scoreOffer(offer, objective), badges: [], overBudget } };
+    const scheduleVerified = parsed.deliveryTime !== "scheduled" || offer.fulfilment?.status === "verified";
+    const scheduleUnavailable = parsed.deliveryTime === "scheduled" && offer.fulfilment?.status === "unavailable";
+    return { ...offer, ranking: { objective, score: overBudget || scheduleUnavailable ? -999_999 : scoreOffer(offer, objective, parsed), badges: [], overBudget, scheduleVerified } };
   })
     .sort((a, b) => b.ranking.score - a.ranking.score || String(a.id).localeCompare(String(b.id)));
   const available = ranked.filter((offer) => offer.available && !offer.ranking.overBudget);
-  const exactPriced = available.filter((offer) => offer.pricing.exact && offer.pricing.total !== null);
+  const exactPriced = available.filter((offer) => offer.pricing.exact && offer.pricing.total !== null && offer.ranking.scheduleVerified);
   const requiredProviders = (options.providers ?? [...new Set(ranked.map((offer) => offer.provider))])
     .filter((provider) => ranked.some((offer) => offer.provider === provider && offer.available));
-  const quotedProviders = [...new Set(ranked.filter((offer) => offer.available && offer.pricing.exact && offer.pricing.total !== null)
+  const quotedProviders = [...new Set(ranked.filter((offer) => offer.available && offer.pricing.exact && offer.pricing.total !== null && offer.ranking.scheduleVerified)
     .map((offer) => offer.provider))];
   const missingQuoteProviders = requiredProviders.filter((provider) => !quotedProviders.includes(provider));
   const fastest = [...available].filter((offer) => offer.etaMinutes !== null).sort((a, b) => a.etaMinutes - b.etaMinutes)[0];
@@ -205,11 +218,13 @@ export function rankOffers(offers, intent, objective = parseObjective(intent), o
       && !offer.ranking.badges.some((badge) => /listed .*deal|listed free delivery/.test(badge))) offer.ranking.badges.push("listed provider deal—validate checkout");
     if (offer.membership?.active && offer.membership?.eligible) offer.ranking.badges.push(`${offer.membership.name ?? "membership"} eligible`);
     if (!offer.pricing.exact) offer.ranking.badges.push("estimate—validate checkout");
+    if (parsed.deliveryTime === "scheduled" && !offer.ranking.scheduleVerified) offer.ranking.badges.push("requested time not verified");
   }
   return {
     objective,
     offers: ranked,
     exactPriceComparison: requiredProviders.length > 0 && missingQuoteProviders.length === 0,
     exactPriceCoverage: { requiredProviders, quotedProviders, missingQuoteProviders },
+    winnerReady: exactPriced.length > 0 && requiredProviders.length > 0 && missingQuoteProviders.length === 0,
   };
 }

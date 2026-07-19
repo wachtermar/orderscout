@@ -51,6 +51,7 @@ test("search results prove coverage and never silently omit a failed provider", 
 
 test("taste-focused requests use the quality objective", () => {
   assert.equal(parseObjective("healthy but very tasty"), "best");
+  assert.equal(parseObjective("best-rated healthy breakfast"), "best");
 });
 
 test("a recorded Work browser session never replaces direct CLI provider routing", () => {
@@ -103,6 +104,31 @@ test("meal intent applies party size, total budget, and health signals", () => {
   assert.equal(offers[0].signals.taste, 96);
 });
 
+test("breakfast intent excludes lunch dishes and composes distinct breakfast mains", () => {
+  const offers = applyIntent([
+    { provider: "glovo", merchant: { id: "cafe", name: "Healthy Brunch", rating: 4.8 }, item: { id: "toast", name: "Tostada integral de aguacate y huevo", unitPrice: 9 }, pricing: { currency: "EUR" }, source: { storeId: "cafe", productId: "toast" } },
+    { provider: "glovo", merchant: { id: "cafe", name: "Healthy Brunch", rating: 4.8 }, item: { id: "oats", name: "Bowl de avena, fruta y yogur", unitPrice: 8 }, pricing: { currency: "EUR" }, source: { storeId: "cafe", productId: "oats" } },
+    { provider: "glovo", merchant: { id: "cafe", name: "Healthy Brunch", rating: 4.8 }, item: { id: "chicken", name: "Pollo a la plancha con verduras", unitPrice: 12 }, pricing: { currency: "EUR" }, source: { storeId: "cafe", productId: "chicken" } },
+    { provider: "glovo", merchant: { id: "market", name: "Supermarket", rating: 4.9 }, item: { id: "raw-eggs", name: "Pack 12 huevos frescos de gallina", unitPrice: 4 }, pricing: { currency: "EUR" }, source: { storeId: "market", productId: "raw-eggs" } },
+    { provider: "glovo", merchant: { id: "books", name: "Books", rating: 5 }, item: { id: "toy", name: "Juego Playmobil del huevo", unitPrice: 6 }, pricing: { currency: "EUR" }, source: { storeId: "books", productId: "toy" } },
+    { provider: "glovo", merchant: { id: "chinese", name: "Jardín Chino", rating: 5 }, item: { id: "prawns", name: "Huevos revueltos con gambas", unitPrice: 7 }, pricing: { currency: "EUR" }, source: { storeId: "chinese", productId: "prawns" } },
+    { provider: "glovo", merchant: { id: "cafe", name: "Healthy Brunch", rating: 4.8 }, item: { id: "jam", name: "Tostada de mantequilla y mermelada", unitPrice: 4 }, pricing: { currency: "EUR" }, source: { storeId: "cafe", productId: "jam" } },
+    { provider: "glovo", merchant: { id: "acai-shop", name: "Açaí Shop", rating: 4.9 }, item: { id: "pulp", name: "Pulpa de açaí natural pack 400 g", unitPrice: 8 }, pricing: { currency: "EUR" }, source: { storeId: "acai-shop", productId: "pulp" } },
+    { provider: "justeat", merchant: { id: "indian", name: "Masala", rating: 4.9 }, item: { id: "curry", name: "Rogan Josh Vegetables", description: "Cooked with homemade yoghurt", unitPrice: 9 }, pricing: { currency: "EUR" }, source: { storeId: "indian", productId: "curry" } },
+  ], "best-rated healthy breakfast for 2 tomorrow at 10am under €30");
+  assert.equal(offers.length, 1);
+  assert.deepEqual(offers[0].lines.map((line) => line.item.id).sort(), ["oats", "toast"]);
+});
+
+test("best-rated requests prioritize the strongest rating after eligibility", () => {
+  const base = { available: true, pricing: { exact: false, total: 20 }, fulfilment: { status: "unverified" } };
+  const result = rankOffers([
+    { ...base, id: "healthier", provider: "glovo", merchant: { rating: 4.8, ratingCount: null }, signals: { health: 60, taste: 96 } },
+    { ...base, id: "higher-rated", provider: "ubereats", merchant: { rating: 4.9, ratingCount: null }, signals: { health: 12, taste: 98 } },
+  ], "best-rated healthy breakfast", "best");
+  assert.equal(result.offers[0].id, "higher-rated");
+});
+
 test("exact totals over a hard budget are disqualified and comparison covers every matching provider", () => {
   const base = {
     available: true, etaMinutes: 20, signals: { health: 20, taste: 80 }, merchant: { rating: 4.8, ratingCount: 100 },
@@ -117,6 +143,17 @@ test("exact totals over a hard budget are disqualified and comparison covers eve
   assert.equal(result.offers.at(-1).ranking.overBudget, true);
   assert.equal(result.exactPriceComparison, false);
   assert.deepEqual(result.exactPriceCoverage.missingQuoteProviders, ["glovo"]);
+});
+
+test("a scheduled winner requires both an exact total and verified requested time", () => {
+  const base = { available: true, etaMinutes: 20, signals: { health: 20, taste: 90 }, merchant: { rating: 4.8, ratingCount: 100 } };
+  const result = rankOffers([
+    { ...base, id: "verified", provider: "glovo", pricing: { exact: true, total: 25 }, fulfilment: { status: "verified" } },
+    { ...base, id: "unverified", provider: "ubereats", pricing: { exact: true, total: 20 }, fulfilment: { status: "unverified" } },
+  ], "healthy breakfast tomorrow at 10am under €30", "best");
+  assert.equal(result.winnerReady, false);
+  assert.deepEqual(result.exactPriceCoverage.missingQuoteProviders, ["ubereats"]);
+  assert.match(result.offers.find((offer) => offer.id === "unverified").ranking.badges.join(" "), /requested time not verified/);
 });
 
 test("listed deals and membership eligibility survive normalization and affect value badges", () => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseIntent, parsePackVolume, providerSearchQueries, recommend } from "../src/recommend.js";
+import { isHealthyBreakfastItem, isPreparedBreakfastItem, parseIntent, parsePackVolume, providerSearchQueries, recommend } from "../src/recommend.js";
 
 test("parsePackVolume understands Spanish packs and metric units", () => {
   assert.deepEqual(parsePackVolume("Pack 6 unidades de 1,5L"), {
@@ -33,7 +33,10 @@ test("parseIntent extracts quantity, budget, health, taste, and dietary needs", 
     cheap: true,
     budget: 10,
     sparkling: false,
+    occasion: null,
     deliveryTime: "now",
+    scheduledAt: null,
+    timeZone: "Europe/Madrid",
     allergyMentioned: false,
     dietary: {
       vegan: false,
@@ -51,8 +54,31 @@ test("parseIntent extracts quantity, budget, health, taste, and dietary needs", 
   assert.equal(meal.budget, 18);
   assert.equal(parseIntent("healthy tasty food for two under €30").people, 2);
   assert.deepEqual(providerSearchQueries("healthy tasty food for two under €30"), ["poke", "ensalada", "pollo a la plancha"]);
+  const breakfast = parseIntent("best-rated healthy breakfast for 2 tomorrow at 10am under €30", {
+    now: new Date("2026-07-20T00:00:00.000Z"),
+  });
+  assert.equal(breakfast.occasion, "breakfast");
+  assert.equal(breakfast.tasty, true);
+  assert.equal(breakfast.deliveryTime, "scheduled");
+  assert.equal(breakfast.scheduledAt, "2026-07-21T08:00:00.000Z");
+  assert.deepEqual(providerSearchQueries(breakfast), ["desayuno saludable", "açaí", "tostada aguacate", "huevos"]);
   assert.deepEqual(providerSearchQueries("20 litres of water now"), ["agua"]);
   assert.deepEqual(providerSearchQueries("Which pharmacy can deliver SPF 50 sunscreen fastest tonight?"), ["spf sunscreen"]);
+});
+
+test("prepared breakfast classification rejects raw groceries, pasta, and non-food egg matches", () => {
+  assert.equal(isPreparedBreakfastItem("Tostada integral de aguacate y huevo"), true);
+  assert.equal(isPreparedBreakfastItem("Açaí bowl con fruta y granola"), true);
+  assert.equal(isPreparedBreakfastItem("Huevos revueltos con espinacas"), true);
+  assert.equal(isPreparedBreakfastItem("Huevos revueltos con gambas", "Jardín Chino"), false);
+  assert.equal(isPreparedBreakfastItem("Pack 12 huevos frescos de gallina"), false);
+  assert.equal(isPreparedBreakfastItem("Tagliatelle pasta al huevo"), false);
+  assert.equal(isPreparedBreakfastItem("Juego Playmobil búsqueda del huevo"), false);
+  assert.equal(isPreparedBreakfastItem("Natural Bowl de pollo y arroz"), false);
+  assert.equal(isPreparedBreakfastItem("Pulpa de açaí natural pack 400 g"), false);
+  assert.equal(isPreparedBreakfastItem("Rogan Josh Vegetables", "cooked with homemade yoghurt"), false);
+  assert.equal(isHealthyBreakfastItem("Tostada de mantequilla y mermelada"), false);
+  assert.equal(isHealthyBreakfastItem("Tostada integral con aguacate y semillas"), true);
 });
 
 test("parseIntent routes arbitrary platform products beyond restaurants", () => {

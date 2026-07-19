@@ -433,6 +433,35 @@ export async function patchCheckout(plan, patch, options = {}) {
   }, options.fetchImpl);
 }
 
+export async function getAvailableFulfilmentTimes(plan, options = {}) {
+  const basketId = plan.remote?.basketId;
+  if (!basketId) throw new CliError("Prepare the plan before checking delivery times", "BASKET_REQUIRED");
+  const payload = await requestJson(`${API_BASE}/checkout/es/${encodeURIComponent(basketId)}/fulfilment/availabletimes`, {
+    headers: apiHeaders(options.token),
+  }, options.fetchImpl);
+  return {
+    asapAvailable: Boolean(payload?.asapAvailable),
+    times: (payload?.times ?? []).filter((entry) => entry?.from && entry?.to).map((entry) => ({ from: entry.from, to: entry.to })),
+  };
+}
+
+export function selectFulfilmentWindow(available, requestedAt) {
+  const requested = new Date(requestedAt);
+  if (Number.isNaN(requested.getTime())) throw new CliError("Scheduled delivery requires a valid ISO date and time", "INVALID_SCHEDULE");
+  const windows = (available?.times ?? []).map((entry) => ({ ...entry, fromMs: Date.parse(entry.from), toMs: Date.parse(entry.to) }))
+    .filter((entry) => Number.isFinite(entry.fromMs) && Number.isFinite(entry.toMs));
+  const selected = windows.find((entry) => entry.fromMs <= requested.getTime() && requested.getTime() < entry.toMs)
+    ?? windows.find((entry) => entry.fromMs === requested.getTime());
+  if (!selected) {
+    const closest = [...windows].sort((left, right) => Math.abs(left.fromMs - requested.getTime()) - Math.abs(right.fromMs - requested.getTime()))
+      .slice(0, 5).map(({ from, to }) => ({ from, to }));
+    throw new CliError("The restaurant cannot deliver at the requested time", "SCHEDULE_UNAVAILABLE", {
+      requestedAt: requested.toISOString(), closest,
+    });
+  }
+  return { from: selected.from, to: selected.to };
+}
+
 function valueFrom(object, keys) {
   for (const key of keys) {
     if (object?.[key] !== undefined && object?.[key] !== null) return object[key];
@@ -460,6 +489,9 @@ export function buildCheckoutPatch(profile, address, options = {}) {
   if (missing.length) throw new CliError("Account details are incomplete for checkout", "CHECKOUT_DETAILS_REQUIRED", { missing });
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
     throw new CliError("Saved address has no checkout coordinates", "INVALID_LOCATION");
+  }
+  if (options.scheduled && (typeof options.scheduled !== "object" || !options.scheduled.from || !options.scheduled.to)) {
+    throw new CliError("Scheduled checkout requires an available {from,to} delivery window", "INVALID_SCHEDULE");
   }
   return [
     { op: "add", path: "/customer", value: { firstName, lastName: lastName ?? "", phoneNumber } },

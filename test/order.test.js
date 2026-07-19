@@ -13,6 +13,7 @@ import {
   placeOrder,
   normalizeCheckout,
   optimizeWaterBasket,
+  selectFulfilmentWindow,
 } from "../src/order.js";
 
 process.env.JUSTEAT_CONFIG_DIR = await mkdtemp(join(tmpdir(), "justeat-order-test-"));
@@ -199,6 +200,22 @@ test("buildCheckoutPatch does not invent a surname when Just Eat does not requir
     { lines: ["Private street"], city: "Marbella", postcode: "29603", latitude: 36.5, longitude: -4.8 },
   );
   assert.equal(patch.find((entry) => entry.path === "/customer").value.lastName, "");
+});
+
+test("scheduled checkout selects and sends an available fulfilment window", () => {
+  const selected = selectFulfilmentWindow({ times: [
+    { from: "2026-07-21T08:00:00Z", to: "2026-07-21T08:30:00Z" },
+  ] }, "2026-07-21T08:00:00Z");
+  assert.deepEqual(selected, { from: "2026-07-21T08:00:00Z", to: "2026-07-21T08:30:00Z" });
+  const patch = buildCheckoutPatch(
+    { Name: "Ada", PhoneNumber: "+34123456789" },
+    { lines: ["Private street"], city: "Marbella", postcode: "29603", latitude: 36.5, longitude: -4.8 },
+    { scheduled: selected },
+  );
+  assert.deepEqual(patch.find((entry) => entry.path === "/fulfilment/time").value, {
+    asap: false, scheduled: selected,
+  });
+  assert.throws(() => selectFulfilmentWindow({ times: [] }, "2026-07-21T08:00:00Z"), { code: "SCHEDULE_UNAVAILABLE" });
 });
 
 test("compareCandidates ranks validated delivered totals", async () => {

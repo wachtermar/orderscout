@@ -306,12 +306,66 @@ export async function glovoAddresses(options = {}) {
 
 export async function glovoBaskets(options = {}) {
   const me = await glovoMe(options);
-  const baskets = await request(`/v1/authenticated/customers/${me.id}/baskets`, { auth: true, location: options.location, fetchImpl: options.fetchImpl });
+  const location = await defaultGlovoLocation(options);
+  const baskets = await request(`/v1/authenticated/customers/${me.id}/baskets`, { auth: true, location, fetchImpl: options.fetchImpl });
   return { customerId: me.id, baskets: baskets ?? [] };
 }
 
-function glovoProduct(source, quantity) {
-  return { ids: { id: String(source.productId), externalId: source.productExternalId ?? "", legacyId: String(source.productId), storeProductId: source.storeProductId ?? "" }, quantity: { increments: quantity }, customizations: [] };
+async function defaultGlovoLocation(options = {}) {
+  if (Number.isFinite(Number(options.location?.latitude)) && Number.isFinite(Number(options.location?.longitude))) return options.location;
+  const addresses = await glovoAddresses(options);
+  const location = addresses.find((address) => address.isDefault) ?? addresses[0];
+  if (!location) throw new CliError("Glovo has no usable saved delivery address", "LOCATION_REQUIRED");
+  return location;
+}
+
+function selectedAttributes(group, selections) {
+  const requested = selections?.[String(group.id)] ?? selections?.[group.id];
+  if (requested !== undefined) {
+    const ids = Array.isArray(requested) ? requested.map(String) : [String(requested)];
+    const selected = group.attributes.filter((attribute) => ids.includes(String(attribute.id)) || ids.includes(String(attribute.externalId)));
+    if (selected.length !== ids.length || selected.length < Number(group.min ?? 0) || selected.length > Number(group.max ?? selected.length)) {
+      throw new CliError(`Invalid choices for Glovo modifier group "${group.name}"`, "INVALID_MODIFIER", { group });
+    }
+    return selected;
+  }
+  const minimum = Number(group.min ?? 0);
+  if (minimum <= 0) return [];
+  const preferred = [...group.attributes].sort((left, right) => {
+    const leftNo = /^(?:no\b|sin\b)/i.test(left.name ?? "") ? 1 : 0;
+    const rightNo = /^(?:no\b|sin\b)/i.test(right.name ?? "") ? 1 : 0;
+    return Number(left.priceImpact ?? left.priceInfo?.amount ?? 0) - Number(right.priceImpact ?? right.priceInfo?.amount ?? 0)
+      || leftNo - rightNo || Number(left.id) - Number(right.id);
+  });
+  return preferred.slice(0, minimum);
+}
+
+function glovoCustomization(group, attribute) {
+  return {
+    ids: {
+      groupLegacyId: String(group.id), groupId: String(group.id), groupExternalId: group.externalId ?? "",
+      groupPosition: Number(group.position ?? 0), legacyId: String(attribute.id), id: String(attribute.id),
+      externalId: attribute.externalId ?? "",
+    },
+    name: attribute.name, quantity: { increments: 1 }, customizationName: attribute.name, groupName: group.name,
+  };
+}
+
+function glovoProduct(source, quantity, product, selections) {
+  const selected = (product?.attributeGroups ?? []).flatMap((group) => selectedAttributes(group, selections)
+    .map((attribute) => ({ group, attribute })));
+  return {
+    product: {
+      ids: { id: String(source.productId), externalId: source.productExternalId ?? product?.externalId ?? "", legacyId: String(source.productId), storeProductId: source.storeProductId ?? product?.storeProductId ?? "" },
+      quantity: { increments: quantity },
+      customizations: selected.map(({ group, attribute }) => glovoCustomization(group, attribute)),
+    },
+    selections: selected.map(({ group, attribute }) => ({
+      groupId: String(group.id), groupName: group.name, attributeId: String(attribute.id), name: attribute.name,
+      price: Number(attribute.priceImpact ?? attribute.priceInfo?.amount ?? 0),
+    })),
+    groups: product?.attributeGroups ?? [],
+  };
 }
 
 export async function createGlovoBasket(offer, options = {}) {
@@ -321,13 +375,27 @@ export async function createGlovoBasket(offer, options = {}) {
     throw new CliError("Glovo basket lines must belong to one store and include product identifiers", "SOURCE_PLAN_MISSING");
   }
   const source = lines[0].source;
-  const products = lines.map((line) => glovoProduct(line.source, line.quantity ?? 1));
-  if (options.prepareOnly) return { mutated: false, payload: { products, storeId: source.storeId, storeAddressId: Number(source.storeAddressId), storeCategoryId: source.storeCategoryId ?? "1", handlingStrategy: "DELIVERY" } };
+  const menu = offer.url ? await glovoMenu(offer.url, options.fetchImpl) : { products: [] };
+  const configured = lines.map((line, index) => {
+    const product = menu.products.find((entry) => String(entry.id) === String(line.source.productId));
+    const selections = options.customizations?.[String(line.source.productId)] ?? options.customizations?.[index]
+      ?? (lines.length === 1 ? options.customizations : null);
+    return glovoProduct(line.source, line.quantity ?? 1, product, selections);
+  });
+  const products = configured.map((entry) => entry.product);
+  const payload = { products, storeId: source.storeId, storeAddressId: Number(source.storeAddressId), storeCategoryId: source.storeCategoryId ?? "1", handlingStrategy: "DELIVERY" };
+  const customizationReview = configured.map((entry, index) => ({
+    itemId: String(lines[index].source.productId), itemName: lines[index].item?.name ?? null,
+    selectionMode: options.customizations ? "explicit" : "minimum-price-defaults",
+    selections: entry.selections, groups: entry.groups,
+  }));
+  if (options.prepareOnly) return { mutated: false, payload, customizationReview, submitted: false };
+  const location = await defaultGlovoLocation(options);
   const me = await glovoMe(options);
-  const existing = await request(`/v1/authenticated/customers/${me.id}/baskets/stores/${source.storeId}`, { auth: true, location: options.location, fetchImpl: options.fetchImpl });
+  const existing = await request(`/v1/authenticated/customers/${me.id}/baskets/stores/${source.storeId}`, { auth: true, location, fetchImpl: options.fetchImpl });
   let basket;
   if (!existing) {
-    basket = await request(`/v1/authenticated/customers/${me.id}/baskets`, { method: "POST", auth: true, location: options.location, fetchImpl: options.fetchImpl, body: { products, storeId: source.storeId, storeAddressId: Number(source.storeAddressId), storeCategoryId: source.storeCategoryId ?? "1", handlingStrategy: "DELIVERY" } });
+    basket = await request(`/v1/authenticated/customers/${me.id}/baskets`, { method: "POST", auth: true, location, fetchImpl: options.fetchImpl, body: payload });
   } else {
     if ((existing.products ?? []).length) {
       throw new CliError("This Glovo store already has a non-empty basket; review it before adding comparison items", "CART_CONFLICT", {
@@ -335,14 +403,77 @@ export async function createGlovoBasket(offer, options = {}) {
         existingItemCount: existing.products.length,
       });
     }
-    basket = await request(`/v1/authenticated/customers/${me.id}/baskets/${existing.basketId}/products`, { method: "PUT", auth: true, location: options.location, fetchImpl: options.fetchImpl, body: { ...existing, products: [...(existing.products ?? []), ...products] } });
+    basket = await request(`/v1/authenticated/customers/${me.id}/baskets/${existing.basketId}/products`, { method: "PUT", auth: true, location, fetchImpl: options.fetchImpl, body: { ...existing, products: [...(existing.products ?? []), ...products] } });
   }
-  return { mutated: true, basket, submitted: false };
+  if (!(basket?.products?.length > 0)) throw new CliError("Glovo rejected the configured basket products", "BASKET_REJECTED", { customizationReview });
+  return { mutated: true, basket, customizationReview, submitted: false };
 }
 
 export async function quoteGlovoBasket(basketId, options = {}) {
-  const quote = await request(`/v1/authenticated/customers/baskets/${encodeURIComponent(basketId)}/validate`, { method: "POST", auth: true, location: options.location, fetchImpl: options.fetchImpl });
-  return { provider: "glovo", basketId, quote, pricing: normalizeGlovoQuote(quote), submitted: false };
+  const location = await defaultGlovoLocation(options);
+  const me = await glovoMe(options);
+  const basket = await request(`/v1/authenticated/customers/${me.id}/baskets/${encodeURIComponent(basketId)}`, {
+    auth: true, location, fetchImpl: options.fetchImpl,
+  });
+  const products = (basket.products ?? []).map((product) => ({
+    id: product.ids?.id ?? "", storeProductId: product.ids?.storeProductId ?? "", externalId: product.ids?.externalId ?? "",
+    quantity: product.quantity?.increments ?? 0, name: product.name ?? "", displayedPrice: product.price?.final?.major ?? 0,
+    customizations: (product.customizations ?? []).map((customization) => ({
+      attributeId: Number(customization.ids?.legacyId), quantity: customization.quantity?.increments ?? 1,
+      externalId: customization.ids?.externalId ?? "", groupId: customization.ids?.groupLegacyId === undefined ? undefined : Number(customization.ids.groupLegacyId),
+      groupExternalId: customization.ids?.groupExternalId ?? "", groupPosition: customization.ids?.groupPosition ?? 0,
+      name: customization.customizationName ?? customization.name, groupName: customization.groupName,
+    })),
+  }));
+  const orderDetails = {
+    categoryId: Number(basket.storeCategoryId ?? 1), cityCode: location.cityCode ?? "",
+    handlingStrategy: { type: "DELIVERY" }, origin: "CHECKOUT", orderType: "STORES",
+    storeAddressId: Number(basket.storeAddressId), storeId: Number(basket.storeId), baseOrderUrn: null,
+    basketId: basket.basketId,
+  };
+  const components = {
+    productList: { products },
+    deliveryAddress: {
+      label: location.label ?? location.city ?? "Delivery address", details: "",
+      latitude: Number(location.latitude), longitude: Number(location.longitude), customFields: [],
+    },
+    ...(options.components ?? {}),
+  };
+  const fillTemplate = async (previous, nextComponents) => {
+    const response = await request("/v3/checkouts/order/1/template", {
+      method: "POST", auth: true, location, fetchImpl: options.fetchImpl,
+      body: { checkout: {
+        orderDetails: { ...(previous?.orderDetails ?? {}), ...orderDetails }, components: nextComponents,
+        sourceScreen: "CART", analytics: { templateReceived: previous?.analytics?.templateReceived },
+        basketDetails: { basketVersion: basket.basketVersion ?? null },
+      } },
+    });
+    return response?.checkout ?? response;
+  };
+  let quote = await fillTemplate(null, components);
+  let fulfilment = null;
+  if (options.scheduledAt) {
+    const requested = new Date(options.scheduledAt);
+    if (Number.isNaN(requested.getTime())) throw new CliError("Scheduled delivery requires a valid ISO date and time", "INVALID_SCHEDULE");
+    const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+      timeZone: options.timeZone ?? "Europe/Madrid", year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+    }).formatToParts(requested).filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
+    const requestedValue = `${parts.year}/${parts.month}/${parts.day} ${parts.hour}:${parts.minute}`;
+    const selector = (quote.components ?? []).find((component) => component.id === "schedulingTime");
+    const slots = selector?.timeSelectorData?.selectors?.flatMap((entry) => entry.options ?? [])
+      .flatMap((entry) => entry.timeSlots ?? []) ?? [];
+    const selected = slots.find((slot) => slot.value === requestedValue);
+    if (!selected) throw new CliError("The Glovo store cannot deliver at the requested time", "SCHEDULE_UNAVAILABLE", {
+      requestedAt: requested.toISOString(), available: slots.slice(0, 12).map((slot) => ({ label: slot.label, value: slot.value })),
+    });
+    quote = await fillTemplate(quote, { ...components, schedulingTime: { value: selected.value } });
+    fulfilment = {
+      requestedAt: requested.toISOString(), timeZone: options.timeZone ?? "Europe/Madrid", status: "verified",
+      selectedWindow: { value: selected.value, label: selected.label }, source: "glovo-checkout-template",
+    };
+  }
+  return { provider: "glovo", basketId, quote, fulfilment, pricing: normalizeGlovoQuote(quote), submitted: false };
 }
 
 export function glovoCheckoutUrl(offer) {
@@ -399,12 +530,22 @@ function findLabeledAmount(value, pattern) {
 }
 
 export function normalizeGlovoQuote(quote) {
-  const total = findAmount(quote, ["payableAmount", "finalPrice", "totalAmount", "total"]);
-  const subtotal = findAmount(quote, ["subtotal", "productsPrice", "itemsPrice"]);
+  const priceComponent = (quote?.components ?? []).find((component) => component.id === "priceBreakdown" || component.type === "priceBreakdown");
+  const lines = priceComponent?.priceBreakdownData?.breakDown ?? [];
+  const lineAmount = (pattern, options = {}) => {
+    const line = lines.find((entry) => pattern.test(`${entry.type ?? ""} ${entry.title ?? ""}`));
+    if (!line) return null;
+    if (options.fee && (/gratis|free/i.test(String(line.valuePrefix ?? "")) || line.valueStyle === "STRIKETHROUGH")) return 0;
+    return numericText(line.value);
+  };
+  const purchaseTotalCents = Number(quote?.orderDetails?.purchaseTotalCents);
+  const total = lineAmount(/^TOTAL\b/i) ?? (Number.isFinite(purchaseTotalCents) ? purchaseTotalCents / 100
+    : findAmount(quote, ["payableAmount", "finalPrice", "totalAmount", "total"]));
+  const subtotal = lineAmount(/PRODUCT|PRODUCTOS/i) ?? findAmount(quote, ["subtotal", "productsPrice", "itemsPrice"]);
   const fees = {
-    delivery: findLabeledAmount(quote, /delivery|entrega|envio/i),
-    service: findLabeledAmount(quote, /service|servicio|gestion/i),
-    smallOrder: findLabeledAmount(quote, /small.?order|pedido.?minimo/i),
+    delivery: lineAmount(/DELIVERY|ENTREGA|ENVIO/i, { fee: true }) ?? findLabeledAmount(quote, /delivery|entrega|envio/i),
+    service: lineAmount(/SERVICE|SERVICIO/i, { fee: true }) ?? findLabeledAmount(quote, /service|servicio|gestion/i),
+    smallOrder: lineAmount(/SMALL.?ORDER|PEDIDO.?PEQUE|PEDIDO.?MINIMO/i, { fee: true }) ?? findLabeledAmount(quote, /small.?order|pedido.?minimo/i),
     bag: findLabeledAmount(quote, /bag|bolsa/i),
     other: null,
   };
