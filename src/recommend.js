@@ -7,8 +7,10 @@ const HEALTHY_TERMS = [
 ];
 const INDULGENT_TERMS = [
   "frito", "fried", "burger", "hamburgues", "pizza", "donut", "tarta", "cake", "helado",
-  "chocolate", "bacon", "patatas", "fries", "kebab", "mayonesa", "mayonnaise",
+  "chocolate", "bacon", "patatas", "fries", "kebab", "mayonesa", "mayonnaise", "empanado",
+  "breaded", "battered", "croqueta", "crispy", "creamy",
 ];
+const STRONGLY_INDULGENT_TERMS = ["frito", "fried", "empanado", "breaded", "battered", "croqueta", "burger", "hamburgues", "pizza", "donut", "cake"];
 const DIETARY = {
   vegan: ["vegan", "vegano", "vegana"],
   vegetarian: ["vegetarian", "vegetariano", "vegetariana"],
@@ -28,11 +30,16 @@ export function parseIntent(text) {
     ?? normalized.match(/(?:€|eur)\s*(\d+(?:\.\d+)?)\s*(?:max)?/);
   const water = /\b(?:agua|water)\b/.test(normalized);
   const meal = /\b(?:food|meal|dinner|lunch|breakfast|restaurant|pizza|burger|kebab|sushi|tacos?|comida|cena|almuerzo|desayuno|restaurante|hamburguesa|saludable|healthy|tasty|vegetarian|vegetariano|vegan|vegano|halal)\b/.test(normalized);
+  const peopleMatch = normalized.match(/\b(?:for|para)\s+(\d+)\b/)
+    ?? normalized.match(/\b(\d+)\s*(?:people|persons?|personas?|comensales?)\b/);
+  const peopleWordMatch = normalized.match(/\b(?:for|para)\s+(one|two|three|four|uno|una|dos|tres|cuatro)\b/);
+  const peopleWords = { one: 1, uno: 1, una: 1, two: 2, dos: 2, three: 3, tres: 3, four: 4, cuatro: 4 };
   return {
     text: String(text).trim(),
     normalized,
     kind: water ? "water" : meal ? "meal" : "product",
     targetLiters: water ? Number(volumeMatch?.[1] ?? 1.5) : null,
+    people: meal ? Number(peopleMatch?.[1] ?? peopleWords[peopleWordMatch?.[1]] ?? 1) : null,
     healthy: /\b(?:healthy|healthier|saludable|sano|sana|light|ligero)\b/.test(normalized),
     tasty: /\b(?:tasty|delicious|rico|rica|sabroso|sabrosa|best rated|mejor valorado)\b/.test(normalized),
     cheap: /\b(?:cheap|cheapest|budget|barato|barata|economico|economica|best deal|mejor oferta)\b/.test(normalized),
@@ -43,6 +50,42 @@ export function parseIntent(text) {
     dietary: Object.fromEntries(Object.entries(DIETARY).map(([key, terms]) =>
       [key, terms.some((term) => normalized.includes(term))])),
   };
+}
+
+const EXPLICIT_MEAL_QUERIES = [
+  ["poke", /\bpoke\b/], ["ensalada", /\b(?:ensalada|salad)\b/],
+  ["pollo a la plancha", /\b(?:pollo a la plancha|grilled chicken)\b/],
+  ["sushi", /\bsushi\b/], ["pizza", /\bpizza\b/],
+  ["hamburguesa", /\b(?:hamburguesa|burger)\b/], ["kebab", /\bkebab\b/],
+  ["tacos", /\btacos?\b/], ["vegano", /\b(?:vegan|vegano|vegana)\b/],
+  ["vegetariano", /\b(?:vegetarian|vegetariano|vegetariana)\b/], ["halal", /\bhalal\b/],
+];
+
+export function providerSearchQueries(text) {
+  const intent = typeof text === "string" ? parseIntent(text) : text;
+  if (intent.kind === "water") return ["agua"];
+  const explicit = EXPLICIT_MEAL_QUERIES.filter(([, pattern]) => pattern.test(intent.normalized)).map(([query]) => query);
+  if (intent.kind === "meal") {
+    const healthy = intent.healthy ? ["poke", "ensalada", "pollo a la plancha"] : [];
+    const dietary = intent.dietary.vegan ? ["vegano"]
+      : intent.dietary.vegetarian ? ["vegetariano"]
+        : intent.dietary.halal ? ["halal"] : [];
+    return [...new Set([...explicit, ...dietary, ...healthy, ...(explicit.length || healthy.length || dietary.length ? [] : ["comida"])])].slice(0, 4);
+  }
+  const ignored = new Set([
+    "find", "get", "buy", "order", "deliver", "delivery", "cheap", "cheapest", "fast", "fastest", "best", "rated",
+    "buscar", "comprar", "pedir", "entregar", "entrega", "barato", "barata", "mejor", "rapido", "rapida",
+    "under", "below", "hasta", "menos", "para", "with", "con", "from", "the", "and", "que", "eur", "max",
+    "just", "eat", "glovo", "uber", "eats", "now", "ahora", "please", "quiero", "want",
+    "which", "where", "can", "could", "need", "needs", "needed", "me", "my", "our", "for", "this", "that",
+    "today", "tonight", "manana", "tomorrow", "available", "disponible", "quieres", "necesito",
+  ]);
+  let terms = intent.normalized.split(/[^a-z0-9áéíóúüñ]+/)
+    .filter((term) => term.length > 1 && !ignored.has(term) && !/^\d/.test(term));
+  const categories = new Set(["pharmacy", "farmacia", "supermarket", "supermercado", "store", "tienda", "shop", "product", "producto"]);
+  const specific = terms.filter((term) => !categories.has(term));
+  if (specific.length) terms = specific;
+  return [terms.slice(0, 5).join(" ") || intent.normalized];
 }
 
 export function parsePackVolume(value) {
@@ -177,7 +220,8 @@ function mealCandidates(restaurant, menuData, menu, intent) {
       const text = `${restaurant.cuisines?.map((entry) => entry.name).join(" ")} ${category.name} ${item.name} ${item.description ?? ""}`;
       if (!matchesDietary(text, intent.dietary)) continue;
       const health = healthScore(text);
-      if (intent.healthy && health.score <= 0) continue;
+      const normalized = normalizedText(text);
+      if (intent.healthy && (health.score <= 0 || STRONGLY_INDULGENT_TERMS.some((term) => normalized.includes(term)))) continue;
       for (const variation of item.variations) {
         const price = Number(variation.price);
         if (!Number.isFinite(price) || (intent.budget !== null && price > intent.budget)) continue;

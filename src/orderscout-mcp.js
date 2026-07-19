@@ -22,7 +22,7 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_accounts_status",
-    description: "Show saved account configuration and the last known authentication result. This is cached state, not proof of a current login. Before claiming a provider is logged in, call its live auth-status tool. Never exposes credentials.",
+    description: "Live-verify all three provider sessions through their CLI account APIs and return enabled accounts and detected memberships. This is authoritative for login claims and never exposes credentials.",
     inputSchema: objectSchema(), annotations: readOnly, command: () => ["accounts", "status"],
   },
   {
@@ -60,20 +60,9 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_provider_auth_complete",
-    description: "Finish Glovo or Uber Eats CLI login by importing only provider-domain cookies from the selected native Chrome profile, then verify through the direct account API. Never returns cookie values. A successful live verification is required before search.",
-    inputSchema: objectSchema({ provider: { type: "string", enum: ["glovo", "ubereats"] }, profile: string("Chrome profile name; normally Default.") }, ["provider"]), annotations: remoteWrite,
-    command: (input) => ["auth", "complete", input.provider, "--profile", input.profile ?? "Default", "--agent"],
-  },
-  {
-    name: "orderscout_provider_browser_session",
-    description: "Deprecated compatibility tool. Recording visible browser state does not authenticate the OrderScout CLI and must never be used to claim login or to route provider operations through a browser. Use the provider login, completion, and live auth-status tools instead.",
-    inputSchema: objectSchema({
-      provider: { type: "string", enum: ["glovo", "ubereats"] },
-      authenticated: boolean("Whether the official provider UI visibly shows a signed-in account."),
-      addressSelected: boolean("Whether the official provider UI visibly shows a selected delivery address."),
-      membershipActive: boolean("Optional visible Glovo Prime or Uber One state."),
-    }, ["provider", "authenticated", "addressSelected"]), annotations: localWrite,
-    command: (input) => ["accounts", "record", input.provider, "--transport", "browser", "--authenticated", String(input.authenticated), "--address-selected", String(input.addressSelected), ...(input.membershipActive === undefined ? [] : ["--membership", String(input.membershipActive)]), "--agent"],
+    description: "Automatically scan supported native Chrome profiles for a current Glovo or Uber Eats session, import only provider-domain cookies, and save only a candidate that passes the direct account API. No terminal, profile name, cookie, token, or callback is requested.",
+    inputSchema: objectSchema({ provider: { type: "string", enum: ["glovo", "ubereats"] } }, ["provider"]), annotations: remoteWrite,
+    command: (input) => ["auth", "complete", input.provider, "--agent"],
   },
   {
     name: "orderscout_provider_auth_status",

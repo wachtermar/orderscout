@@ -390,7 +390,9 @@ export async function resolveSavedLocation(token, index = 0, fetchImpl = fetch) 
   if (!address) throw new CliError(`Saved address ${index} does not exist`, "ADDRESS_NOT_FOUND", {
     available: addresses.length,
   });
-  if (Number.isFinite(Number(address.latitude)) && Number.isFinite(Number(address.longitude))) {
+  if (address.latitude !== null && address.latitude !== undefined
+    && address.longitude !== null && address.longitude !== undefined
+    && Number.isFinite(Number(address.latitude)) && Number.isFinite(Number(address.longitude))) {
     return {
       source: "saved-address",
       addressIndex: index,

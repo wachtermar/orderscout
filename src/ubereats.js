@@ -17,8 +17,8 @@ function apiHeaders(cookieHeader) {
   };
 }
 
-async function request(operation, body = {}, { auth = false, fetchImpl = fetch } = {}) {
-  const session = await loadBrowserSession("ubereats");
+async function request(operation, body = {}, { auth = false, fetchImpl = fetch, cookieHeader } = {}) {
+  const session = cookieHeader ? { cookieHeader, source: "verification" } : await loadBrowserSession("ubereats");
   if (auth && !session) throw new CliError("Sign in with `orderscout auth login ubereats` first", "AUTH_REQUIRED");
   const response = await fetchImpl(`${BASE}/_p/api/${operation}`, {
     method: "POST",
@@ -121,6 +121,70 @@ export function normalizeUberSearch(payload) {
   return offers;
 }
 
+export function collectUberStores(payload) {
+  const stores = [];
+  const seen = new Set();
+  function walk(value) {
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) return value.forEach(walk);
+    const candidates = [value.store, value.storeInfo, value.miniStoreWithItems?.store, value.storeWithItems?.store];
+    for (const candidate of candidates) {
+      const store = storeValue(candidate);
+      if (store && !seen.has(store.id)) {
+        seen.add(store.id);
+        stores.push(store);
+      }
+    }
+    for (const child of Object.values(value)) walk(child);
+  }
+  walk(payload);
+  return stores;
+}
+
+function normalizedTerms(query) {
+  const ignored = new Set(["a", "al", "con", "de", "del", "el", "en", "la", "las", "los", "y"]);
+  return String(query).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+    .split(/[^a-z0-9]+/).filter((term) => term.length > 2 && !ignored.has(term));
+}
+
+function menuOffers(store, menu, query) {
+  const terms = normalizedTerms(query);
+  return menu.items.filter((item) => {
+    if (!terms.length) return true;
+    const text = `${item.title} ${item.description ?? ""}`.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    return terms.some((term) => text.includes(term));
+  }).map((item) => ({
+    provider: "ubereats",
+    merchant: { id: store.id, name: store.name, rating: store.rating, ratingCount: store.ratingCount },
+    item: { id: item.uuid, name: item.title, description: item.description, unitPrice: item.price },
+    quantity: 1,
+    etaMinutes: store.etaMinutes?.min ?? null,
+    available: store.orderable !== false && menu.isOpen !== false && item.available !== false,
+    pricing: { currency: "EUR", subtotal: item.price, total: null, exact: false, fees: { delivery: store.deliveryFee } },
+    membershipEligible: store.membershipEligible,
+    url: store.url,
+    source: {
+      adapter: "ubereats-api", storeUuid: store.id, itemUuid: item.uuid,
+      sectionUuid: item.sectionUuid ?? "", subsectionUuid: item.subsectionUuid ?? "",
+      rawPrice: item.rawPrice, requiresCustomizations: item.hasCustomizations,
+    },
+  }));
+}
+
+async function mapConcurrent(values, concurrency, mapper) {
+  const results = new Array(values.length);
+  let index = 0;
+  async function worker() {
+    while (index < values.length) {
+      const current = index++;
+      try { results[current] = await mapper(values[current]); }
+      catch { results[current] = []; }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, worker));
+  return results.flat();
+}
+
 export async function searchUberEats(query, options = {}) {
   const payload = await request("getSearchFeedV1", {
     userQuery: query,
@@ -137,7 +201,30 @@ export async function searchUberEats(query, options = {}) {
     recaptchaToken: "",
   }, options);
   const limit = Math.max(1, Number(options.limit ?? 60));
-  return { offers: normalizeUberSearch(payload).slice(0, limit), raw: options.raw ? payload : undefined };
+  const directOffers = normalizeUberSearch(payload);
+  let expandedOffers = [];
+  if (directOffers.length < Math.min(10, limit) && options.expandStores !== false) {
+    const terms = normalizedTerms(query);
+    const stores = collectUberStores(payload);
+    const relevant = stores.filter((store) => {
+      const name = store.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+      return terms.some((term) => name.includes(term));
+    });
+    const selected = [...new Map([...relevant, ...stores].map((store) => [store.id, store])).values()]
+      .slice(0, Math.max(1, Number(options.storeLimit ?? 6)));
+    expandedOffers = await mapConcurrent(selected, Number(options.concurrency ?? 4), async (store) => {
+      const menu = await uberEatsMenu(store.id, options);
+      return menuOffers(store, menu, query);
+    });
+  }
+  const offers = [...new Map([...directOffers, ...expandedOffers]
+    .map((offer) => [`${offer.merchant.id}:${offer.item.id}`, offer])).values()].slice(0, limit);
+  return {
+    offers,
+    searchedStores: collectUberStores(payload).length,
+    expandedStores: expandedOffers.length ? new Set(expandedOffers.map((offer) => offer.merchant.id)).size : 0,
+    raw: options.raw ? payload : undefined,
+  };
 }
 
 function collectCatalog(payload) {
@@ -168,11 +255,18 @@ export async function uberEatsItem(source, options = {}) {
 }
 
 export async function uberEatsMe(options = {}) {
-  const payload = await request("getProfilesForUserV1", {}, { ...options, auth: true });
-  const profiles = payload.profiles ?? [];
-  const profile = profiles[0];
-  if (!profile) throw new CliError("Uber Eats session has no active eater profile", "AUTH_EXPIRED");
-  return { authenticated: true, id: profile.uuid ?? profile.id ?? null, name: [profile.firstName, profile.lastName].filter(Boolean).join(" "), email: profile.email ?? null, phone: profile.phoneNumber ?? null };
+  const user = await request("getUserV1", {}, { ...options, auth: true });
+  if (user.isLoggedIn !== true) throw new CliError("Uber Eats session is not logged in", "AUTH_EXPIRED");
+  const subscriptionStatus = user.subscriptionMeta?.eatsSubscriptionStatus ?? null;
+  return {
+    authenticated: true,
+    id: user.uuid ?? user.id ?? null,
+    name: [user.firstName, user.lastName].filter(Boolean).join(" "),
+    email: user.email ?? null,
+    phone: user.phoneNumber ?? null,
+    hasConfirmedMobile: user.hasConfirmedMobile ?? null,
+    membershipActive: subscriptionStatus === "ACTIVE",
+  };
 }
 
 export async function uberEatsCarts(options = {}) {
@@ -235,4 +329,4 @@ export async function placeUberEatsOrder(draftOrderUuid, quote, options = {}) {
   }
 }
 
-export const uberEatsInternals = { apiHeaders, collectCatalog, price, request };
+export const uberEatsInternals = { apiHeaders, collectCatalog, menuOffers, price, request };

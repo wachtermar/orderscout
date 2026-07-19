@@ -1,10 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createGlovoBasket, glovoInternals, glovoOrderConfirmation, glovoSubmissionRequest, placeGlovoOrder } from "../src/glovo.js";
+import { createGlovoBasket, glovoAddresses, glovoInternals, glovoOrderConfirmation, glovoSubmissionRequest, placeGlovoOrder } from "../src/glovo.js";
 
 test("Glovo browser cookie token is parsed without exposing other cookies", () => {
   const encoded = encodeURIComponent(JSON.stringify({ access: { accessToken: "a".repeat(40) } }));
   assert.equal(glovoInternals.accessToken({ cookieHeader: `other=secret; glovo_auth_info=${encoded}` }), "a".repeat(40));
+});
+
+test("Glovo addresses normalize the current data.addresses envelope", async () => {
+  const addresses = await glovoAddresses({
+    cookieHeader: `glovo_auth_info=${encodeURIComponent(JSON.stringify({ accessToken: "a".repeat(40) }))}`,
+    fetchImpl: async () => Response.json({ data: { addresses: [{
+      entryType: "CURRENT",
+      address: { id: 7, addressLine: "Private address", latitude: 36.5, longitude: -4.8, cityCode: "MBA", cityName: "Marbella", kind: "HOME" },
+    }] } }),
+  });
+  assert.deepEqual(addresses, [{ id: 7, label: "HOME", latitude: 36.5, longitude: -4.8, city: "Marbella", cityCode: "MBA", isDefault: true }]);
 });
 
 test("Glovo search response becomes a direct normalized offer", () => {

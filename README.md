@@ -36,13 +36,12 @@ The computer needs [Node.js 20 or newer](https://nodejs.org/) once. Restart Chat
 ### Signing in—no Terminal
 
 - Just Eat first reuses or refreshes its saved OAuth session. Only when a fresh login is required does it open the official OAuth page; the ChatGPT tool returns immediately, and you simply say when the page has finished.
-- In ChatGPT Work, Glovo and Uber Eats use the browser already inside the app. Existing sign-ins and selected addresses stay in that browser; OrderScout does not open Chrome or guess a profile.
-- The standalone CLI can still use normal Chrome as an optional direct-API session source.
+- Glovo and Uber Eats first check whether any supported Chrome profile already contains a working provider session. OrderScout tries the profiles automatically and saves only a session that passes the provider's live account API.
+- If no working session exists, ChatGPT opens the official site in normal Chrome. Sign in there, return to ChatGPT, and say, “I finished signing in.” There is no Terminal prompt, cookie copy, or profile-selection question.
 - Enter passwords and verification codes only on the official website.
-- Return to ChatGPT and say, “I finished signing in.”
-- In standalone CLI mode only, an explicit Chrome import stores only provider-domain cookies in an owner-only local file.
+- The same automatic flow is available from the standalone CLI.
 
-Never paste a password, cookie, token, or login URL into chat. OrderScout never exports the Work browser's cookies, local storage, passwords, tokens, or session data. In Work, the skill operates the visible official provider UI and sends only normalized offer and checkout facts to the comparison engine.
+Never paste a password, cookie, token, or login URL into chat. ChatGPT's in-app browser does not expose a supported session-export API, so OrderScout does not pretend that a visible in-app sign-in authenticates its CLI. The in-app browser is used only for optional visual review of a CLI-created checkout; search, menus, baskets, quotes, and guarded placement remain CLI operations.
 
 The current plugin is local to ChatGPT Work/Codex on desktop. It is not an ordinary mobile ChatGPT skill yet; a hosted MCP service would be required for phone-only use.
 
@@ -130,11 +129,11 @@ orderscout auth complete justeat
 
 orderscout auth login glovo
 # Sign in on Glovo, then:
-orderscout auth complete glovo --profile Default
+orderscout auth complete glovo
 
 orderscout auth login ubereats
 # Sign in and choose the delivery address, then:
-orderscout auth complete ubereats --profile Default
+orderscout auth complete ubereats
 
 # Direct provider commands
 orderscout glovo search "healthy chicken dinner" --at "29603 Marbella"

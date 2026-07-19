@@ -7,6 +7,7 @@ import {
   normalizeSlug,
   parseArgs,
   requestJson,
+  resolveSavedLocation,
 } from "../src/lib.js";
 
 test("parseArgs supports flags, booleans, and positionals", () => {
@@ -74,6 +75,30 @@ test("normalizeSavedAddresses accepts the account API's PascalCase shape", () =>
     longitude: 2.17,
     additionalInformation: {},
   });
+});
+
+test("saved addresses without coordinates are geocoded instead of becoming zero-zero", async () => {
+  const payload = Buffer.from(JSON.stringify({ sub: "test", exp: 4_102_444_800 })).toString("base64url");
+  const token = `header.${payload}.signature`;
+  const requested = [];
+  const fetchImpl = async (url) => {
+    const parsed = new URL(url);
+    requested.push(parsed.pathname);
+    if (parsed.pathname.endsWith("/consumer/me/address")) {
+      return Response.json({ Addresses: [{ AddressId: 7, City: "Marbella", ZipCode: "29603", Line1: "Test street 1" }] });
+    }
+    if (parsed.pathname.endsWith("/autocomplete/addresses/es")) {
+      return Response.json({ session: "session", data: [{ id: "place", description: "Test street 1, Marbella" }] });
+    }
+    return Response.json({ features: [{ geometry: { coordinates: [-4.8, 36.5] }, properties: { structuredAddress: { postcode: "29603", city: "Marbella" } } }] });
+  };
+  const location = await resolveSavedLocation(token, 0, fetchImpl);
+  assert.deepEqual({ latitude: location.latitude, longitude: location.longitude, city: location.city }, { latitude: 36.5, longitude: -4.8, city: "Marbella" });
+  assert.deepEqual(requested, [
+    "/applications/international/consumer/me/address",
+    "/autocomplete/addresses/es",
+    "/autocomplete/addresses/es/place",
+  ]);
 });
 
 test("requestJson never retries mutating requests automatically", async () => {

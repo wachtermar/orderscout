@@ -19,6 +19,7 @@ import { runOrderScoutMcpServer } from "./orderscout-mcp.js";
 import {
   createUberEatsBasket, placeUberEatsOrder, quoteUberEatsBasket, searchUberEats, uberEatsCarts, uberEatsMe, uberEatsMenu,
 } from "./ubereats.js";
+import { providerSearchQueries } from "./recommend.js";
 
 const execFileAsync = promisify(execFile);
 const JUSTEAT_CLI = fileURLToPath(new URL("./cli.js", import.meta.url));
@@ -28,8 +29,8 @@ const HELP = `orderscout — compare Just Eat, Glovo, and Uber Eats in Spain
 
 Usage:
   orderscout context
-  orderscout auth login|complete|status|logout <provider> [--profile Default]
-  orderscout accounts status
+  orderscout auth login|complete|status|logout <provider> [--profile auto]
+  orderscout accounts status [--cached]
   orderscout accounts set --providers justeat,glovo,ubereats [--accounts JSON] [--memberships JSON]
   orderscout accounts record <provider> --authenticated true [--membership true] [--transport api|browser] [--address-selected true]
   orderscout recommend <what you want> [--providers list] [--at location] [--objective cheapest|fastest|best|value]
@@ -45,7 +46,8 @@ Usage:
   orderscout mcp
 
 All three providers use direct HTTP adapters. Glovo and Uber Eats login opens the official site in native
-Chrome and imports only that provider's domain cookies after sign-in; Playwright is not used. Search, menu,
+Chrome and automatically finds the signed-in profile, importing only that provider's domain cookies after sign-in;
+Playwright is not used. Search, menu,
 basket, and checkout operations run directly through each provider adapter. No search or quote places an order.
 `;
 
@@ -91,7 +93,7 @@ function justEatOffers(result) {
       ratingCount: candidate.restaurant?.ratingCount,
     },
     item: {
-      id: candidate.item?.id,
+      id: candidate.item?.variationId ?? candidate.item?.id,
       name: candidate.item?.name,
       description: candidate.item?.description,
       unitPrice: candidate.item?.unitPrice,
@@ -135,8 +137,13 @@ async function collectGlovo(searchId, intent, flags) {
       location = addresses.find((address) => address.isDefault) ?? addresses[0];
       if (!location) throw new CliError("Glovo has no usable saved delivery address; pass --at once", "LOCATION_REQUIRED");
     }
-    const result = await searchGlovo(intent, location, { limit: flags.limit });
-    return ingestOffers(searchId, "glovo", result.offers);
+    const queries = providerSearchQueries(intent);
+    const results = await Promise.allSettled(queries.map((query) => searchGlovo(query, location, { limit: flags.limit })));
+    const fulfilled = results.filter((result) => result.status === "fulfilled");
+    if (!fulfilled.length) throw results[0].reason;
+    const offers = [...new Map(fulfilled.flatMap((result) => result.value.offers)
+      .map((offer) => [`${offer.merchant?.id}:${offer.item?.id}`, offer])).values()];
+    return ingestOffers(searchId, "glovo", offers);
   } catch (error) {
     return recordProviderError(searchId, "glovo", error.message ?? error.code);
   }
@@ -144,11 +151,52 @@ async function collectGlovo(searchId, intent, flags) {
 
 async function collectUberEats(searchId, intent, flags) {
   try {
-    const result = await searchUberEats(intent, { limit: flags.limit });
-    return ingestOffers(searchId, "ubereats", result.offers);
+    const queries = providerSearchQueries(intent);
+    const results = await Promise.allSettled(queries.map((query) => searchUberEats(query, { limit: flags.limit })));
+    const fulfilled = results.filter((result) => result.status === "fulfilled");
+    if (!fulfilled.length) throw results[0].reason;
+    const offers = [...new Map(fulfilled.flatMap((result) => result.value.offers)
+      .map((offer) => [`${offer.merchant?.id}:${offer.item?.id}`, offer])).values()];
+    return ingestOffers(searchId, "ubereats", offers);
   } catch (error) {
     return recordProviderError(searchId, "ubereats", error.message ?? error.code);
   }
+}
+
+async function providerAuthStatus(provider) {
+  if (provider === "justeat") {
+    const status = await runLegacyJustEat(["auth", "status", "--agent"], { allowFailure: true });
+    if (status?.error) return { provider, authenticated: false, source: null, error: status.error };
+    return { provider, ...status };
+  }
+  const stored = await loadBrowserSession(provider);
+  if (!stored) return { provider, authenticated: false, source: null, importedAt: null };
+  try {
+    const account = provider === "glovo" ? await glovoMe() : await uberEatsMe();
+    return { provider, ...account, source: stored.source, importedAt: stored.importedAt ?? null };
+  } catch (error) {
+    return { provider, authenticated: false, source: stored.source, importedAt: stored.importedAt ?? null, error: { code: error.code, message: error.message } };
+  }
+}
+
+async function liveAccountsStatus() {
+  const cached = publicAccountStatus(await loadAccounts());
+  const providers = [];
+  for (const account of cached.providers) {
+    const live = await providerAuthStatus(account.id);
+    providers.push({
+      ...account,
+      authenticated: Boolean(live.authenticated),
+      transport: "api",
+      membership: account.membership && live.membershipActive !== undefined
+        ? { ...account.membership, active: Boolean(live.membershipActive), source: "detected" }
+        : account.membership,
+      checkedAt: new Date().toISOString(),
+      source: live.source ?? null,
+      ...(live.error ? { error: live.error } : {}),
+    });
+  }
+  return { providers, live: true, verifiedAt: new Date().toISOString() };
 }
 
 export async function runOrderScout(argv) {
@@ -188,22 +236,25 @@ export async function runOrderScout(argv) {
     }
     if (action === "login") return writeOutput(beginBrowserLogin(provider), flags);
     if (action === "complete") {
-      const imported = await importChromeSession(provider, { profile: flags.profile ?? "Default", cookiePath: flags["cookie-path"], timeout: Number(flags.timeout ?? 30_000) });
-      const profile = provider === "glovo" ? await glovoMe() : await uberEatsMe();
-      await recordProviderStatus(provider, { authenticated: true, membershipActive: profile.membershipActive, transport: "api" });
-      return writeOutput({ ...imported, profile: { id: profile.id, name: profile.name, email: profile.email }, membershipActive: profile.membershipActive ?? null }, flags);
+      const imported = await importChromeSession(provider, {
+        profile: flags.profile ?? "auto",
+        cookiePath: flags["cookie-path"],
+        timeout: Number(flags.timeout ?? 30_000),
+        verify: (session) => provider === "glovo"
+          ? glovoMe({ cookieHeader: session.cookieHeader })
+          : uberEatsMe({ cookieHeader: session.cookieHeader }),
+      });
+      const { verified: account, profile: chromeProfile, ...result } = imported;
+      await recordProviderStatus(provider, { authenticated: true, membershipActive: account.membershipActive, transport: "api" });
+      return writeOutput({
+        ...result,
+        chromeProfile,
+        profile: { id: account.id, name: account.name, email: account.email },
+        membershipActive: account.membershipActive ?? null,
+      }, flags);
     }
     if (action === "status") {
-      const stored = await loadBrowserSession(provider);
-      if (!stored) return writeOutput({ provider, authenticated: false, source: null }, flags);
-      try {
-        const profile = provider === "glovo" ? await glovoMe() : await uberEatsMe();
-        await recordProviderStatus(provider, { authenticated: true, membershipActive: profile.membershipActive, transport: "api" });
-        return writeOutput({ provider, ...profile, source: stored.source, importedAt: stored.importedAt ?? null }, flags);
-      } catch (error) {
-        await recordProviderStatus(provider, { authenticated: false });
-        return writeOutput({ provider, authenticated: false, source: stored.source, error: { code: error.code, message: error.message } }, flags);
-      }
+      return writeOutput(await providerAuthStatus(provider), flags);
     }
     if (action === "logout") {
       const result = await logoutBrowserSession(provider);
@@ -215,7 +266,9 @@ export async function runOrderScout(argv) {
 
   if (command === "accounts") {
     const [action, provider] = rest;
-    if (!action || action === "status") return writeOutput(publicAccountStatus(await loadAccounts()), flags);
+    if (!action || action === "status") {
+      return writeOutput(flags.cached ? publicAccountStatus(await loadAccounts()) : await liveAccountsStatus(), flags);
+    }
     if (action === "set") {
       const enabledProviders = flags.providers ? parseProviderList(flags.providers) : undefined;
       return writeOutput(await configureAccounts({

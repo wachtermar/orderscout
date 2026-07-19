@@ -72,8 +72,8 @@ function headers(location = {}, token) {
   };
 }
 
-async function request(path, { method = "GET", body, location, auth = false, fetchImpl = fetch } = {}) {
-  const session = await loadBrowserSession("glovo");
+async function request(path, { method = "GET", body, location, auth = false, fetchImpl = fetch, cookieHeader } = {}) {
+  const session = cookieHeader ? { cookieHeader, source: "verification" } : await loadBrowserSession("glovo");
   const token = accessToken(session);
   if (auth && !token) throw new CliError("Sign in with `orderscout auth login glovo` first", "AUTH_REQUIRED");
   const response = await fetchImpl(new URL(path, API), {
@@ -225,23 +225,27 @@ export async function glovoMenu(url, fetchImpl = fetch) {
 }
 
 export async function glovoMe(options = {}) {
-  const profile = await request("/v3/me", { auth: true, fetchImpl: options.fetchImpl });
-  const membership = await request(`/customers/${profile.id}/subscription/status`, { auth: true, fetchImpl: options.fetchImpl }).catch(() => null);
+  const profile = await request("/v3/me", { auth: true, fetchImpl: options.fetchImpl, cookieHeader: options.cookieHeader });
+  const membership = await request(`/customers/${profile.id}/subscription/status`, { auth: true, fetchImpl: options.fetchImpl, cookieHeader: options.cookieHeader }).catch(() => null);
   return { authenticated: true, id: profile.id, name: profile.name, email: profile.email, preferredCityCode: profile.preferredCityCode, membershipActive: Boolean(membership?.isSubscribed), raw: options.raw ? profile : undefined };
 }
 
 export async function glovoAddresses(options = {}) {
-  const payload = await request("/customer_profile/api/v1/address_book/me/addresses", { auth: true, fetchImpl: options.fetchImpl });
-  const addresses = Array.isArray(payload) ? payload : payload?.addresses ?? payload?.data ?? [];
-  return addresses.map((address) => ({
-    id: address.id ?? address.addressId,
-    label: address.label ?? address.type ?? address.addressLine,
-    latitude: Number(address.latitude ?? address.location?.latitude ?? address.coordinates?.latitude),
-    longitude: Number(address.longitude ?? address.location?.longitude ?? address.coordinates?.longitude),
-    city: address.city ?? address.cityName,
-    cityCode: address.cityCode ?? address.city?.code,
-    isDefault: Boolean(address.isDefault ?? address.default),
-  })).filter((address) => Number.isFinite(address.latitude) && Number.isFinite(address.longitude));
+  const payload = await request("/customer_profile/api/v1/address_book/me/addresses", { auth: true, fetchImpl: options.fetchImpl, cookieHeader: options.cookieHeader });
+  const entries = Array.isArray(payload) ? payload : payload?.addresses ?? payload?.data?.addresses ?? payload?.data ?? [];
+  if (!Array.isArray(entries)) return [];
+  return entries.map((entry) => {
+    const address = entry?.address ?? entry;
+    return {
+      id: address.id ?? address.addressId,
+      label: entry?.title ?? address.label ?? address.tag ?? address.type ?? address.kind ?? address.addressLine,
+      latitude: Number(address.latitude ?? address.location?.latitude ?? address.coordinates?.latitude),
+      longitude: Number(address.longitude ?? address.location?.longitude ?? address.coordinates?.longitude),
+      city: address.city ?? address.cityName,
+      cityCode: address.cityCode ?? address.city?.code,
+      isDefault: Boolean(address.isDefault ?? address.default ?? entry?.entryType === "CURRENT"),
+    };
+  }).filter((address) => Number.isFinite(address.latitude) && Number.isFinite(address.longitude));
 }
 
 export async function glovoBaskets(options = {}) {

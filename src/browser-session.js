@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, unlink } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, unlink } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { CliError } from "./lib.js";
@@ -49,7 +49,34 @@ async function isFile(path) {
   return (await stat(path).catch(() => null))?.isFile() ?? false;
 }
 
-async function cookieFileFrom(value = "Default") {
+function chromeRoots() {
+  return process.platform === "darwin"
+    ? [join(homedir(), "Library/Application Support/Google/Chrome"), join(homedir(), "Library/Application Support/Microsoft Edge"), join(homedir(), "Library/Application Support/Chromium")]
+    : process.platform === "win32"
+      ? [join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData/Local"), "Google/Chrome/User Data"), join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData/Local"), "Microsoft/Edge/User Data")]
+      : [join(homedir(), ".config/google-chrome"), join(homedir(), ".config/chromium"), join(homedir(), ".config/microsoft-edge")];
+}
+
+export async function discoverChromeProfiles({ roots = chromeRoots() } = {}) {
+  const profiles = [];
+  for (const root of roots) {
+    const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isDirectory() || (!/^Profile \d+$/.test(entry.name) && entry.name !== "Default")) continue;
+      for (const name of ["Network/Cookies", "Cookies"]) {
+        const cookiePath = join(root, entry.name, name);
+        const details = await stat(cookiePath).catch(() => null);
+        if (!details?.isFile()) continue;
+        profiles.push({ profile: entry.name, cookiePath, modifiedAt: details.mtime.toISOString(), modifiedAtMs: details.mtimeMs });
+        break;
+      }
+    }
+  }
+  return profiles.sort((left, right) => right.modifiedAtMs - left.modifiedAtMs)
+    .map(({ modifiedAtMs: _modifiedAtMs, ...profile }) => profile);
+}
+
+async function cookieFileFrom(value = "Default", roots = chromeRoots()) {
   if (value.includes("/") || value.includes("\\")) {
     const candidate = isAbsolute(value) ? value : resolve(value);
     if (await isFile(candidate)) return candidate;
@@ -58,11 +85,6 @@ async function cookieFileFrom(value = "Default") {
     }
     throw new CliError(`No Chrome Cookies database found under ${candidate}`, "COOKIE_DATABASE_NOT_FOUND");
   }
-  const roots = process.platform === "darwin"
-    ? [join(homedir(), "Library/Application Support/Google/Chrome"), join(homedir(), "Library/Application Support/Microsoft Edge"), join(homedir(), "Library/Application Support/Chromium")]
-    : process.platform === "win32"
-      ? [join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData/Local"), "Google/Chrome/User Data"), join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData/Local"), "Microsoft/Edge/User Data")]
-      : [join(homedir(), ".config/google-chrome"), join(homedir(), ".config/chromium"), join(homedir(), ".config/microsoft-edge")];
   for (const root of roots) {
     for (const name of ["Network/Cookies", "Cookies"]) {
       const candidate = join(root, value, name);
@@ -70,6 +92,20 @@ async function cookieFileFrom(value = "Default") {
     }
   }
   throw new CliError(`Chrome profile ${value} was not found`, "COOKIE_DATABASE_NOT_FOUND");
+}
+
+async function withTimeout(promise, timeout) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new CliError("Timed out reading Chrome cookies", "COOKIE_IMPORT_TIMEOUT")), timeout);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function cookieHeader(cookies) {
@@ -83,7 +119,7 @@ function cookieHeader(cookies) {
   }).join("; ");
 }
 
-export async function importChromeSession(provider, { profile = "Default", cookiePath, timeout = 30_000, cookieReader, sessionsDirectory = SESSIONS_DIRECTORY } = {}) {
+async function readChromeSession(provider, { profile, cookiePath, timeout, cookieReader } = {}) {
   const source = await cookieFileFrom(cookiePath || profile);
   const temporary = await mkdtemp(join(tmpdir(), "orderscout-cookies-"));
   try {
@@ -91,29 +127,64 @@ export async function importChromeSession(provider, { profile = "Default", cooki
     const read = cookieReader ?? (async (url, directory) => {
       const imported = await import("chrome-cookies-secure");
       const library = imported.default ?? imported;
-      return Promise.race([
-        library.getCookiesPromised(url, "puppeteer", directory),
-        new Promise((_, reject) => setTimeout(() => reject(new CliError("Timed out reading Chrome cookies", "COOKIE_IMPORT_TIMEOUT")), timeout)),
-      ]);
+      return withTimeout(library.getCookiesPromised(url, "puppeteer", directory), timeout);
     });
     const cookies = await read(TARGET_URLS[provider], temporary);
     const header = cookieHeader(Array.isArray(cookies) ? cookies : []);
     if (!header) throw new CliError(`No ${provider} cookies were found in Chrome profile ${profile}`, "AUTH_COOKIES_NOT_FOUND");
-    const session = {
+    return {
       version: 1,
       provider,
       cookieHeader: header,
       cookieNames: header.split("; ").map((pair) => pair.slice(0, pair.indexOf("="))),
       importedAt: new Date().toISOString(),
-      source: `chrome:${cookiePath ? basename(cookiePath) : profile}`,
+      source: `chrome:${profile ?? basename(cookiePath)}`,
     };
-    await mkdir(sessionsDirectory, { recursive: true, mode: 0o700 });
-    await atomicPrivateWrite(sessionPath(provider, sessionsDirectory), session);
-    await chmod(sessionPath(provider, sessionsDirectory), 0o600);
-    return { provider, authenticated: true, source: session.source, cookieCount: session.cookieNames.length, importedAt: session.importedAt };
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
+}
+
+async function saveChromeSession(provider, session, sessionsDirectory) {
+  await mkdir(sessionsDirectory, { recursive: true, mode: 0o700 });
+  await atomicPrivateWrite(sessionPath(provider, sessionsDirectory), session);
+  await chmod(sessionPath(provider, sessionsDirectory), 0o600);
+}
+
+export async function importChromeSession(provider, {
+  profile = "auto", cookiePath, timeout = 30_000, cookieReader, sessionsDirectory = SESSIONS_DIRECTORY,
+  verify, profileRoots,
+} = {}) {
+  const candidates = profile === "auto" && !cookiePath
+    ? await discoverChromeProfiles({ roots: profileRoots })
+    : [{ profile: cookiePath ? undefined : profile, cookiePath: cookiePath ?? await cookieFileFrom(profile, profileRoots) }];
+  if (!candidates.length) throw new CliError("No supported Chrome profiles were found", "COOKIE_DATABASE_NOT_FOUND");
+  const failures = [];
+  for (const candidate of candidates) {
+    try {
+      const session = await readChromeSession(provider, {
+        profile: candidate.profile,
+        cookiePath: candidate.cookiePath,
+        timeout,
+        cookieReader,
+      });
+      const verified = verify ? await verify(session) : null;
+      await saveChromeSession(provider, session, sessionsDirectory);
+      return {
+        provider,
+        authenticated: true,
+        source: session.source,
+        profile: candidate.profile,
+        cookieCount: session.cookieNames.length,
+        importedAt: session.importedAt,
+        verified,
+      };
+    } catch (error) {
+      failures.push({ profile: candidate.profile, code: error.code ?? "AUTH_VERIFICATION_FAILED" });
+      if (profile !== "auto" || cookiePath) throw error;
+    }
+  }
+  throw new CliError(`No Chrome profile contains a verified ${provider} session`, "AUTH_SESSION_NOT_FOUND", { attempts: failures });
 }
 
 export async function loadBrowserSession(provider) {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseIntent, parsePackVolume, recommend } from "../src/recommend.js";
+import { parseIntent, parsePackVolume, providerSearchQueries, recommend } from "../src/recommend.js";
 
 test("parsePackVolume understands Spanish packs and metric units", () => {
   assert.deepEqual(parsePackVolume("Pack 6 unidades de 1,5L"), {
@@ -27,6 +27,7 @@ test("parseIntent extracts quantity, budget, health, taste, and dietary needs", 
     normalized: "cheap 6 litres of water under €10",
     kind: "water",
     targetLiters: 6,
+    people: null,
     healthy: false,
     tasty: false,
     cheap: true,
@@ -48,6 +49,10 @@ test("parseIntent extracts quantity, budget, health, taste, and dietary needs", 
   assert.equal(meal.tasty, true);
   assert.equal(meal.dietary.vegan, true);
   assert.equal(meal.budget, 18);
+  assert.equal(parseIntent("healthy tasty food for two under €30").people, 2);
+  assert.deepEqual(providerSearchQueries("healthy tasty food for two under €30"), ["poke", "ensalada", "pollo a la plancha"]);
+  assert.deepEqual(providerSearchQueries("20 litres of water now"), ["agua"]);
+  assert.deepEqual(providerSearchQueries("Which pharmacy can deliver SPF 50 sunscreen fastest tonight?"), ["spf sunscreen"]);
 });
 
 test("parseIntent routes arbitrary platform products beyond restaurants", () => {

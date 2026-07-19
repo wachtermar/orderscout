@@ -10,7 +10,7 @@ const money = (value) => value === null ? null : Math.round(value * 100) / 100;
 export function parseObjective(intent) {
   const text = String(intent ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
   if (/\b(fastest|quickest|rapido|rapida|antes|asap)\b/.test(text)) return "fastest";
-  if (/\b(best rated|highest rated|mejor valorad|calidad|best quality)\b/.test(text)) return "best";
+  if (/\b(best rated|highest rated|mejor valorad|calidad|best quality|tasty|delicious|sabros|rico|rica)\b/.test(text)) return "best";
   if (/\b(cheapest|lowest price|cheap|barat|econom|mejor oferta)\b/.test(text)) return "cheapest";
   return "value";
 }

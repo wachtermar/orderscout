@@ -11,19 +11,18 @@ The Browser is limited to two handoffs: the user completing login on an official
 
 ## Accounts and login
 
-1. Call `orderscout_context` and `orderscout_accounts_status`. Treat account status as cached configuration only.
+1. Call `orderscout_context` and `orderscout_accounts_status`. The status tool live-verifies every provider through the CLI and is authoritative for login claims.
 2. Save providers and memberships stated by the user with `orderscout_accounts_configure`. Exclude disabled providers from every search.
 3. Verify every enabled account with the relevant live auth-status tool before claiming it is logged in. A saved `authenticated` value, visible browser session, or selected address is not proof that the CLI is authenticated.
 4. For Just Eat, call `orderscout_justeat_auth_status` first. Status refreshes a saved OAuth session when possible. Call `orderscout_justeat_auth_login` only when status remains unauthenticated. If it returns `opened: true`, tell the user to finish on the official page and return; after they say it is finished, call `orderscout_justeat_auth_complete`. The start call returns immediately and never leaves chat waiting on the browser.
-5. For Glovo or Uber Eats, call `orderscout_provider_auth_status`. If unauthenticated, call `orderscout_provider_auth_login`. Tell the user to complete sign-in on the official page opened by OrderScout. After the user says it is finished, call `orderscout_provider_auth_complete`, then call `orderscout_provider_auth_status` again. Do not claim success unless that final direct API verification succeeds.
-6. Never call `orderscout_provider_browser_session` to authenticate a CLI account. It is deprecated compatibility state and cannot authorize direct provider requests.
+5. For Glovo or Uber Eats, call `orderscout_provider_auth_status`. If unauthenticated, call `orderscout_provider_auth_complete` first: it automatically checks supported native Chrome profiles and often restores a session without interrupting the user. If it reports that no verified session exists, call `orderscout_provider_auth_login`, tell the user to finish sign-in on the official page opened in Chrome, and wait for the user to say it is finished. Then call `orderscout_provider_auth_complete` and `orderscout_provider_auth_status`. Never ask which Chrome profile they used and do not claim success unless the final direct API verification succeeds.
 
 Never ask for account credentials in chat. Never expose saved session material.
 
 ## Search and compare
 
 1. Call `orderscout_search_begin` with the complete intent, enabled providers, objective, and a location only when the adapters cannot use a saved address.
-2. The tool directly calls every enabled provider's CLI adapter and continues when one provider fails.
+2. The tool converts conversational intent into bounded provider-appropriate queries, directly calls every enabled provider's CLI adapter, expands store-only results through direct menu APIs, and continues when one provider fails.
 3. Call `orderscout_results` and show a compact provider-labelled shortlist. Never replace a failed CLI provider with browser search.
 
 Preserve quantity, budget, timing, diet, taste, health, and still/sparkling constraints. For water, parse the entire pack expression and meet or exceed requested litres. For meals, describe health and taste as ranking signals, not medical facts.

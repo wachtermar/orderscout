@@ -1,5 +1,5 @@
 # Agent usage
-Call `orderscout_context` and `orderscout_accounts_status` first. Configure only accounts and memberships stated by the user. Verify authentication through provider status tools; if needed, use the official native-browser login/complete flow.
+Call `orderscout_context` and the live `orderscout_accounts_status` first. Configure only accounts and memberships stated by the user. For Glovo and Uber Eats, try `orderscout_provider_auth_complete` before opening a login page; it automatically discovers an already signed-in Chrome profile. If login is needed, open the official page, let the user finish, then complete and live-verify without asking for a terminal or profile name.
 
 ## Workflow
 

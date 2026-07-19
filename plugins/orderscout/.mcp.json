@@ -3,7 +3,7 @@
     "orderscout": {
       "command": "npx",
       "args": ["--yes", "--package", "github:wachtermar/orderscout", "orderscout", "mcp"],
-      "note": "Spain-wide comparison and safety engine for Just Eat, Glovo, and Uber Eats. ChatGPT Work uses its isolated in-app browser for browser-authenticated providers; standalone CLI can use direct adapters. No final purchase without exact human confirmation."
+      "note": "Spain-wide direct CLI adapters for Just Eat, Glovo, and Uber Eats. Native Chrome login is auto-discovered and live-verified; the in-app browser is reserved for optional visual checkout review. No final purchase without exact human confirmation."
     }
   }
 }

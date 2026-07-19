@@ -5,18 +5,18 @@
 
 ## Glovo and Uber Eats
 
-These consumer sites do not expose a public CLI/device OAuth flow. ChatGPT Work therefore reuses its existing in-app browser session and records only visible authentication and address-selected booleans. It never exports browser secrets. The standalone CLI can optionally use the native-Chrome session-import pattern:
+These consumer sites do not expose a public CLI/device OAuth flow, and ChatGPT's in-app browser does not expose a supported session-export API. OrderScout therefore uses a native-Chrome handoff for its direct adapters:
 
 ```bash
 orderscout auth login glovo
-orderscout auth complete glovo --profile Default
+orderscout auth complete glovo
 
 orderscout auth login ubereats
-orderscout auth complete ubereats --profile Default
+orderscout auth complete ubereats
 ```
 
-In standalone mode, the login command opens the official provider page in normal Chrome. The complete command reads Chrome's encrypted cookie database using the OS credential store, selects only cookies applicable to `glovoapp.com` or `ubereats.com`, saves them under `~/.config/orderscout-cli/sessions/` with mode `0600`, and verifies the account through the direct API.
+The complete command scans supported Chrome profiles automatically, reads their encrypted cookie databases using the OS credential store, selects only cookies applicable to `glovoapp.com` or `ubereats.com`, and tests each candidate against the direct account API. It saves only the verified provider session under `~/.config/orderscout-cli/sessions/` with mode `0600`.
 
-In ChatGPT Work, the skill claims an already-open Glovo or Uber Eats tab when possible. If the visible UI already has a delivery address selected, it preserves it. Otherwise the user selects one on the official page. No terminal, external Chrome profile, pasted callback, password, cookie, or token is required.
+In ChatGPT Work, the skill first runs completion silently, which reuses an already signed-in Chrome profile when available. Only if that fails does it open the official provider page in Chrome. The user signs in and selects an address there, returns to chat, and says they are finished. No terminal, profile name, pasted callback, cookie, or token is required.
 
 Use `orderscout auth status <provider>` to verify and `orderscout auth logout <provider>` to remove local state. Revoking local state does not necessarily revoke other provider sessions; use the official account security page when compromise is suspected.
