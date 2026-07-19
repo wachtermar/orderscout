@@ -72,6 +72,8 @@ Programmatic placement has two locks:
 
 The fingerprint changes when the provider, basket, total, or payment request changes. An agent must ask for approval of the exact current order immediately before the second call. Ambiguous submit results are never retried automatically.
 
+In ChatGPT Work, final review happens in the official in-app checkout. OrderScout shows a compact summary and, when it can safely crop private details, a checkout screenshot in chat. The user can change cart contents, address, delivery timing, tip, or saved payment method before approval. Every change invalidates the old quote, image, fingerprint, and approval and requires a fresh review.
+
 Just Eat and Uber Eats expose guarded final-submit adapters. Glovo now has an explicitly experimental guarded adapter: it uses a submit action returned by checkout validation when available and otherwise uses an inferred fallback endpoint. A rejected Glovo request is reported for protocol correction; an ambiguous result is never retried and must be checked in active orders.
 
 ## Helpful requests

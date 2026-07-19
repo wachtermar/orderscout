@@ -30,4 +30,6 @@ For Glovo and Uber Eats, Work mode reuses the in-app browser session instead of 
 
 Discovery and quotes are reads. Local search state and remote baskets are explicit writes. `orderscout_place_order` is destructive, preview-first, and requires a current fingerprint. The confirmed MCP call enables the provider placement gates only for its one child process, so a Work user does not need a terminal. Standalone CLI placement still requires the documented environment gate. Never enable placement persistently in a shared or unattended process.
 
+Before purchase approval, Work opens the official checkout inside the in-app browser, verifies cart lines, quantities, modifiers, address label, timing, fees, discount, tip, total, and masked payment method, and shows a safely cropped checkout image when possible. Cart, address, timing, tip, and saved payment method can be changed in the official UI. Any change cancels the previous quote, screenshot, fingerprint, and approval and requires a fresh review.
+
 The current stdio plugin is for desktop Work/Codex. A separate hosted MCP deployment with per-user authentication is required for ChatGPT web or mobile use.

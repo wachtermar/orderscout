@@ -154,9 +154,9 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_open_basket",
-    description: "Open the already-created provider basket in official native-browser checkout for manual review. Never presses the final purchase button.",
+    description: "Return the trusted official checkout URL for the already-created basket without opening an external browser. In ChatGPT Work, navigate the existing in-app Browser tab to this URL for visual review and edits. Never presses the final purchase button.",
     inputSchema: objectSchema({ searchId: string("OrderScout search ID."), offerId: string("Offer ID.") }, ["searchId", "offerId"]), annotations: remoteWrite,
-    command: (input) => ["basket", "open", input.searchId, input.offerId, "--agent"],
+    command: (input) => ["basket", "open", input.searchId, input.offerId, "--no-open", "--agent"],
   },
   {
     name: "orderscout_place_order",

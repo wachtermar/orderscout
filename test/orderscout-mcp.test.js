@@ -10,6 +10,7 @@ test("OrderScout MCP exposes direct login, basket, checkout, and guarded order t
   assert.deepEqual(ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_justeat_auth_login").command({}), ["auth", "login", "justeat", "--agent"]);
   assert.deepEqual(ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_justeat_auth_complete").command({}), ["auth", "complete", "justeat", "--agent"]);
   assert.deepEqual(ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_provider_browser_session").command({ provider: "ubereats", authenticated: true, addressSelected: true }), ["accounts", "record", "ubereats", "--transport", "browser", "--authenticated", "true", "--address-selected", "true", "--agent"]);
+  assert.deepEqual(ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_open_basket").command({ searchId: "search", offerId: "offer" }), ["basket", "open", "search", "offer", "--no-open", "--agent"]);
   const placement = ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_place_order");
   assert.equal(placement.annotations.destructiveHint, true);
   const search = ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_search_begin");

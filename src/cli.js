@@ -297,9 +297,10 @@ async function run(argv) {
       const result = await createBrowserHandoff(await loadPlan(planId), {
         token: await getAuthToken({ required: true }),
       });
-      openSystemUrl(result.handoff.url);
+      if (!flags["no-open"]) openSystemUrl(result.handoff.url);
       writeOutput({
-        opened: true,
+        opened: !flags["no-open"],
+        url: result.handoff.url,
         planId,
         basketId: result.plan.remote.basketId,
         basketMode: result.handoff.mode,

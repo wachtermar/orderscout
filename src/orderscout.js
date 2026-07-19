@@ -281,14 +281,14 @@ export async function runOrderScout(argv) {
     if (action === "open") {
       if (offer.provider === "justeat") {
         if (!offer.source?.planId) throw new CliError("Just Eat offer is missing its source plan", "SOURCE_PLAN_MISSING");
-        return writeOutput(await runLegacyJustEat(["order", "open", offer.source.planId, "--agent"]), flags);
+        return writeOutput(await runLegacyJustEat(["order", "open", offer.source.planId, ...(flags["no-open"] ? ["--no-open"] : []), "--agent"]), flags);
       }
       const url = offer.provider === "glovo" ? glovoCheckoutUrl(offer)
         : offer.provider === "ubereats" ? "https://www.ubereats.com/checkout?mod=checkout"
           : null;
       if (!url) throw new CliError("This provider has no basket handoff", "BASKET_HANDOFF_REQUIRED");
-      await openSystemUrl(url);
-      return writeOutput({ provider: offer.provider, opened: true, url, submitted: false }, flags);
+      if (!flags["no-open"]) await openSystemUrl(url);
+      return writeOutput({ provider: offer.provider, opened: !flags["no-open"], url, submitted: false }, flags);
     }
     if (offer.provider === "glovo") {
       if (action === "checkout") {

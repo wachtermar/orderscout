@@ -41,7 +41,20 @@ Rank cheapest by delivered checkout total, fastest by displayed ETA, best by rat
 - Read the browser checkout's visible subtotal, fees, discount, total, ETA, address-selected state, and payment-method summary without exposing private details.
 - Record its subtotal, fees, discount, and total with `orderscout_record_checkout_quote`, then call `orderscout_results` again.
 - Only count Prime or Uber One savings when the provider quote shows them.
-- For API baskets, call `orderscout_open_basket` when the user wants official manual checkout. For Work-browser baskets, keep the existing checkout tab as the handoff instead of opening another browser.
+- For API baskets in Work, call `orderscout_open_basket` to obtain the trusted checkout URL, then navigate an in-app Browser tab to it. The tool must not launch an external browser. For Work-browser baskets, keep the existing checkout tab as the handoff.
+
+## Checkout review and changes
+
+Before asking for purchase approval in ChatGPT Work:
+
+1. Open or reuse the official checkout in the in-app Browser and read the current visible state.
+2. Verify every cart line, quantity, modifier, substitution choice, address label, delivery timing, subtotal, each fee, discount, tip, exact total, and masked payment-method summary.
+3. Show the user both a compact text summary and a checkout image in chat. Prefer a screenshot cropped to the cart and totals. Exclude or crop out the full street address, phone number, email, unmasked payment data, and unrelated page content. If safe cropping is not possible, show a text-only review and explain why.
+4. Ask whether the user wants to change the cart, delivery address, delivery time, tip, or payment method before approval.
+
+Cart, address, delivery timing, tip, and saved payment method may be changed through the visible official checkout UI. The user must personally enter a new address, card number, security code, password, OTP, or CAPTCHA. Do not save a new address or payment method without explicit action-time approval.
+
+After any checkout change, discard the previous quote, screenshot, summary, fingerprint, and approval. Reload the final checkout state, obtain and record a fresh exact quote, create a new safe screenshot, and ask for approval again.
 
 Verify provider, merchant, item, quantity, modifiers, address label, ETA, subtotal, every fee, discount, total, and payment-method summary. Do not repeat full addresses or payment details in chat.
 
@@ -51,11 +64,11 @@ Search, comparison, basket creation, quote retrieval, and opening checkout are n
 
 Before any final order, whether through the API or visible browser UI:
 
-1. Obtain a fresh exact checkout quote.
-2. Summarize provider, merchant, items, quantities, modifiers, address label, ETA, all fees, discounts, exact total, and payment method.
+1. Obtain a fresh exact checkout quote after all requested edits.
+2. Summarize provider, merchant, items, quantities, modifiers, address label, ETA, all fees, discounts, tip, exact total, and masked payment method, and show the safe checkout image when available.
 3. Ask for explicit approval of that exact current order.
-4. First call `orderscout_place_order` without `confirm`; it must return a fingerprint and must not submit.
-5. For API-backed orders, only after action-time approval call it again with that exact fingerprint. For Work-browser orders, ask for action-time approval of the exact visible checkout and only then click the single final purchase control through the Browser. Any order or quote change invalidates approval.
+4. For standalone API placement, first call `orderscout_place_order` without `confirm`; it must return a fingerprint and must not submit. Only after action-time approval call it again with that exact fingerprint.
+5. In ChatGPT Work, use the official in-app checkout as the final source of truth. Immediately before clicking the single final purchase control, re-check that the visible cart, address label, total, and masked payment method still match the approved summary. If anything differs, stop and repeat review. Any order, address, timing, tip, payment, or quote change invalidates approval.
 
 Glovo final submission is experimental. Prefer the submit action returned by its current checkout validation response; otherwise use the documented fallback endpoint. Apply the same fresh-quote, fingerprint, environment-gate, and no-retry rules. If Glovo rejects the request, report the sanitized protocol error and offer official checkout. If the outcome is ambiguous, inspect active orders and never retry automatically.
 
