@@ -176,7 +176,14 @@ export async function runOrderScout(argv) {
     const [action, provider] = rest;
     if (!provider || !PROVIDERS[provider]) throw new CliError("Use `orderscout auth login|complete|status|logout justeat|glovo|ubereats`");
     if (provider === "justeat") {
-      const legacyAction = action === "login" ? "work-login" : action;
+      if (action === "login") {
+        const status = await runLegacyJustEat(["auth", "status", "--agent"]);
+        if (status.authenticated) {
+          return writeOutput({ ...status, opened: false, reused: true, next: "Already signed in; no browser login was needed." }, flags);
+        }
+        return writeOutput(await runLegacyJustEat(["auth", "browser-start", "--agent"]), flags);
+      }
+      const legacyAction = action === "complete" ? "browser-complete" : action;
       return writeOutput(await runLegacyJustEat(["auth", legacyAction, "--agent"]), flags);
     }
     if (action === "login") return writeOutput(beginBrowserLogin(provider), flags);
