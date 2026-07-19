@@ -174,7 +174,7 @@ export function placementEnvironment(name, input = {}, base = {}) {
 
 export async function handleOrderScoutMcpMessage(message) {
   const id = message.id ?? null;
-  if (message.method === "initialize") return { jsonrpc: "2.0", id, result: { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "orderscout", version: "0.1.2" } } };
+  if (message.method === "initialize") return { jsonrpc: "2.0", id, result: { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "orderscout", version: "0.1.3" } } };
   if (message.method === "notifications/initialized") return null;
   if (message.method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: ORDERSCOUT_MCP_TOOLS.map(({ command, ...tool }) => tool) } };
   if (message.method === "tools/call") {

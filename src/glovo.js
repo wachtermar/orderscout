@@ -280,6 +280,32 @@ export async function glovoMenu(url, fetchImpl = fetch) {
   return { url: parsed.toString(), products: [...new Map(products.map((item) => [item.id, item])).values()] };
 }
 
+export async function enrichGlovoOffers(offers, options = {}) {
+  const values = Array.isArray(offers) ? offers : [];
+  const urls = [...new Set(values.map((offer) => offer.url).filter(Boolean))]
+    .slice(0, Math.max(1, Number(options.maxStores ?? 24)));
+  const menuLoader = options.menuLoader ?? ((url) => glovoMenu(url, options.fetchImpl));
+  const menus = new Map();
+  for (let start = 0; start < urls.length; start += 6) {
+    const batch = urls.slice(start, start + 6);
+    const settled = await Promise.allSettled(batch.map(async (url) => [url, await menuLoader(url)]));
+    for (const result of settled) if (result.status === "fulfilled") menus.set(...result.value);
+  }
+  return values.map((offer) => {
+    const product = menus.get(offer.url)?.products?.find((entry) => String(entry.id) === String(offer.item?.id));
+    if (!product) return offer;
+    return {
+      ...offer,
+      item: {
+        ...offer.item,
+        description: product.description ?? offer.item?.description ?? null,
+        unitPrice: Number.isFinite(Number(product.price)) ? Number(product.price) : offer.item?.unitPrice,
+      },
+      source: { ...offer.source, requiresCustomizations: product.requiresCustomizations },
+    };
+  });
+}
+
 export async function glovoMe(options = {}) {
   const profile = await request("/v3/me", { auth: true, fetchImpl: options.fetchImpl, cookieHeader: options.cookieHeader });
   const membership = await request(`/customers/${profile.id}/subscription/status`, { auth: true, fetchImpl: options.fetchImpl, cookieHeader: options.cookieHeader }).catch(() => null);

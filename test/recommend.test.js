@@ -78,6 +78,7 @@ test("prepared breakfast classification rejects raw groceries, pasta, and non-fo
   assert.equal(isPreparedBreakfastItem("Pulpa de açaí natural pack 400 g"), false);
   assert.equal(isPreparedBreakfastItem("Rogan Josh Vegetables", "cooked with homemade yoghurt"), false);
   assert.equal(isHealthyBreakfastItem("Tostada de mantequilla y mermelada"), false);
+  assert.equal(isHealthyBreakfastItem("Huevos revueltos con panceta"), false);
   assert.equal(isHealthyBreakfastItem("Tostada integral con aguacate y semillas"), true);
 });
 

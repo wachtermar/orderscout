@@ -2,6 +2,11 @@
 
 This project follows Semantic Versioning. It is currently pre-1.0; command and normalized response changes may occur between minor releases and will be listed here.
 
+## 0.1.3 - 2026-07-20
+
+- Enrich Glovo search cards with current menu descriptions before health and breakfast ranking.
+- Exclude hidden bacon, pancetta, and similar indulgent ingredients from healthy-breakfast candidates.
+
 ## 0.1.2 - 2026-07-20
 
 - Preserve provider-verified scheduled fulfilment from Glovo and Uber Eats checkout instead of overwriting it with stale search-time state.

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createGlovoBasket, glovoAddresses, glovoInternals, glovoOrderConfirmation, glovoSubmissionRequest, normalizeGlovoQuote, placeGlovoOrder } from "../src/glovo.js";
+import { createGlovoBasket, enrichGlovoOffers, glovoAddresses, glovoInternals, glovoOrderConfirmation, glovoSubmissionRequest, normalizeGlovoQuote, placeGlovoOrder } from "../src/glovo.js";
 
 test("Glovo browser cookie token is parsed without exposing other cookies", () => {
   const encoded = encodeURIComponent(JSON.stringify({ access: { accessToken: "a".repeat(40) } }));
@@ -64,6 +64,19 @@ test("Glovo search retains provider-listed promotions and item savings", () => {
   assert.deepEqual(offer.promotion.types, ["PERCENTAGE_DISCOUNT", "FREE_DELIVERY"]);
   assert.deepEqual(offer.promotion.ids, ["promo-1"]);
   assert.ok(offer.promotion.descriptions.includes("30% de descuento"));
+});
+
+test("Glovo offer enrichment adds menu descriptions before health ranking", async () => {
+  const offers = [{
+    url: "https://glovoapp.com/es/es/marbella/stores/test-store",
+    item: { id: "breakfast", name: "Scrambled egg combo", description: null, unitPrice: 8 },
+    source: { productId: "breakfast" },
+  }];
+  const enriched = await enrichGlovoOffers(offers, { menuLoader: async () => ({ products: [{
+    id: "breakfast", description: "Scrambled eggs with bacon", price: 8, requiresCustomizations: true,
+  }] }) });
+  assert.equal(enriched[0].item.description, "Scrambled eggs with bacon");
+  assert.equal(enriched[0].source.requiresCustomizations, true);
 });
 
 test("Glovo basket prepare is a non-mutating direct API payload", async () => {

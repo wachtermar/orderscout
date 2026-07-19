@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { openSystemUrl } from "./auth.js";
 import { beginBrowserLogin, importChromeSession, loadBrowserSession, logoutBrowserSession } from "./browser-session.js";
 import {
-  createGlovoBasket, glovoAddresses, glovoBaskets, glovoCheckoutUrl, glovoMe, glovoMenu, placeGlovoOrder, quoteGlovoBasket, searchGlovo,
+  createGlovoBasket, enrichGlovoOffers, glovoAddresses, glovoBaskets, glovoCheckoutUrl, glovoMe, glovoMenu, placeGlovoOrder, quoteGlovoBasket, searchGlovo,
 } from "./glovo.js";
 import { CliError, parseArgs, resolveLocation } from "./lib.js";
 import { errorEnvelope, exitCodeFor, writeOutput } from "./output.js";
@@ -224,11 +224,12 @@ async function collectGlovo(intent, flags) {
   const results = await Promise.allSettled(queries.map((query) => searchGlovo(query, location, { limit: flags.limit })));
   const fulfilled = results.filter((result) => result.status === "fulfilled");
   if (!fulfilled.length) throw results[0].reason;
-  return [...new Map(fulfilled.flatMap((result) => result.value.offers)
+  const discovered = [...new Map(fulfilled.flatMap((result) => result.value.offers)
     .map((offer) => [`${offer.merchant?.id}:${offer.item?.id}`, {
       ...offer,
       ...(parsed.deliveryTime === "scheduled" ? { fulfilment: { requestedAt: parsed.scheduledAt, timeZone: parsed.timeZone, status: "unverified", source: "glovo-scheduled-search" } } : {}),
     }])).values()];
+  return enrichGlovoOffers(discovered);
 }
 
 async function collectUberEats(intent, flags) {

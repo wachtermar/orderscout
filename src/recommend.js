@@ -49,7 +49,7 @@ export function isPreparedBreakfastItem(value, context = "") {
 export function isHealthyBreakfastItem(value) {
   const text = normalizedText(value);
   const positive = /\b(integral|wholegrain|aguacate|avocado|tomate|tomato|semillas?|seeds?|fruta|fruit|acai|avena|oats?|oatmeal|porridge|granola|yogur|yogurt|chia|huevos?|eggs?|tortilla|omelette?|smoothie)\b/.test(text);
-  const indulgent = /\b(frito|fried|bacon|chocolate|donut|cake|tarta|croissant|mantequilla|butter|mermelada|jam)\b/.test(text);
+  const indulgent = /\b(frito|fried|bacon|panceta|tocino|chocolate|donut|cake|tarta|croissant|mantequilla|butter|mermelada|jam)\b/.test(text);
   return positive && !indulgent;
 }
 
