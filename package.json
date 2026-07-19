@@ -29,9 +29,9 @@
     "THIRD_PARTY_NOTICES.md"
   ],
   "bin": {
-    "orderscout": "./src/orderscout.js",
-    "pide": "./src/orderscout.js",
-    "justeat": "./src/cli.js"
+    "orderscout": "src/orderscout.js",
+    "pide": "src/orderscout.js",
+    "justeat": "src/cli.js"
   },
   "scripts": {
     "test": "node --test",

@@ -1,12 +1,17 @@
-name: Publish Package
+name: Publish Release Package
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing GitHub release tag to package
+        required: true
+        type: string
 
 permissions:
-  contents: read
-  id-token: write
+  contents: write
 
 jobs:
   publish:
@@ -14,13 +19,18 @@ jobs:
     environment: npm
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
-          registry-url: https://registry.npmjs.org
-          package-manager-cache: false
-      - run: npm install --global npm@latest
+          cache: npm
       - run: npm ci
       - run: npm run check
       - run: npm run pack:check
-      - run: npm publish
+      - run: npm pack
+      - name: Attach package to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: gh release upload "$RELEASE_TAG" orderscout-cli-*.tgz --clobber
