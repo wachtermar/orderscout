@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -379,7 +380,12 @@ export async function runPide(argv) {
   throw new CliError(`Unknown command ${command}`);
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+function isMainModule() {
+  try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); }
+  catch { return false; }
+}
+
+if (isMainModule()) {
   runPide(process.argv.slice(2)).catch((error) => {
     process.stderr.write(`${JSON.stringify(errorEnvelope(error))}\n`);
     process.exitCode = exitCodeFor(error);

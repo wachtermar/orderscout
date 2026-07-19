@@ -4,7 +4,7 @@ The `pide-es` plugin packages one skill and one local MCP server. The skill defi
 ## Components
 
 - `plugins/pide-es/.codex-plugin/plugin.json`: plugin metadata.
-- `plugins/pide-es/.mcp.json`: launches `pide mcp` over stdio.
+- `plugins/pide-es/.mcp.json`: launches `pide mcp` through `npx` over stdio, without relying on a machine-specific global npm PATH.
 - `plugins/pide-es/skills/order-with-pide-es/SKILL.md`: agent workflow and safety contract.
 - `.agents/plugins/marketplace.json`: repository marketplace.
 - `src/pide-mcp.js`: MCP JSON-RPC server.
