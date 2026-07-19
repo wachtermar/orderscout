@@ -31,7 +31,7 @@ Usage:
   orderscout auth login|complete|status|logout <provider> [--profile Default]
   orderscout accounts status
   orderscout accounts set --providers justeat,glovo,ubereats [--accounts JSON] [--memberships JSON]
-  orderscout accounts record <provider> --authenticated true [--membership true]
+  orderscout accounts record <provider> --authenticated true [--membership true] [--transport api|browser] [--address-selected true]
   orderscout recommend <what you want> [--providers list] [--at location] [--objective cheapest|fastest|best|value]
   orderscout search begin <what you want> [the same flags]
   orderscout search ingest <search-id> <provider> --json '[normalized offers]'
@@ -190,7 +190,7 @@ export async function runOrderScout(argv) {
     if (action === "complete") {
       const imported = await importChromeSession(provider, { profile: flags.profile ?? "Default", cookiePath: flags["cookie-path"], timeout: Number(flags.timeout ?? 30_000) });
       const profile = provider === "glovo" ? await glovoMe() : await uberEatsMe();
-      await recordProviderStatus(provider, { authenticated: true, membershipActive: profile.membershipActive });
+      await recordProviderStatus(provider, { authenticated: true, membershipActive: profile.membershipActive, transport: "api" });
       return writeOutput({ ...imported, profile: { id: profile.id, name: profile.name, email: profile.email }, membershipActive: profile.membershipActive ?? null }, flags);
     }
     if (action === "status") {
@@ -198,7 +198,7 @@ export async function runOrderScout(argv) {
       if (!stored) return writeOutput({ provider, authenticated: false, source: null }, flags);
       try {
         const profile = provider === "glovo" ? await glovoMe() : await uberEatsMe();
-        await recordProviderStatus(provider, { authenticated: true, membershipActive: profile.membershipActive });
+        await recordProviderStatus(provider, { authenticated: true, membershipActive: profile.membershipActive, transport: "api" });
         return writeOutput({ provider, ...profile, source: stored.source, importedAt: stored.importedAt ?? null }, flags);
       } catch (error) {
         await recordProviderStatus(provider, { authenticated: false });
@@ -228,6 +228,8 @@ export async function runOrderScout(argv) {
       return writeOutput(await recordProviderStatus(provider, {
         authenticated: booleanFlag(flags, "authenticated"),
         membershipActive: booleanFlag(flags, "membership"),
+        transport: flags.transport,
+        addressSelected: booleanFlag(flags, "address-selected"),
       }), flags);
     }
     throw new CliError("Use `orderscout accounts status|set|record`");

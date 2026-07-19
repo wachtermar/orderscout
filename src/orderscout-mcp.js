@@ -52,7 +52,7 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_provider_auth_login",
-    description: "Open Glovo or Uber Eats on the official site in native Chrome. The user signs in there; no terminal, password, or cookie is requested in chat. Call orderscout_provider_auth_complete after the user says sign-in is finished.",
+    description: "Standalone CLI fallback only: open Glovo or Uber Eats in native Chrome for later cookie import. In ChatGPT Work, use its in-app Browser and orderscout_provider_browser_session instead; do not call this tool.",
     inputSchema: objectSchema({
       provider: { type: "string", enum: ["glovo", "ubereats"] },
     }, ["provider"]), annotations: remoteWrite,
@@ -60,9 +60,20 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_provider_auth_complete",
-    description: "Finish Glovo or Uber Eats login by importing only that provider's domain cookies from native Chrome, then verify the account through the direct API. Never returns cookie values.",
+    description: "Standalone CLI fallback only: import the provider cookies from native Chrome and verify through the direct API. In ChatGPT Work, use orderscout_provider_browser_session and never import browser cookies.",
     inputSchema: objectSchema({ provider: { type: "string", enum: ["glovo", "ubereats"] }, profile: string("Chrome profile name; normally Default.") }, ["provider"]), annotations: remoteWrite,
     command: (input) => ["auth", "complete", input.provider, "--profile", input.profile ?? "Default", "--agent"],
+  },
+  {
+    name: "orderscout_provider_browser_session",
+    description: "Record that ChatGPT Work visibly verified a provider account in the in-app browser, including whether a delivery address is selected. Stores no cookie, token, address, or browser data. Browser-backed providers are searched through their visible official UI and normalized with orderscout_ingest_offers instead of direct API calls.",
+    inputSchema: objectSchema({
+      provider: { type: "string", enum: ["glovo", "ubereats"] },
+      authenticated: boolean("Whether the official provider UI visibly shows a signed-in account."),
+      addressSelected: boolean("Whether the official provider UI visibly shows a selected delivery address."),
+      membershipActive: boolean("Optional visible Glovo Prime or Uber One state."),
+    }, ["provider", "authenticated", "addressSelected"]), annotations: localWrite,
+    command: (input) => ["accounts", "record", input.provider, "--transport", "browser", "--authenticated", String(input.authenticated), "--address-selected", String(input.addressSelected), ...(input.membershipActive === undefined ? [] : ["--membership", String(input.membershipActive)]), "--agent"],
   },
   {
     name: "orderscout_provider_auth_status",

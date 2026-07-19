@@ -36,12 +36,13 @@ The computer needs [Node.js 20 or newer](https://nodejs.org/) once. Restart Chat
 ### Signing in—no Terminal
 
 - Just Eat first reuses or refreshes its saved OAuth session. Only when a fresh login is required does it open the official OAuth page; the ChatGPT tool returns immediately, and you simply say when the page has finished.
-- Glovo and Uber Eats open their official login page in normal Chrome.
+- In ChatGPT Work, Glovo and Uber Eats use the browser already inside the app. Existing sign-ins and selected addresses stay in that browser; OrderScout does not open Chrome or guess a profile.
+- The standalone CLI can still use normal Chrome as an optional direct-API session source.
 - Enter passwords and verification codes only on the official website.
 - Return to ChatGPT and say, “I finished signing in.”
-- OrderScout imports only cookies valid for that provider domain, verifies the account, and stores the session in an owner-only local file.
+- In standalone CLI mode only, an explicit Chrome import stores only provider-domain cookies in an owner-only local file.
 
-Never paste a password, cookie, token, or login URL into chat. OrderScout does not use Playwright for Glovo or Uber Eats. Their browser is used only for official sign-in and, if requested, for viewing checkout; searches and basket work happen through direct CLI adapters.
+Never paste a password, cookie, token, or login URL into chat. OrderScout never exports the Work browser's cookies, local storage, passwords, tokens, or session data. In Work, the skill operates the visible official provider UI and sends only normalized offer and checkout facts to the comparison engine.
 
 The current plugin is local to ChatGPT Work/Codex on desktop. It is not an ordinary mobile ChatGPT skill yet; a hosted MCP service would be required for phone-only use.
 

@@ -44,6 +44,7 @@ const defaultAccount = (provider) => ({
   authenticated: null,
   membership: PROVIDERS[provider].membership ? { active: false, declared: false } : null,
   transport: PROVIDERS[provider].transport,
+  addressSelected: null,
   checkedAt: null,
 });
 
@@ -109,13 +110,18 @@ export async function configureAccounts({ enabledProviders, accounts, membership
   return publicAccountStatus(config);
 }
 
-export async function recordProviderStatus(provider, { authenticated, membershipActive } = {}) {
+export async function recordProviderStatus(provider, { authenticated, membershipActive, transport, addressSelected } = {}) {
   assertProvider(provider);
   const config = await loadAccounts();
+  if (transport !== undefined) {
+    if (!["api", "browser"].includes(transport)) throw new CliError("Provider transport must be api or browser", "INVALID_PROVIDER_TRANSPORT");
+    config.providers[provider].transport = transport;
+  }
   if (authenticated !== undefined) {
     config.providers[provider].authenticated = Boolean(authenticated);
     config.providers[provider].hasAccount = Boolean(authenticated) || config.providers[provider].hasAccount;
   }
+  if (addressSelected !== undefined) config.providers[provider].addressSelected = Boolean(addressSelected);
   if (membershipActive !== undefined && PROVIDERS[provider].membership) {
     config.providers[provider].membership = { active: Boolean(membershipActive), declared: false };
   }
@@ -132,7 +138,8 @@ export function publicAccountStatus(config) {
       enabled: config.providers[id].enabled,
       hasAccount: config.providers[id].hasAccount,
       authenticated: config.providers[id].authenticated,
-      transport: PROVIDERS[id].transport,
+      transport: config.providers[id].transport ?? PROVIDERS[id].transport,
+      addressSelected: config.providers[id].addressSelected ?? null,
       membership: PROVIDERS[id].membership
         ? { name: PROVIDERS[id].membership, active: config.providers[id].membership?.active ?? false,
           source: config.providers[id].membership?.declared ? "user" : "detected" }

@@ -4,11 +4,12 @@ import { ORDERSCOUT_MCP_TOOLS, handleOrderScoutMcpMessage, placementEnvironment 
 
 test("OrderScout MCP exposes direct login, basket, checkout, and guarded order tools", () => {
   const names = new Set(ORDERSCOUT_MCP_TOOLS.map((tool) => tool.name));
-  for (const name of ["orderscout_justeat_auth_login", "orderscout_justeat_auth_complete", "orderscout_provider_auth_login", "orderscout_provider_auth_complete", "orderscout_search_begin", "orderscout_prepare_basket", "orderscout_create_basket", "orderscout_checkout_review_task", "orderscout_open_basket", "orderscout_place_order"]) {
+  for (const name of ["orderscout_justeat_auth_login", "orderscout_justeat_auth_complete", "orderscout_provider_auth_login", "orderscout_provider_auth_complete", "orderscout_provider_browser_session", "orderscout_search_begin", "orderscout_prepare_basket", "orderscout_create_basket", "orderscout_checkout_review_task", "orderscout_open_basket", "orderscout_place_order"]) {
     assert.equal(names.has(name), true, `${name} is missing`);
   }
   assert.deepEqual(ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_justeat_auth_login").command({}), ["auth", "login", "justeat", "--agent"]);
   assert.deepEqual(ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_justeat_auth_complete").command({}), ["auth", "complete", "justeat", "--agent"]);
+  assert.deepEqual(ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_provider_browser_session").command({ provider: "ubereats", authenticated: true, addressSelected: true }), ["accounts", "record", "ubereats", "--transport", "browser", "--authenticated", "true", "--address-selected", "true", "--agent"]);
   const placement = ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_place_order");
   assert.equal(placement.annotations.destructiveHint, true);
   const search = ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_search_begin");

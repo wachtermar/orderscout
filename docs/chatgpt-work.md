@@ -22,9 +22,9 @@ Restart ChatGPT desktop and start a new Work task.
 
 ## Login without a terminal
 
-Just Eat uses its official authorization-code OAuth flow with PKCE. Glovo and Uber Eats do not expose an equivalent consumer OAuth callback. Their tools therefore open the official page in native Chrome, wait for the user to finish sign-in, then import only cookies valid for that provider domain. Passwords and verification codes stay on the provider page; cookie values are never returned to the model.
+Just Eat uses its official authorization-code OAuth flow with PKCE. Glovo and Uber Eats do not expose an equivalent consumer OAuth callback. In Work, their official pages stay inside the in-app browser, where passwords and verification codes remain isolated from the model. The skill never exports browser session material.
 
-The imported sessions are used by direct Node HTTP adapters. Playwright is not an execution dependency. Native browser checkout opening is optional and never submits payment.
+For Glovo and Uber Eats, Work mode reuses the in-app browser session instead of importing cookies from an external Chrome profile. The skill verifies only visible signed-in and address-selected state, records no address or secret, and normalizes visible offers into OrderScout's comparison engine. Standalone CLI users may still opt into native Chrome cookie import for direct Node HTTP adapters.
 
 ## Safety contract
 

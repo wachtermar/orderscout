@@ -36,10 +36,18 @@ export async function startSearch(intent, options = {}) {
   };
   await mkdir(providerPaths.searchesDirectory, { recursive: true, mode: 0o700 });
   await atomicPrivateWrite(searchPath(search.id), search);
+  const routes = providerRoutes(enabled, accounts);
   return {
     search: summarizeSearch(search),
     accounts: publicAccountStatus(accounts),
-    apiProviders: enabled.filter((provider) => PROVIDERS[provider].transport === "api"),
+    ...routes,
+  };
+}
+
+export function providerRoutes(enabled, accounts) {
+  return {
+    apiProviders: enabled.filter((provider) => (accounts.providers[provider].transport ?? PROVIDERS[provider].transport) === "api"),
+    browserProviders: enabled.filter((provider) => accounts.providers[provider].transport === "browser"),
   };
 }
 

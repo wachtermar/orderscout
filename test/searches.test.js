@@ -1,6 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyIntent } from "../src/searches.js";
+import { applyIntent, providerRoutes } from "../src/searches.js";
+import { defaultAccounts, publicAccountStatus } from "../src/providers.js";
+
+test("public account status preserves a Work browser session and selected-address state", () => {
+  const accounts = defaultAccounts();
+  accounts.providers.ubereats.authenticated = true;
+  accounts.providers.ubereats.transport = "browser";
+  accounts.providers.ubereats.addressSelected = true;
+  const uber = publicAccountStatus(accounts).providers.find((provider) => provider.id === "ubereats");
+  assert.equal(uber.transport, "browser");
+  assert.equal(uber.addressSelected, true);
+  assert.equal(uber.authenticated, true);
+  assert.deepEqual(providerRoutes(["justeat", "glovo", "ubereats"], accounts), {
+    apiProviders: ["justeat", "glovo"],
+    browserProviders: ["ubereats"],
+  });
+});
 
 test("water intent computes packs and excludes sparkling water and soft drinks", () => {
   const offers = applyIntent([
