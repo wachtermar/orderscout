@@ -2,6 +2,11 @@
 
 This project follows Semantic Versioning. It is currently pre-1.0; command and normalized response changes may occur between minor releases and will be listed here.
 
+## 0.1.2 - 2026-07-20
+
+- Preserve provider-verified scheduled fulfilment from Glovo and Uber Eats checkout instead of overwriting it with stale search-time state.
+- Fix npm 12 bin metadata and attach installable tarballs directly to GitHub releases without requiring npm-registry ownership.
+
 ## 0.1.1 - 2026-07-20
 
 - Parse natural-language scheduled requests into a timezone-aware provider target and require every compared provider to verify that exact slot before confirming a winner.

@@ -169,6 +169,10 @@ async function saveCheckoutResult(searchId, offerId, result, pricing) {
   };
 }
 
+export function checkoutFulfilment(quoted, offer) {
+  return quoted?.fulfilment ?? offer?.basket?.fulfilment ?? offer?.fulfilment ?? null;
+}
+
 export function providerDiverseOffers(offers, limit) {
   const anchors = [];
   for (const provider of Object.keys(PROVIDERS)) {
@@ -495,7 +499,7 @@ export async function runOrderScout(argv) {
         const quoted = await quoteGlovoBasket(basketId, {
           scheduledAt: search.fulfilment?.requestedAt, timeZone: search.fulfilment?.timeZone,
         });
-        return writeOutput(await saveCheckoutResult(searchId, offerId, { ...quoted, fulfilment: offer.basket?.fulfilment ?? offer.fulfilment }, quoted.pricing), flags);
+        return writeOutput(await saveCheckoutResult(searchId, offerId, { ...quoted, fulfilment: checkoutFulfilment(quoted, offer) }, quoted.pricing), flags);
       }
       const result = await createGlovoBasket(offer, { prepareOnly: action === "prepare", customizations: jsonFlag(flags, "customizations") });
       if (action === "create") {
@@ -516,7 +520,7 @@ export async function runOrderScout(argv) {
         const quoted = await quoteUberEatsBasket(id, {
           scheduledAt: search.fulfilment?.requestedAt, timeZone: search.fulfilment?.timeZone,
         });
-        return writeOutput(await saveCheckoutResult(searchId, offerId, { ...quoted, fulfilment: offer.basket?.fulfilment ?? offer.fulfilment }, quoted.pricing), flags);
+        return writeOutput(await saveCheckoutResult(searchId, offerId, { ...quoted, fulfilment: checkoutFulfilment(quoted, offer) }, quoted.pricing), flags);
       }
       const result = await createUberEatsBasket(offer, {
         prepareOnly: action === "prepare", customizations: jsonFlag(flags, "customizations"),

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { providerDiverseOffers, runConcurrentProviderTasks } from "../src/orderscout.js";
+import { checkoutFulfilment, providerDiverseOffers, runConcurrentProviderTasks } from "../src/orderscout.js";
 import { applyIntent, providerRoutes, resultsFor } from "../src/searches.js";
 import { defaultAccounts, publicAccountStatus } from "../src/providers.js";
 import { normalizeOffer, parseObjective, rankOffers } from "../src/ranking.js";
@@ -20,6 +20,14 @@ test("provider tasks start concurrently and preserve provider-labelled outcomes"
   const outcomes = await pending;
   assert.deepEqual(outcomes.map((outcome) => outcome.provider), ["justeat", "glovo", "ubereats"]);
   assert.deepEqual(outcomes.map((outcome) => outcome.value[0]), ["justeat-offer", "glovo-offer", "ubereats-offer"]);
+});
+
+test("checkout-verified fulfilment overrides stale search and basket state", () => {
+  const verified = { status: "verified", selectedWindow: { from: "10:00", to: "10:30" } };
+  const unverified = { status: "unverified", selectedWindow: null };
+  assert.deepEqual(checkoutFulfilment({ fulfilment: verified }, {
+    fulfilment: unverified, basket: { fulfilment: unverified },
+  }), verified);
 });
 
 test("compact agent results retain the best offer from every matched provider", () => {
