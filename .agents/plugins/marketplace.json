@@ -1,14 +1,14 @@
 {
-  "name": "justeat-es-marketplace",
+  "name": "pide-es-marketplace",
   "interface": {
-    "displayName": "Just Eat Spain"
+    "displayName": "Pide ES"
   },
   "plugins": [
     {
-      "name": "justeat-es",
+      "name": "pide-es",
       "source": {
         "source": "local",
-        "path": "./plugins/justeat-es"
+        "path": "./plugins/pide-es"
       },
       "policy": {
         "installation": "AVAILABLE",

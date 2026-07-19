@@ -10,7 +10,7 @@ body:
     id: version
     attributes:
       label: Version
-      placeholder: Output of justeat --version
+      placeholder: Output of pide --version
     validations:
       required: true
   - type: textarea

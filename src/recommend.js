@@ -46,8 +46,8 @@ export function parseIntent(text) {
 
 export function parsePackVolume(value) {
   const text = normalizedText(value).replace(/,/g, ".");
-  const packMatch = text.match(/(?:px|pack(?:\s+de)?|x)\s*(\d+)\b/)
-    ?? text.match(/\b(\d+)\s*(?:x|botellas?|unidades?|uds?\.?)(?:\s+de)?\b/);
+  const packMatch = text.match(/\b(\d+)\s*(?:x|botellas?|unidades?|uds?\.?)(?:\s+de)?\b/)
+    ?? text.match(/(?:px|pack(?:\s+de)?)\s*(\d+)\b/);
   const volumeMatches = [...text.matchAll(/(\d+(?:\.\d+)?)\s*(ml|cl|l|litros?|litres?)\b/g)];
   if (!volumeMatches.length) return null;
   const [amountText, unit] = volumeMatches.at(-1).slice(1);

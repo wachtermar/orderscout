@@ -1,23 +1,15 @@
 # API contracts
 
-The CLI uses consumer contracts observed in Just Eat Spain's current web application. They are private implementation details and can change without notice.
+Pide uses private consumer contracts observed in the providers' current Spain web applications. They may change without notice. The normalized CLI output—not raw upstream JSON—is the supported project interface.
 
-| Capability | Contract | Mutation |
+| Provider | Read contracts | Write contracts |
 | --- | --- | --- |
-| Address autocomplete | `GET i18n.api.just-eat.io/autocomplete/addresses/es` | No |
-| Restaurant discovery | `GET i18n.api.just-eat.io/discovery/es/restaurants/enriched` | No |
-| Account and saved addresses | `GET i18n.api.just-eat.io/applications/international/consumer/me...` | No |
-| Static menus | `GET menu-globalmenucdn.justeat-int.com/...` | No |
-| OAuth/OIDC | `auth.just-eat.es` authorization code + PKCE | Token grant |
-| Basket creation | `POST i18n.api.just-eat.io/basket` | Yes |
-| Basket updates | `PUT/PATCH i18n.api.just-eat.io/basket/{id}` | Yes |
-| Checkout validation | `GET i18n.api.just-eat.io/checkout/es/{basketId}` | No |
-| Checkout details | `PATCH i18n.api.just-eat.io/checkout/es/{basketId}` | Yes |
-| Available times | `GET i18n.api.just-eat.io/checkout/es/{basketId}/fulfilment/availabletimes` | No |
-| Payment/order boundary | `POST i18n.api.just-eat.io/checkout/es/{checkoutId}/payments` | Irreversible boundary |
+| Just Eat | discovery, menus, account, checkout | OAuth, basket, checkout patch, guarded payment |
+| Glovo | store-wall search, server-rendered menus, profile, addresses, baskets, validation | basket create/update; official checkout handoff |
+| Uber Eats | search feed, store/menu item, profile, drafts, checkout presentation | draft order create/update and guarded checkout submission |
 
-Basket payloads include menu group, restaurant slug, service type, product or deal IDs, quantities, modifiers, notes, and delivery location. Checkout updates use JSON Patch. The final payment body contains the exact currency, total in minor units, payment methods, and return URL.
+Glovo requests include current web client, device, language, city, and delivery-coordinate headers. Uber Eats uses same-origin `_p/api` operations with a provider-domain cookie session and static CSRF placeholder. Just Eat retains its OAuth bearer flow.
 
-The normalized CLI response is the supported project interface. `--raw` is unstable and may contain personal information.
+Read operations use bounded timeouts. Mutations are not retried automatically. A network or upstream failure at a final-submit boundary becomes `ORDER_STATUS_UNKNOWN`; callers must inspect official active orders rather than risk a duplicate.
 
-Idempotent reads time out and retry transient 5xx and 429 responses with bounded backoff. Mutating requests are never retried automatically. In particular, an ambiguous payment network failure becomes `ORDER_STATUS_UNKNOWN` and instructs the caller to inspect order history rather than risk a duplicate submission. The project does not bypass authentication, payment authentication, bot protection, rate limits, or access controls.
+Pide does not bypass authentication, CAPTCHA, bot protection, payment authentication, rate limits, or access controls.

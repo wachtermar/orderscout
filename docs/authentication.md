@@ -1,21 +1,22 @@
 # Authentication
+## Just Eat
 
-## Recommended flow
+`pide auth login justeat` uses Just Eat Spain's official OAuth authorization-code flow with PKCE. Tokens are stored under `~/.config/justeat-es-cli/` with owner-only permissions and refreshed when supported.
 
-`justeat auth login` creates an OAuth authorization request with PKCE and opens it in the operating system's default browser. The user completes Just Eat's official login and anti-bot checks. The CLI never receives the password or browser cookies.
+## Glovo and Uber Eats
 
-Just Eat's consumer web OAuth client has a registered HTTPS callback rather than a CLI loopback callback. After login, copy the complete final callback URL from the address bar and paste it into the CLI. The CLI validates the origin, path, and OAuth state before exchanging its short-lived code using the locally retained PKCE verifier.
+These consumer sites do not expose a public CLI/device OAuth flow. Pide follows the native-browser session-import pattern:
 
 ```bash
-justeat auth login
-justeat auth status
-justeat auth logout
+pide auth login glovo
+pide auth complete glovo --profile Default
+
+pide auth login ubereats
+pide auth complete ubereats --profile Default
 ```
 
-The experimental `--direct-email` flow talks to the same official authentication endpoints but is often rejected because interactive Turnstile verification is required. It is not intended for unattended authentication.
+The login command opens the official provider page in normal Chrome. The complete command reads Chrome's encrypted cookie database using the OS credential store, selects only cookies applicable to `glovoapp.com` or `ubereats.com`, saves them under `~/.config/pide-es-cli/sessions/` with mode `0600`, and verifies the account through the direct API.
 
-## Storage and automation
+In ChatGPT Work these are separate tools: the user says when official sign-in is complete. No terminal, pasted callback, password, cookie, or token is required. Select the delivery address on Uber Eats before completing import because its search context is session-backed.
 
-Tokens are stored under `~/.config/justeat-es-cli/` with owner-only permissions and refreshed when the issuer permits it. Set `JUSTEAT_CONFIG_DIR` to relocate that state. Set `JUSTEAT_TOKEN` for an ephemeral, non-persistent override in an automation environment.
-
-Never commit tokens or copy account responses into test fixtures.
+Use `pide auth status <provider>` to verify and `pide auth logout <provider>` to remove local state. Revoking local state does not necessarily revoke other provider sessions; use the official account security page when compromise is suspected.

@@ -1,0 +1,32 @@
+{
+  "name": "pide-es",
+  "version": "0.1.0",
+  "description": "Compare Just Eat, Glovo, and Uber Eats across Spain and prepare the best delivery option safely.",
+  "author": {
+    "name": "Marcel Wachter",
+    "email": "marcel.wachter@gmail.com",
+    "url": "https://github.com/wachtermar"
+  },
+  "homepage": "https://github.com/wachtermar/pide-es#readme",
+  "repository": "https://github.com/wachtermar/pide-es",
+  "license": "MIT",
+  "keywords": ["food-delivery", "spain", "just-eat", "glovo", "uber-eats", "comparison"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Pide ES",
+    "shortDescription": "Compare Spain's three big delivery apps",
+    "longDescription": "Search enabled accounts on Just Eat, Glovo, and Uber Eats; compare exact prices, fees, memberships, ETA, ratings, quantity, and quality; then prepare the selected basket without ordering unexpectedly.",
+    "developerName": "Marcel Wachter",
+    "category": "Lifestyle",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://github.com/wachtermar/pide-es",
+    "defaultPrompt": [
+      "Find the cheapest delivered way to get at least 20 litres of still water across my enabled apps. Do not order.",
+      "Find the fastest healthy dinner under €20 across Just Eat, Glovo, and Uber Eats.",
+      "I only use Just Eat and Uber Eats, and I have Uber One. Save that preference.",
+      "Prepare the best option in my basket, but stop before ordering."
+    ],
+    "brandColor": "#E54B4B"
+  },
+  "mcpServers": "./.mcp.json"
+}

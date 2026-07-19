@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "pide-es": {
+      "command": "pide",
+      "args": ["mcp"],
+      "note": "Direct Spain-wide CLI adapters for Just Eat, Glovo, and Uber Eats. Native browser is used only for official login and optional checkout viewing. No final purchase without exact human confirmation."
+    }
+  }
+}

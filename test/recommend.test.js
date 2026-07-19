@@ -13,6 +13,11 @@ test("parsePackVolume understands Spanish packs and metric units", () => {
     packCount: 6,
     totalLiters: 3,
   });
+  assert.deepEqual(parsePackVolume("Agua 6 x 1.5 L"), {
+    unitLiters: 1.5,
+    packCount: 6,
+    totalLiters: 9,
+  });
   assert.equal(parsePackVolume("Ensalada de pollo"), null);
 });
 

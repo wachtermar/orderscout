@@ -1,9 +1,0 @@
-interface:
-  display_name: "Order with Just Eat Spain"
-  short_description: "Find, compare, and prepare Just Eat orders"
-  default_prompt: "Use $order-justeat-es to find the best delivered option for my request."
-dependencies:
-  tools:
-    - type: "mcp"
-      value: "justeat-es"
-      description: "Just Eat Spain search, recommendation, basket, checkout, and guarded order tools"
