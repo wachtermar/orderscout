@@ -42,6 +42,8 @@ test("meal intent applies party size, total budget, and health signals", () => {
     { merchant: { name: "Poke", rating: 4.8 }, item: { name: "Poke de salmón y verduras", unitPrice: 13 }, pricing: { currency: "EUR" } },
     { merchant: { name: "Pizza", rating: 4.9 }, item: { name: "Pizza frita", unitPrice: 9 }, pricing: { currency: "EUR" } },
     { merchant: { name: "Chicken", rating: 4.9 }, item: { name: "Filete de pollo empanado", unitPrice: 4 }, pricing: { currency: "EUR" } },
+    { merchant: { name: "Soup", rating: 4.9 }, item: { name: "Sopa de pollo", unitPrice: 5 }, pricing: { currency: "EUR" } },
+    { merchant: { name: "Grill", rating: 4.9 }, item: { name: "Grilled chicken with chips", unitPrice: 9 }, pricing: { currency: "EUR" } },
     { merchant: { name: "Premium", rating: 5 }, item: { name: "Ensalada de pollo", unitPrice: 16 }, pricing: { currency: "EUR" } },
   ], "healthy tasty meal for two under €30");
   assert.equal(offers.length, 1);

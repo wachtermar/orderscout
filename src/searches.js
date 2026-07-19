@@ -87,8 +87,9 @@ export function applyIntent(inputs, text) {
   const intent = parseIntent(text);
   if (intent.kind === "meal") {
     const positive = ["ensalada", "salad", "poke", "bowl", "plancha", "grilled", "verdura", "vegetable", "pollo", "chicken", "pavo", "salm", "atun", "tuna", "quinoa", "integral", "healthy", "saludable", "vegan", "vegano", "vegetar"];
-    const negative = ["frito", "fried", "burger", "hamburgues", "pizza", "donut", "tarta", "cake", "helado", "chocolate", "bacon", "patatas", "fries", "mayonesa", "empanado", "breaded", "battered", "croqueta", "crispy", "creamy"];
-    const stronglyIndulgent = ["frito", "fried", "burger", "hamburgues", "pizza", "donut", "cake", "empanado", "breaded", "battered", "croqueta"];
+    const negative = ["frito", "fried", "burger", "hamburgues", "pizza", "donut", "tarta", "cake", "helado", "chocolate", "bacon", "patatas", "fries", "mayonesa", "empanado", "breaded", "battered", "croqueta", "crispy", "creamy", "chips"];
+    const stronglyIndulgent = ["frito", "fried", "burger", "hamburgues", "pizza", "donut", "cake", "empanado", "breaded", "battered", "croqueta", "chips"];
+    const healthyAnchors = ["ensalada", "salad", "poke", "bowl", "plancha", "grilled", "verdura", "vegetable", "quinoa", "integral", "healthy", "saludable", "vegan", "vegano", "vegetar"];
     const dietaryTerms = {
       vegan: ["vegan", "vegano", "vegana"], vegetarian: ["vegetarian", "vegetariano", "vegetariana"],
       halal: ["halal"], glutenFree: ["gluten free", "sin gluten"], lactoseFree: ["lactose free", "sin lactosa"],
@@ -99,7 +100,9 @@ export function applyIntent(inputs, text) {
       if (Object.entries(intent.dietary).some(([key, required]) => required && !dietaryTerms[key].some((term) => itemText.includes(term)))) return [];
       const health = positive.filter((term) => itemText.includes(term)).length * 12
         - negative.filter((term) => itemText.includes(term)).length * 9;
-      if (intent.healthy && (health <= 0 || stronglyIndulgent.some((term) => itemText.includes(term)))) return [];
+      if (intent.healthy && (health <= 0
+        || !healthyAnchors.some((term) => itemText.includes(term))
+        || stronglyIndulgent.some((term) => itemText.includes(term)))) return [];
       const quantity = Math.max(1, intent.people ?? 1);
       const unitPrice = Number(input.item?.unitPrice ?? input.unitPrice);
       const subtotal = Number.isFinite(unitPrice) ? Math.round(unitPrice * quantity * 100) / 100 : null;

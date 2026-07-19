@@ -8,9 +8,10 @@ const HEALTHY_TERMS = [
 const INDULGENT_TERMS = [
   "frito", "fried", "burger", "hamburgues", "pizza", "donut", "tarta", "cake", "helado",
   "chocolate", "bacon", "patatas", "fries", "kebab", "mayonesa", "mayonnaise", "empanado",
-  "breaded", "battered", "croqueta", "crispy", "creamy",
+  "breaded", "battered", "croqueta", "crispy", "creamy", "chips",
 ];
-const STRONGLY_INDULGENT_TERMS = ["frito", "fried", "empanado", "breaded", "battered", "croqueta", "burger", "hamburgues", "pizza", "donut", "cake"];
+const STRONGLY_INDULGENT_TERMS = ["frito", "fried", "empanado", "breaded", "battered", "croqueta", "burger", "hamburgues", "pizza", "donut", "cake", "chips"];
+const HEALTHY_ANCHOR_TERMS = ["ensalada", "salad", "poke", "bowl", "plancha", "grilled", "verdura", "vegetable", "quinoa", "integral", "healthy", "saludable", "vegan", "vegano", "vegetar"];
 const DIETARY = {
   vegan: ["vegan", "vegano", "vegana"],
   vegetarian: ["vegetarian", "vegetariano", "vegetariana"],
@@ -221,7 +222,9 @@ function mealCandidates(restaurant, menuData, menu, intent) {
       if (!matchesDietary(text, intent.dietary)) continue;
       const health = healthScore(text);
       const normalized = normalizedText(text);
-      if (intent.healthy && (health.score <= 0 || STRONGLY_INDULGENT_TERMS.some((term) => normalized.includes(term)))) continue;
+      if (intent.healthy && (health.score <= 0
+        || !HEALTHY_ANCHOR_TERMS.some((term) => normalized.includes(term))
+        || STRONGLY_INDULGENT_TERMS.some((term) => normalized.includes(term)))) continue;
       for (const variation of item.variations) {
         const price = Number(variation.price);
         if (!Number.isFinite(price) || (intent.budget !== null && price > intent.budget)) continue;
