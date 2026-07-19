@@ -249,7 +249,7 @@ export async function runOrderScout(argv) {
       return writeOutput({
         ...result,
         chromeProfile,
-        profile: { id: account.id, name: account.name, email: account.email },
+        profile: { id: account.id, name: account.name },
         membershipActive: account.membershipActive ?? null,
       }, flags);
     }

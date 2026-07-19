@@ -3,7 +3,14 @@ import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/p
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { discoverChromeProfiles, importChromeSession } from "../src/browser-session.js";
+import { browserSessionInternals, discoverChromeProfiles, importChromeSession } from "../src/browser-session.js";
+
+test("the lazy Chrome reader pins its vulnerable build-chain overrides", () => {
+  assert.deepEqual(browserSessionInternals.dependencyManifest.overrides, {
+    tar: "7.5.20",
+    "@tootallnate/once": "2.0.1",
+  });
+});
 
 test("native Chrome login imports provider cookies into an owner-only session", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "orderscout-auth-test-"));

@@ -1,12 +1,22 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, unlink } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { CliError } from "./lib.js";
 import { atomicPrivateWrite, providerPaths } from "./providers.js";
 
 const SESSIONS_DIRECTORY = join(providerPaths.configDirectory, "sessions");
 const LEGACY_SESSIONS_DIRECTORY = join(providerPaths.legacyConfigDirectory, "sessions");
+const CHROME_DEPENDENCIES_DIRECTORY = join(providerPaths.configDirectory, "chrome-cookie-runtime");
+const CHROME_DEPENDENCY_MANIFEST = Object.freeze({
+  private: true,
+  type: "module",
+  dependencies: { "chrome-cookies-secure": "3.0.2" },
+  overrides: { tar: "7.5.20", "@tootallnate/once": "2.0.1" },
+});
+const execFileAsync = promisify(execFile);
 const LOGIN_URLS = Object.freeze({
   glovo: "https://glovoapp.com/es/login",
   ubereats: "https://www.ubereats.com/es",
@@ -108,6 +118,34 @@ async function withTimeout(promise, timeout) {
   }
 }
 
+async function chromeCookieLibrary() {
+  const manifestPath = join(CHROME_DEPENDENCIES_DIRECTORY, "package.json");
+  const modulePath = join(CHROME_DEPENDENCIES_DIRECTORY, "node_modules/chrome-cookies-secure/index.js");
+  const installedPath = join(CHROME_DEPENDENCIES_DIRECTORY, "node_modules/chrome-cookies-secure/package.json");
+  const expected = JSON.stringify(CHROME_DEPENDENCY_MANIFEST);
+  const current = await readFile(manifestPath, "utf8").catch(() => "");
+  const installed = await readFile(installedPath, "utf8").then(JSON.parse).catch(() => null);
+  let currentManifest = null;
+  try { currentManifest = JSON.parse(current); } catch { /* reinstall invalid or missing state */ }
+  if (JSON.stringify(currentManifest) !== expected || installed?.version !== "3.0.2") {
+    await mkdir(CHROME_DEPENDENCIES_DIRECTORY, { recursive: true, mode: 0o700 });
+    await chmod(CHROME_DEPENDENCIES_DIRECTORY, 0o700);
+    await atomicPrivateWrite(manifestPath, CHROME_DEPENDENCY_MANIFEST);
+    try {
+      await execFileAsync("npm", ["install", "--silent", "--no-progress", "--no-fund", "--no-audit"], {
+        cwd: CHROME_DEPENDENCIES_DIRECTORY,
+        timeout: 120_000,
+        env: { ...process.env, npm_config_loglevel: "error" },
+        maxBuffer: 2 * 1024 * 1024,
+      });
+    } catch (error) {
+      throw new CliError("Could not install the protected Chrome cookie reader", "COOKIE_READER_INSTALL_FAILED", { cause: error.message });
+    }
+  }
+  const imported = await import(pathToFileURL(modulePath).href);
+  return imported.default ?? imported;
+}
+
 function cookieHeader(cookies) {
   const seen = new Set();
   return cookies.flatMap((cookie) => {
@@ -125,8 +163,7 @@ async function readChromeSession(provider, { profile, cookiePath, timeout, cooki
   try {
     await copyFile(source, join(temporary, "Cookies"));
     const read = cookieReader ?? (async (url, directory) => {
-      const imported = await import("chrome-cookies-secure");
-      const library = imported.default ?? imported;
+      const library = await chromeCookieLibrary();
       return withTimeout(library.getCookiesPromised(url, "puppeteer", directory), timeout);
     });
     const cookies = await read(TARGET_URLS[provider], temporary);
@@ -225,3 +262,4 @@ export async function logoutBrowserSession(provider) {
 }
 
 export const browserSessionPaths = { sessionsDirectory: SESSIONS_DIRECTORY, sessionPath };
+export const browserSessionInternals = { dependencyManifest: CHROME_DEPENDENCY_MANIFEST };
