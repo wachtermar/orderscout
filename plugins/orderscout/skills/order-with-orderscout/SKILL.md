@@ -12,33 +12,36 @@ The Browser is limited to two handoffs: the user completing login on an official
 ## Accounts and login
 
 1. Call `orderscout_context` and `orderscout_accounts_status`. The status tool live-verifies every provider through the CLI and is authoritative for login claims.
-2. Save providers and memberships stated by the user with `orderscout_accounts_configure`. Exclude disabled providers from every search.
+2. Save providers and memberships stated by the user with `orderscout_accounts_configure`. Account settings are the only provider-selection source: include every enabled provider in every search and exclude disabled providers. Never narrow the search tool to a convenient subset.
 3. Verify every enabled account with the relevant live auth-status tool before claiming it is logged in. A saved `authenticated` value, visible browser session, or selected address is not proof that the CLI is authenticated.
 4. For Just Eat, call `orderscout_justeat_auth_status` first. Status refreshes a saved OAuth session when possible. Call `orderscout_justeat_auth_login` only when status remains unauthenticated. If it returns `opened: true`, tell the user to finish on the official page and return; after they say it is finished, call `orderscout_justeat_auth_complete`. The start call returns immediately and never leaves chat waiting on the browser.
-5. For Glovo or Uber Eats, call `orderscout_provider_auth_status`. If unauthenticated, call `orderscout_provider_auth_complete` first: it automatically checks supported native Chrome profiles and often restores a session without interrupting the user. If it reports that no verified session exists, call `orderscout_provider_auth_login`, tell the user to finish sign-in on the official page opened in Chrome, and wait for the user to say it is finished. Then call `orderscout_provider_auth_complete` and `orderscout_provider_auth_status`. Never ask which Chrome profile they used and do not claim success unless the final direct API verification succeeds.
+5. For Glovo or Uber Eats, call `orderscout_provider_auth_status`. Status and read-only search retry once by refreshing a verified provider session from supported native Chrome profiles when the saved CLI session expired. If status remains unauthenticated, call `orderscout_provider_auth_complete`; if it reports that no verified session exists, call `orderscout_provider_auth_login`, tell the user to finish sign-in on the official page opened in Chrome, and wait for the user to say it is finished. Then call `orderscout_provider_auth_complete` and `orderscout_provider_auth_status`. Never ask which Chrome profile they used and do not claim success unless the final direct API verification succeeds.
 
 Never ask for account credentials in chat. Never expose saved session material.
 
 ## Search and compare
 
-1. Call `orderscout_search_begin` with the complete intent, enabled providers, objective, and a location only when the adapters cannot use a saved address.
-2. The tool converts conversational intent into bounded provider-appropriate queries, directly calls every enabled provider's CLI adapter, expands store-only results through direct menu APIs, and continues when one provider fails.
-3. Call `orderscout_results` and show a compact provider-labelled shortlist. Never replace a failed CLI provider with browser search.
+1. Call `orderscout_search_begin` with the complete intent, objective, and a location only when the adapters cannot use a saved address. Do not select providers in the search call; the CLI fans out to every enabled account.
+2. The tool converts conversational intent into bounded provider-appropriate queries and calls every enabled provider's CLI adapter concurrently. It expands store-only results through direct menu APIs and continues when one provider fails.
+3. Inspect `coverage`. Do not present a cross-provider result until `allConfiguredAttempted` is true. State any provider in `failedProviders`; never silently omit it or replace it with browser search.
+4. Call `orderscout_results` and show a compact provider-labelled shortlist.
 
 Preserve quantity, budget, timing, diet, taste, health, and still/sparkling constraints. For water, parse the entire pack expression and meet or exceed requested litres. For meals, describe health and taste as ranking signals, not medical facts.
 
 For two or more people, prefer offers with `composition.kind: distinct-dishes` and show every line. A valid result contains different mains with quantity 1 each, or one item explicitly sold for that party size. Never silently turn a single ordinary dish into quantity N. Do not present sides, sauces, drinks, or appetizers as a complete meal. If no complete composition is available from a merchant, omit it instead of improvising.
 
-Rank cheapest by delivered checkout total, fastest by displayed ETA, best by rating confidence plus request-specific quality signals, and default requests by balanced value. Do not call a result exact-cheapest until at least two providers have current exact quotes.
+Retain provider-listed item discounts, original prices, 2-for-1 or percentage promotions, free delivery, and membership eligibility. A listed promotion is a candidate signal, not guaranteed savings. Distinguish `listed deal—validate checkout` from an exact discount that the checkout actually applied. Never invent a discount amount from a text-only promotion.
+
+Rank cheapest by delivered checkout total after applied discounts and membership savings, fastest by displayed ETA, best by rating confidence plus request-specific quality signals, and default requests by balanced value. Do not call a result exact-cheapest until `exactPriceCoverage.missingQuoteProviders` is empty: every provider that returned a suitable offer must have a current exact checkout quote.
 
 ## Baskets and exact totals
 
 - Do not modify a non-empty unrelated cart without explaining the conflict and receiving approval.
 - `orderscout_prepare_basket` only previews a payload. Never describe it as a created or quoted basket.
-- A hard delivered budget cannot be verified from search-card prices. When the request explicitly requires an all-in delivered limit or exact provider comparison, use isolated draft baskets for the shortlist. Call `orderscout_prepare_basket`, resolve required modifiers, then call `orderscout_create_basket` and `orderscout_checkout_review_task` through the CLI. Stop on `CART_CONFLICT`; never append comparison items to an unrelated cart.
+- A hard delivered budget cannot be verified from search-card prices. When the request explicitly requires an all-in delivered limit or exact provider comparison, use an isolated draft basket for the best suitable offer from every provider that returned one. Call `orderscout_prepare_basket`, resolve required modifiers, then call `orderscout_create_basket` and `orderscout_checkout_review_task` through the CLI. Stop on `CART_CONFLICT`; never append comparison items to an unrelated cart.
 - `orderscout_checkout_review_task` normalizes and records subtotal, fees, discount, and total automatically. Use `orderscout_record_checkout_quote` only for an exact quote obtained outside the normal CLI review.
 - After quoting, call `orderscout_results` again. Exclude offers whose exact total exceeds the requested budget. Never substitute “about,” a fee guess, or the food subtotal when an exact quote failed.
-- Only count Prime or Uber One savings when the provider quote shows them.
+- Only count promotions, Prime, or Uber One savings in an exact comparison when the provider quote shows that they were applied.
 - In Work, call `orderscout_open_basket` only after the CLI created the basket. Navigate the in-app Browser to its trusted checkout URL for optional visual review or manual edits. Verify that the displayed merchant and every line match the selected basket; if a provider shows another active cart, stop and report the mismatch instead of implying that it synced. The Browser must not create the basket or replace CLI checkout quoting.
 
 ## Checkout review and changes

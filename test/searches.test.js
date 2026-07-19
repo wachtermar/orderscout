@@ -1,8 +1,53 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyIntent, providerRoutes } from "../src/searches.js";
+import { providerDiverseOffers, runConcurrentProviderTasks } from "../src/orderscout.js";
+import { applyIntent, providerRoutes, resultsFor } from "../src/searches.js";
 import { defaultAccounts, publicAccountStatus } from "../src/providers.js";
-import { parseObjective, rankOffers } from "../src/ranking.js";
+import { normalizeOffer, parseObjective, rankOffers } from "../src/ranking.js";
+
+test("provider tasks start concurrently and preserve provider-labelled outcomes", async () => {
+  const started = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const pending = runConcurrentProviderTasks(["justeat", "glovo", "ubereats"], async (provider) => {
+    started.push(provider);
+    await gate;
+    return [`${provider}-offer`];
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started.sort(), ["glovo", "justeat", "ubereats"]);
+  release();
+  const outcomes = await pending;
+  assert.deepEqual(outcomes.map((outcome) => outcome.provider), ["justeat", "glovo", "ubereats"]);
+  assert.deepEqual(outcomes.map((outcome) => outcome.value[0]), ["justeat-offer", "glovo-offer", "ubereats-offer"]);
+});
+
+test("compact agent results retain the best offer from every matched provider", () => {
+  const offers = [
+    ...Array.from({ length: 20 }, (_, index) => ({ id: `j${index}`, provider: "justeat", available: true, ranking: { score: 100 - index } })),
+    { id: "g", provider: "glovo", available: true, ranking: { score: 1 } },
+    { id: "u", provider: "ubereats", available: false, ranking: { score: -1 } },
+  ];
+  const compact = providerDiverseOffers(offers, 20);
+  assert.equal(compact.length, 20);
+  assert.deepEqual([...new Set(compact.map((offer) => offer.provider))].sort(), ["glovo", "justeat", "ubereats"]);
+});
+
+test("search results prove coverage and never silently omit a failed provider", () => {
+  const result = resultsFor({
+    id: "a".repeat(24), intent: "comida", objective: "value", orchestration: "concurrent",
+    providers: ["justeat", "glovo", "ubereats"], offers: [], createdAt: "now", updatedAt: "now",
+    providerStatus: {
+      justeat: { state: "complete", error: null },
+      glovo: { state: "error", error: "expired" },
+      ubereats: { state: "complete", error: null },
+    },
+  });
+  assert.equal(result.coverage.allConfiguredAttempted, true);
+  assert.equal(result.coverage.allConfiguredCompleted, false);
+  assert.deepEqual(result.coverage.failedProviders, ["glovo"]);
+  assert.match(result.warnings.join(" "), /not silently omitted/);
+});
 
 test("taste-focused requests use the quality objective", () => {
   assert.equal(parseObjective("healthy but very tasty"), "best");
@@ -58,7 +103,7 @@ test("meal intent applies party size, total budget, and health signals", () => {
   assert.equal(offers[0].signals.taste, 96);
 });
 
-test("exact totals over a hard budget are disqualified and comparisons require two providers", () => {
+test("exact totals over a hard budget are disqualified and comparison covers every matching provider", () => {
   const base = {
     available: true, etaMinutes: 20, signals: { health: 20, taste: 80 }, merchant: { rating: 4.8, ratingCount: 100 },
   };
@@ -66,8 +111,29 @@ test("exact totals over a hard budget are disqualified and comparisons require t
     { ...base, id: "over", provider: "ubereats", pricing: { exact: true, total: 36 } },
     { ...base, id: "within", provider: "justeat", pricing: { exact: true, total: 28 } },
     { ...base, id: "same-provider", provider: "justeat", pricing: { exact: true, total: 29 } },
+    { ...base, id: "unquoted-provider", provider: "glovo", pricing: { exact: false, total: 27 } },
   ], "healthy meal for two under 30 euros", "best");
   assert.equal(result.offers.at(-1).id, "over");
   assert.equal(result.offers.at(-1).ranking.overBudget, true);
   assert.equal(result.exactPriceComparison, false);
+  assert.deepEqual(result.exactPriceCoverage.missingQuoteProviders, ["glovo"]);
+});
+
+test("listed deals and membership eligibility survive normalization and affect value badges", () => {
+  const offer = normalizeOffer("ubereats", {
+    merchant: { id: "store", name: "Deal Store", rating: 4.7, ratingCount: 200 },
+    item: { id: "meal", name: "Discounted meal", unitPrice: 7 },
+    pricing: { originalSubtotal: 10, subtotal: 7, itemSavings: 3, fees: { delivery: 0 }, exact: false },
+    promotion: { types: ["DISCOUNTED_ITEM", "FREE_DELIVERY"], descriptions: ["30% off"], eligible: true, savings: 3 },
+    membershipEligible: true,
+    available: true,
+  }, { membership: { name: "Uber One", active: true } });
+  const ranked = rankOffers([offer], "best deal", "value").offers[0];
+  assert.equal(ranked.pricing.originalSubtotal, 10);
+  assert.equal(ranked.pricing.itemSavings, 3);
+  assert.equal(ranked.promotion.descriptions[0], "30% off");
+  assert.equal(ranked.membership.eligible, true);
+  assert.match(ranked.ranking.badges.join(" "), /listed item deal saves €3.00/);
+  assert.match(ranked.ranking.badges.join(" "), /free delivery/);
+  assert.match(ranked.ranking.badges.join(" "), /Uber One eligible/);
 });

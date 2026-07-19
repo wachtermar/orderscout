@@ -47,7 +47,9 @@ The current plugin is local to ChatGPT Work/Codex on desktop. It is not an ordin
 
 ## What OrderScout compares
 
-Only providers enabled for your household are searched. For example, if you use Just Eat and Uber Eats with Uber One, Glovo is excluded and eligible Uber One savings are considered.
+Every provider enabled for your household is searched concurrently on every request. Provider selection lives in account settings, so an agent cannot quietly search a convenient subset. For example, if you enable Just Eat and Uber Eats with Uber One, both are always attempted and Glovo is excluded. Failed or expired sessions are shown in provider coverage instead of being silently omitted.
+
+Glovo and Uber Eats read operations make one safe automatic attempt to refresh an expired imported session from a verified native Chrome profile. If that cannot be verified, the provider remains an explicit failure and the user is asked to sign in; OrderScout never falls back to browser search.
 
 | Goal | How it is ranked |
 | --- | --- |
@@ -56,7 +58,9 @@ Only providers enabled for your household are searched. For example, if you use 
 | Best | Rating confidence plus request-specific quality signals |
 | Value | A balance of total price, ETA, ratings, quantity, and preferences |
 
-Search-card prices are estimates. OrderScout only calls a provider the exact cheapest after comparing current checkout quotes from at least two providers. Checkout review records the normalized subtotal, every available fee, discounts, and exact total back into the comparison; exact totals over a hard budget are disqualified.
+Search-card prices are estimates. OrderScout only calls a result the exact cheapest after obtaining a current checkout quote for the best suitable offer from every provider that returned a match. Checkout review records the normalized subtotal, every available fee, applied promotions or membership savings, and exact total back into the comparison; exact totals over a hard budget are disqualified.
+
+Provider-listed deals are retained: struck-through item prices and savings, percentage discounts, 2-for-1 listings, free delivery, merchant offers, and membership eligibility. Listed deals influence provisional value ranking, while only savings actually shown by checkout affect an exact comparison.
 
 Product matching is general. Quantity-aware helpers add extra understanding where useful—for example bottle sizes, multipacks, total litres, still versus sparkling, and price per litre for water. Multi-person meal results contain explicit distinct dish lines, or one item explicitly sold for sharing; OrderScout does not multiply one ordinary dish by the party size. “Healthy” and “tasty” remain transparent ranking signals, not medical or nutritional claims.
 
@@ -143,7 +147,7 @@ orderscout ubereats menu <store-uuid>
 
 # One cross-provider search
 orderscout recommend "best-rated healthy dinner for two under €30" \
-  --providers justeat,glovo,ubereats --at "29603 Marbella"
+  --at "29603 Marbella"
 
 # Prepare, create, and quote a selected offer
 orderscout basket prepare <search-id> <offer-id>

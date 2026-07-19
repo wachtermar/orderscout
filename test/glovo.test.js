@@ -38,6 +38,32 @@ test("Glovo search response becomes a direct normalized offer", () => {
   assert.equal(offers[0].item.unitPrice, 4.5);
   assert.equal(offers[0].etaMinutes, 20);
   assert.equal(offers[0].source.storeAddressId, "34");
+  assert.equal(offers[0].pricing.originalSubtotal, null);
+});
+
+test("Glovo search retains provider-listed promotions and item savings", () => {
+  const payload = { data: { elements: [
+    {
+      type: "STORE_CARD_V2",
+      actions: [{ data: { path: "open?store_id=12&shop_id=34&category_id=1&shop_delivery_fee=0" } }],
+      data: { slug: "deal-test", title: { text: { text: "Deal Test" } }, labels: [] },
+    },
+    { data: { elements: [{
+      type: "PRODUCT_ITEM_CARD_V2",
+      actions: [
+        { data: { path: "open?product_id=56&product_external_id=P56&store_product_id=sp56" } },
+        { data: { events: [{ data: { shopPromotionTypes: "PERCENTAGE_DISCOUNT,FREE_DELIVERY", shopPromotionId: "promo-1,-1" } }] } },
+      ],
+      data: { name: { text: "Deal meal" }, pricing: { originalPrice: "10,00 €", finalPrice: "7,00 €" }, promotionTags: [{ text: "30% de descuento" }] },
+    }] } },
+  ] } };
+  const offer = glovoInternals.offersFromSearch(payload, { citySlug: "marbella" })[0];
+  assert.equal(offer.pricing.originalSubtotal, 10);
+  assert.equal(offer.pricing.subtotal, 7);
+  assert.equal(offer.pricing.itemSavings, 3);
+  assert.deepEqual(offer.promotion.types, ["PERCENTAGE_DISCOUNT", "FREE_DELIVERY"]);
+  assert.deepEqual(offer.promotion.ids, ["promo-1"]);
+  assert.ok(offer.promotion.descriptions.includes("30% de descuento"));
 });
 
 test("Glovo basket prepare is a non-mutating direct API payload", async () => {
@@ -82,6 +108,16 @@ test("Glovo checkout normalizes exact itemized pricing", () => {
   assert.equal(pricing.fees.service, 1);
   assert.equal(pricing.total, 25.5);
   assert.equal(pricing.exact, true);
+});
+
+test("Glovo checkout infers an applied promotion from the exact payable total", () => {
+  const pricing = normalizeGlovoQuote({
+    subtotal: 20,
+    charges: [{ name: "Delivery fee", amount: 2 }],
+    total: 17,
+  });
+  assert.equal(pricing.discount, 5);
+  assert.equal(pricing.total, 17);
 });
 
 test("Glovo final order is preview-first and fingerprint protected", async () => {

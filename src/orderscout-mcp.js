@@ -72,14 +72,13 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_search_begin",
-    description: "Search all enabled Just Eat, Glovo, and Uber Eats accounts directly for restaurant meals, groceries, pharmacy or convenience products, household supplies, drinks, or any other available item, then rank matching offers. Multi-person meals contain explicit distinct dish lines or a genuine sharing item. It never creates a basket.",
+    description: "Directly and concurrently search every provider enabled in OrderScout account settings—never a caller-selected subset—then rank restaurant meals, groceries, pharmacy or convenience products, household supplies, drinks, or any other available item. Provider-listed deals, item savings, free delivery, memberships, fees, and exact checkout discounts are retained. Multi-person meals contain explicit distinct dish lines or a genuine sharing item. It never creates a basket.",
     inputSchema: objectSchema({
       intent: string("Complete natural-language request including quantity, budget, dietary needs, and cheapest/fastest/best preference."),
-      providers: { type: "array", items: { type: "string", enum: ["justeat", "glovo", "ubereats"] } },
       objective: { type: "string", enum: ["cheapest", "fastest", "best", "value"] },
       at: string("Optional non-sensitive location hint. Prefer each provider's already selected saved address."),
     }, ["intent"]), annotations: localWrite,
-    command: (input) => ["search", "begin", input.intent, "--agent", ...(input.providers ? ["--providers", input.providers.join(",")] : []), ...(input.objective ? ["--objective", input.objective] : []), ...(input.at ? ["--at", input.at] : [])],
+    command: (input) => ["search", "begin", input.intent, "--agent", ...(input.objective ? ["--objective", input.objective] : []), ...(input.at ? ["--at", input.at] : [])],
   },
   {
     name: "orderscout_ingest_offers",
@@ -100,7 +99,7 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_results",
-    description: "Rank all collected offers. Exact cheapest is awarded only after at least two final checkout totals are recorded.",
+    description: "Rank all collected offers and return provider coverage, promotion and membership signals, and exact-price coverage. Exact cheapest requires a current checkout total from every provider that returned a suitable match.",
     inputSchema: objectSchema({ searchId: string("OrderScout search ID.") }, ["searchId"]), annotations: readOnly,
     command: (input) => ["search", "results", input.searchId, "--agent"],
   },

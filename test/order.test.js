@@ -153,6 +153,21 @@ test("normalizeCheckout exposes delivered total, fees, and minimum-order constra
   assert.equal(result.additionalSpendRequiredCents, 555);
 });
 
+test("normalizeCheckout exposes Just Eat promotion savings", () => {
+  const result = normalizeCheckout({
+    purchase: {
+      lineItems: [
+        { type: "subtotal", price: { amount: 2000 } },
+        { type: "fee", tags: ["deliveryFee"], price: { amount: 200 } },
+        { type: "discount", label: "Restaurant offer", tags: ["promotion"], price: { amount: -500 } },
+      ],
+      total: { price: { amount: 1700 } },
+    },
+  });
+  assert.equal(result.discountCents, 500);
+  assert.deepEqual(result.discounts[0], { label: "Restaurant offer", amountCents: 500, tags: ["promotion"] });
+});
+
 test("buildCheckoutPatch maps account details to the checkout JSON Patch schema", () => {
   const patch = buildCheckoutPatch(
     { FirstName: "Ada", LastName: "Lovelace", PhoneNumber: "+34123456789" },

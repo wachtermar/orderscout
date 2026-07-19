@@ -2,7 +2,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { CliError } from "./lib.js";
 import {
-  PROVIDER_IDS, PROVIDERS, atomicPrivateWrite, loadAccounts, parseProviderList,
+  PROVIDER_IDS, PROVIDERS, atomicPrivateWrite, loadAccounts,
   providerPaths, publicAccountStatus, searchId,
 } from "./providers.js";
 import { normalizeOffer, parseObjective, rankOffers } from "./ranking.js";
@@ -19,17 +19,17 @@ export async function startSearch(intent, options = {}) {
   const text = String(intent ?? "").trim();
   if (!text) throw new CliError("Describe what you want", "INTENT_REQUIRED");
   const accounts = await loadAccounts();
-  const requested = options.providers ? parseProviderList(options.providers) : PROVIDER_IDS;
-  const enabled = requested.filter((id) => accounts.providers[id].enabled && accounts.providers[id].hasAccount !== false);
+  const enabled = PROVIDER_IDS.filter((id) => accounts.providers[id].enabled && accounts.providers[id].hasAccount !== false);
   if (!enabled.length) throw new CliError("No enabled providers have an account", "NO_ENABLED_PROVIDERS");
   const search = {
     id: searchId(),
-    version: 1,
+    version: 2,
     intent: text,
     objective: options.objective ?? parseObjective(text),
     locationHint: options.locationHint ?? null,
     providers: enabled,
     providerStatus: Object.fromEntries(enabled.map((id) => [id, { state: "pending", error: null }])),
+    orchestration: "concurrent",
     offers: [],
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -78,7 +78,12 @@ export async function ingestOffers(id, provider, inputs, options = {}) {
   }));
   const incomingIds = new Set(normalized.map((offer) => offer.id));
   search.offers = [...search.offers.filter((offer) => offer.provider !== provider || !incomingIds.has(offer.id)), ...normalized];
-  search.providerStatus[provider] = { state: options.complete === false ? "partial" : "complete", error: null };
+  search.providerStatus[provider] = {
+    state: options.complete === false ? "partial" : "complete",
+    error: null,
+    offerCount: normalized.length,
+    ...(options.timing ?? {}),
+  };
   await writeSearch(search);
   return resultsFor(search);
 }
@@ -138,7 +143,15 @@ export function applyIntent(inputs, text) {
       quantity,
       package: pack,
       suppliedLiters: Math.round(pack.totalLiters * quantity * 1_000) / 1_000,
-      pricing: { ...input.pricing, subtotal, total: null, exact: false },
+      pricing: {
+        ...input.pricing,
+        originalSubtotal: Number.isFinite(Number(input.pricing?.originalSubtotal))
+          ? Math.round(Number(input.pricing.originalSubtotal) * quantity * 100) / 100 : null,
+        subtotal,
+        itemSavings: Math.round(Number(input.pricing?.itemSavings ?? 0) * quantity * 100) / 100,
+        total: null,
+        exact: false,
+      },
     }];
   });
 }
@@ -240,9 +253,23 @@ export function composeMealBundles(inputs, intent) {
       const lineItems = lines.map((line) => ({
         item: { ...line.item },
         quantity: 1,
+        pricing: line.pricing ?? null,
+        promotion: line.promotion ?? null,
         source: line.source,
         signals: line.signals,
       }));
+      const itemSavings = Math.round(lines.reduce((sum, line) => sum + Number(line.pricing?.itemSavings ?? 0), 0) * 100) / 100;
+      const originalSubtotal = itemSavings > 0 ? Math.round((subtotal + itemSavings) * 100) / 100 : null;
+      const promotions = lines.map((line) => line.promotion).filter(Boolean);
+      const promotion = promotions.length ? {
+        types: [...new Set(promotions.flatMap((deal) => deal.types ?? []))],
+        descriptions: [...new Set(promotions.flatMap((deal) => deal.descriptions ?? []))],
+        ids: [...new Set(promotions.flatMap((deal) => deal.ids ?? []))],
+        eligible: promotions.every((deal) => deal.eligible !== false),
+        applied: promotions.some((deal) => deal.applied) || itemSavings > 0,
+        savings: itemSavings,
+        source: promotions.map((deal) => deal.source).filter(Boolean).join("+") || null,
+      } : null;
       merchantBundles.push({
         ...first,
         item: {
@@ -255,7 +282,8 @@ export function composeMealBundles(inputs, intent) {
         servesPeople: people,
         composition: { kind: lines.length === 1 ? "sharing-item" : "distinct-dishes", distinctItems: lines.length > 1 },
         lines: lineItems,
-        pricing: { ...first.pricing, subtotal, total: estimatedTotal, exact: false },
+        pricing: { ...first.pricing, originalSubtotal, subtotal, itemSavings, total: estimatedTotal, exact: false },
+        promotion,
         source: { ...first.source, bundle: true },
         signals: { ...first.signals, health, taste },
       });
@@ -270,9 +298,9 @@ export function composeMealBundles(inputs, intent) {
     || Number(left.pricing?.total ?? Infinity) - Number(right.pricing?.total ?? Infinity));
 }
 
-export async function recordProviderError(id, provider, error) {
+export async function recordProviderError(id, provider, error, timing = {}) {
   const search = await loadSearch(id);
-  search.providerStatus[provider] = { state: "error", error: String(error).slice(0, 300) };
+  search.providerStatus[provider] = { state: "error", error: String(error).slice(0, 300), offerCount: 0, ...timing };
   await writeSearch(search);
   return resultsFor(search);
 }
@@ -302,12 +330,31 @@ export async function recordBasket(id, offerId, basket) {
 }
 
 export function resultsFor(search) {
-  const ranking = rankOffers(search.offers, search.intent, search.objective);
+  const ranking = rankOffers(search.offers, search.intent, search.objective, { providers: search.providers });
+  const statuses = Object.entries(search.providerStatus);
+  const attemptedProviders = statuses.filter(([, status]) => status.state !== "pending").map(([provider]) => provider);
+  const completedProviders = statuses.filter(([, status]) => status.state === "complete" || status.state === "partial").map(([provider]) => provider);
+  const failedProviders = statuses.filter(([, status]) => status.state === "error").map(([provider]) => provider);
+  const matchedProviders = [...new Set(search.offers.map((offer) => offer.provider))];
+  const coverage = {
+    mode: search.orchestration ?? "legacy",
+    configuredProviders: search.providers,
+    attemptedProviders,
+    completedProviders,
+    failedProviders,
+    matchedProviders,
+    allConfiguredAttempted: attemptedProviders.length === search.providers.length,
+    allConfiguredCompleted: completedProviders.length === search.providers.length,
+  };
   return {
     search: summarizeSearch(search),
+    coverage,
     comparison: ranking,
     warnings: [
-      ...(!ranking.exactPriceComparison ? ["Fewer than two providers have exact checkout totals; cheapest is provisional."] : []),
+      ...(!ranking.exactPriceComparison && ranking.exactPriceCoverage.requiredProviders.length
+        ? [`Exact checkout totals are still missing for: ${ranking.exactPriceCoverage.missingQuoteProviders.join(", ")}. Cheapest is provisional.`] : []),
+      ...(!coverage.allConfiguredAttempted ? ["Not every configured provider has been attempted yet."] : []),
+      ...(failedProviders.length ? [`Provider search failed: ${failedProviders.join(", ")}. It was attempted and was not silently omitted.`] : []),
       ...(Object.values(search.providerStatus).some((status) => status.state === "pending") ? ["Some enabled providers are still pending."] : []),
     ],
   };
@@ -324,6 +371,7 @@ function summarizeSearch(search) {
     objective: search.objective,
     providers: search.providers,
     providerStatus: search.providerStatus,
+    orchestration: search.orchestration ?? "legacy",
     offerCount: search.offers.length,
     createdAt: search.createdAt,
     updatedAt: search.updatedAt,

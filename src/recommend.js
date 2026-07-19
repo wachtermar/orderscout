@@ -160,6 +160,7 @@ function baseCandidate(restaurant, menuData, menu, category, item, variation) {
       distanceMeters: restaurant.driveDistanceMeters ?? null,
       open: restaurant.isOpenNowForDelivery,
       preorder: restaurant.isOpenNowForPreorder,
+      deals: (restaurant.deals ?? []).map((deal) => typeof deal === "string" ? deal : deal.description).filter(Boolean),
     },
     menuGroupId: menuData.manifest.Menus?.find((entry) =>
       entry.ServiceTypes?.some((type) => normalizedText(type) === "delivery"))?.MenuGroupId

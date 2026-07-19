@@ -7,6 +7,30 @@ const numberOrNull = (value) => value === null || value === undefined || value =
   ? null : Number(value);
 const money = (value) => value === null ? null : Math.round(value * 100) / 100;
 
+function stringList(value, splitCommas = true) {
+  const values = Array.isArray(value) ? value : value === null || value === undefined || value === "" ? [] : [value];
+  return [...new Set(values.flatMap((entry) => splitCommas ? String(entry).split(",") : [String(entry)])
+    .map((entry) => entry.trim()).filter(Boolean))];
+}
+
+function normalizePromotion(value, pricing) {
+  if (!value) return null;
+  const source = typeof value === "string" ? { descriptions: [value] } : value;
+  const descriptions = stringList(source.descriptions ?? source.description ?? source.label ?? source.title, false);
+  const types = stringList(source.types ?? source.type).map((type) => type.toUpperCase());
+  const ids = stringList(source.ids ?? source.id);
+  const savings = numberOrNull(source.savings ?? pricing.itemSavings);
+  return {
+    types,
+    descriptions,
+    ids,
+    eligible: source.eligible !== false,
+    applied: Boolean(source.applied || (savings !== null && savings > 0) || pricing.discount > 0),
+    savings: money(savings),
+    source: source.source ?? null,
+  };
+}
+
 export function parseObjective(intent) {
   const text = String(intent ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
   if (/\b(fastest|quickest|rapido|rapida|antes|asap)\b/.test(text)) return "fastest";
@@ -33,8 +57,27 @@ export function normalizeOffer(provider, input, context = {}) {
   };
   const knownFees = Object.values(fees).filter((value) => value !== null);
   const discount = numberOrNull(input.pricing?.discount) ?? 0;
+  const originalSubtotal = numberOrNull(input.pricing?.originalSubtotal);
+  const itemSavings = numberOrNull(input.pricing?.itemSavings)
+    ?? (originalSubtotal !== null && subtotal !== null && originalSubtotal > subtotal ? originalSubtotal - subtotal : 0);
   const computedTotal = subtotal === null ? null : subtotal + knownFees.reduce((sum, value) => sum + value, 0) - discount;
   const total = numberOrNull(input.pricing?.total) ?? computedTotal;
+  const normalizedPricing = {
+    currency: input.pricing?.currency ?? "EUR",
+    originalSubtotal: money(originalSubtotal),
+    subtotal: money(subtotal),
+    itemSavings: money(itemSavings),
+    fees: Object.fromEntries(Object.entries(fees).map(([key, value]) => [key, money(value)])),
+    discount: money(discount),
+    total: money(total),
+    exact: Boolean(input.pricing?.exact),
+    missing: [
+      ...(subtotal === null ? ["subtotal"] : []),
+      ...(!input.pricing?.exact ? ["final checkout validation"] : []),
+    ],
+  };
+  const promotion = normalizePromotion(input.promotion, normalizedPricing);
+  const membership = input.membership ?? context.membership;
   const volume = input.package?.totalLiters
     ? input.package
     : parsePackVolume(`${itemName} ${input.item?.description ?? ""}`);
@@ -49,6 +92,8 @@ export function normalizeOffer(provider, input, context = {}) {
       unitPrice: money(numberOrNull(line.item?.unitPrice)),
     },
     quantity: Math.max(1, Math.trunc(numberOrNull(line.quantity) ?? 1)),
+    pricing: line.pricing ?? null,
+    promotion: line.promotion ?? null,
     source: line.source ?? null,
     signals: line.signals ?? null,
   })) : null;
@@ -76,20 +121,12 @@ export function normalizeOffer(provider, input, context = {}) {
     suppliedLiters,
     etaMinutes: numberOrNull(input.etaMinutes),
     available: input.available !== false,
-    pricing: {
-      currency: input.pricing?.currency ?? "EUR",
-      subtotal: money(subtotal),
-      fees: Object.fromEntries(Object.entries(fees).map(([key, value]) => [key, money(value)])),
-      discount: money(discount),
-      total: money(total),
-      exact: Boolean(input.pricing?.exact),
-      missing: [
-        ...(subtotal === null ? ["subtotal"] : []),
-        ...(!input.pricing?.exact ? ["final checkout validation"] : []),
-      ],
-    },
-    membership: input.membership ?? context.membership ?? null,
-    promotion: input.promotion ?? null,
+    pricing: normalizedPricing,
+    membership: membership ? {
+      ...membership,
+      eligible: input.membershipEligible ?? membership.eligible ?? null,
+    } : null,
+    promotion,
     url: trustedProviderUrl(provider, input.url),
     source: input.source ?? null,
     signals: {
@@ -126,14 +163,17 @@ function scoreOffer(offer, objective) {
   const eta = offer.etaMinutes ?? 120;
   const rating = ratingScore(offer);
   const healthTaste = offer.signals.health * 0.7 + offer.signals.taste * 0.6;
+  const dealSignal = Math.min(12, Number(offer.pricing.itemSavings ?? 0) * 2)
+    + (offer.promotion?.types?.length ? 2 : 0)
+    + (offer.membership?.active && offer.membership?.eligible ? 2 : 0);
   if (!offer.available) return -1_000_000;
   if (objective === "cheapest") return -price * 20 - eta * 0.08 + rating * 0.08;
   if (objective === "fastest") return -eta * 8 - price * 0.35 + rating * 0.08;
-  if (objective === "best") return rating * 2 + healthTaste - price * 0.8 - eta * 0.12;
-  return rating + healthTaste - price * 2.4 - eta * 0.45;
+  if (objective === "best") return rating * 2 + healthTaste + dealSignal * 0.35 - price * 0.8 - eta * 0.12;
+  return rating + healthTaste + dealSignal - price * 2.4 - eta * 0.45;
 }
 
-export function rankOffers(offers, intent, objective = parseObjective(intent)) {
+export function rankOffers(offers, intent, objective = parseObjective(intent), options = {}) {
   const parsed = parseIntent(intent);
   const ranked = offers.map((offer) => {
     const overBudget = parsed.budget !== null && offer.pricing.exact
@@ -143,6 +183,11 @@ export function rankOffers(offers, intent, objective = parseObjective(intent)) {
     .sort((a, b) => b.ranking.score - a.ranking.score || String(a.id).localeCompare(String(b.id)));
   const available = ranked.filter((offer) => offer.available && !offer.ranking.overBudget);
   const exactPriced = available.filter((offer) => offer.pricing.exact && offer.pricing.total !== null);
+  const requiredProviders = (options.providers ?? [...new Set(ranked.map((offer) => offer.provider))])
+    .filter((provider) => ranked.some((offer) => offer.provider === provider && offer.available));
+  const quotedProviders = [...new Set(ranked.filter((offer) => offer.available && offer.pricing.exact && offer.pricing.total !== null)
+    .map((offer) => offer.provider))];
+  const missingQuoteProviders = requiredProviders.filter((provider) => !quotedProviders.includes(provider));
   const fastest = [...available].filter((offer) => offer.etaMinutes !== null).sort((a, b) => a.etaMinutes - b.etaMinutes)[0];
   const cheapest = [...exactPriced].sort((a, b) => a.pricing.total - b.pricing.total)[0];
   const bestRated = [...available].filter((offer) => offer.merchant.rating !== null)
@@ -152,7 +197,19 @@ export function rankOffers(offers, intent, objective = parseObjective(intent)) {
     if (offer.id === fastest?.id) offer.ranking.badges.push("fastest displayed ETA");
     if (offer.id === bestRated?.id) offer.ranking.badges.push("strongest rating signal");
     if (offer.ranking.overBudget) offer.ranking.badges.push(`exact total exceeds €${parsed.budget} budget`);
+    if (Number(offer.pricing.itemSavings) > 0) offer.ranking.badges.push(`listed item deal saves €${Number(offer.pricing.itemSavings).toFixed(2)}`);
+    if (Number(offer.pricing.discount) > 0 && offer.pricing.exact) offer.ranking.badges.push(`€${Number(offer.pricing.discount).toFixed(2)} checkout discount applied`);
+    if (offer.promotion?.types?.includes("TWO_FOR_ONE") || offer.promotion?.types?.includes("BOGO")) offer.ranking.badges.push("listed 2-for-1 deal—validate checkout");
+    if (offer.promotion?.types?.includes("FREE_DELIVERY")) offer.ranking.badges.push("listed free delivery—validate checkout");
+    if ((offer.promotion?.types?.length || offer.promotion?.descriptions?.length)
+      && !offer.ranking.badges.some((badge) => /listed .*deal|listed free delivery/.test(badge))) offer.ranking.badges.push("listed provider deal—validate checkout");
+    if (offer.membership?.active && offer.membership?.eligible) offer.ranking.badges.push(`${offer.membership.name ?? "membership"} eligible`);
     if (!offer.pricing.exact) offer.ranking.badges.push("estimate—validate checkout");
   }
-  return { objective, offers: ranked, exactPriceComparison: new Set(exactPriced.map((offer) => offer.provider)).size >= 2 };
+  return {
+    objective,
+    offers: ranked,
+    exactPriceComparison: requiredProviders.length > 0 && missingQuoteProviders.length === 0,
+    exactPriceCoverage: { requiredProviders, quotedProviders, missingQuoteProviders },
+  };
 }

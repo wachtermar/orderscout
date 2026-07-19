@@ -52,7 +52,9 @@ function price(value) {
     return price(value.amount ?? value.value ?? value.price ?? value.purchasePriceV2);
   }
   if (typeof value === "string") {
-    const parsed = Number(value.replace(/[^0-9,.-]/g, "").replace(",", "."));
+    const normalized = value.replace(/[^0-9,.-]/g, "").replace(",", ".").trim();
+    if (!normalized || normalized === "-" || normalized === ".") return null;
+    const parsed = Number(normalized);
     return Number.isFinite(parsed) ? parsed : null;
   }
   const number = Number(value);
@@ -67,11 +69,97 @@ function eta(value) {
   return { min: numbers[0], max: numbers[1] ?? numbers[0] };
 }
 
+function textValues(value) {
+  if (!value) return [];
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(textValues);
+  if (typeof value !== "object") return [];
+  const direct = [value.accessibilityText, typeof value.text === "string" ? value.text : null]
+    .filter((entry) => typeof entry === "string" && entry.trim());
+  const semanticKeys = ["content", "richText", "richTextElements", "text", "promoBadge", "label", "title", "priceTagline"];
+  return [...direct, ...semanticKeys.filter((key) => typeof value[key] === "object").flatMap((key) => textValues(value[key]))];
+}
+
+function promotionTypes(value) {
+  const source = String(value ?? "").toLowerCase();
+  return [...new Set([
+    ...(/bogo|two_for_one|2.?for.?1/.test(source) ? ["BOGO"] : []),
+    ...(/discounted_item|items_on_sale|percentage_discount/.test(source) ? ["DISCOUNTED_ITEM"] : []),
+    ...(/free_delivery/.test(source) ? ["FREE_DELIVERY"] : []),
+  ])];
+}
+
+function mergePromotions(...values) {
+  const promotions = values.filter(Boolean);
+  if (!promotions.length) return null;
+  return {
+    types: [...new Set(promotions.flatMap((promotion) => promotion.types ?? []))],
+    descriptions: [...new Set(promotions.flatMap((promotion) => promotion.descriptions ?? []).filter(Boolean))],
+    ids: [...new Set(promotions.flatMap((promotion) => promotion.ids ?? []).filter(Boolean))],
+    eligible: promotions.every((promotion) => promotion.eligible !== false),
+    applied: promotions.some((promotion) => promotion.applied),
+    savings: Math.max(0, ...promotions.map((promotion) => Number(promotion.savings ?? 0))),
+    source: promotions.map((promotion) => promotion.source).filter(Boolean).join("+") || null,
+  };
+}
+
+function storeWidePromotion(value) {
+  if (!value) return null;
+  const types = (value.types ?? []).filter((type) => type === "FREE_DELIVERY");
+  if (!types.length) return null;
+  return { ...value, types };
+}
+
+function itemPromotion(item, finalPrice) {
+  const promoInfo = item?.promoInfo;
+  const promoType = item?.catalogItemAnalyticsData?.promoType;
+  const taglineValues = textValues(item?.priceTagline);
+  const originalCandidates = [
+    price(item?.purchaseInfo?.purchaseOptions?.[0]?.purchasePriceV2),
+    ...taglineValues.flatMap((text) => [...text.matchAll(/(?:€|EUR)\s*([0-9]+(?:[.,][0-9]+)?)/gi)]
+      .map((match) => Number(match[1].replace(",", ".")))),
+  ].filter((value) => Number.isFinite(value) && value > Number(finalPrice ?? 0));
+  const originalPrice = originalCandidates.length ? Math.round(Math.max(...originalCandidates) * 100) / 100 : null;
+  const itemSavings = originalPrice !== null && finalPrice !== null
+    ? Math.round((originalPrice - finalPrice) * 100) / 100 : 0;
+  if (!promoInfo && !promoType && itemSavings <= 0) return { promotion: null, originalPrice: null, itemSavings: 0 };
+  const descriptions = [...new Set([
+    ...textValues(promoInfo?.promoBadge),
+    ...taglineValues.filter((text) => /off|discount|descuento|ahorra/i.test(text)),
+  ])];
+  return {
+    promotion: {
+      types: promotionTypes(promoType),
+      descriptions,
+      ids: promoInfo?.promotionUUID ? [promoInfo.promotionUUID] : [],
+      eligible: true,
+      applied: itemSavings > 0,
+      savings: itemSavings,
+      source: "ubereats-menu",
+    },
+    originalPrice,
+    itemSavings,
+  };
+}
+
 function storeValue(value) {
   if (!value || typeof value !== "object") return null;
   const uuid = value.storeUuid ?? value.uuid ?? value.storeUUID;
   const name = value.title?.text ?? value.name?.text ?? value.title ?? value.name;
   if (!uuid || !name) return null;
+  const meta = Array.isArray(value.meta) ? value.meta : [];
+  const offerMetadata = value.tracking?.storePayload?.offerMetadata;
+  const storePromotionTypes = promotionTypes(offerMetadata?.concatSignpost);
+  const promotionIds = offerMetadata?.promotionUUIDs ?? (value.tracking?.storePayload?.promotionUUID ? [value.tracking.storePayload.promotionUUID] : []);
+  const promotion = storePromotionTypes.length || promotionIds.length ? {
+    types: storePromotionTypes,
+    descriptions: [],
+    ids: promotionIds,
+    eligible: true,
+    applied: false,
+    savings: 0,
+    source: "ubereats-search-card",
+  } : null;
   return {
     id: uuid,
     name,
@@ -79,8 +167,11 @@ function storeValue(value) {
     rating: Number(value.rating?.ratingValue ?? value.rating ?? value.ratingValue ?? value.tracking?.storePayload?.ratingInfo?.storeRatingScore) || null,
     ratingCount: Number(String(value.rating?.reviewCount ?? value.ratingCount ?? value.tracking?.storePayload?.ratingInfo?.ratingCount ?? "").replace(/[^0-9]/g, "")) || null,
     etaMinutes: value.tracking?.storePayload?.etdInfo?.dropoffETARange ?? eta(value.etaRange ?? value.eta ?? value.etaString ?? value.meta?.find((entry) => entry.badgeType === "ETD")),
-    deliveryFee: price(value.deliveryFee?.discount ?? value.deliveryFee ?? value.fareInfo?.deliveryFee),
-    membershipEligible: Boolean(value.hasUberOneBenefits ?? value.uberOne ?? value.membershipBenefit),
+    deliveryFee: price(value.deliveryFee?.discount ?? value.deliveryFee ?? value.fareInfo?.deliveryFee)
+      ?? price(meta.find((entry) => entry.badgeType === "FARE")?.badgeData?.fare?.deliveryFee),
+    membershipEligible: Boolean(value.hasUberOneBenefits ?? value.uberOne ?? value.membershipBenefit
+      ?? meta.some((entry) => entry.badgeType === "MembershipBenefit" || entry.badgeDataWithFallback?.membership?.brandingType === "UBER_ONE")),
+    promotion,
     orderable: value.tracking?.storePayload?.isOrderable !== false,
     url: value.actionUrl ? new URL(value.actionUrl, BASE).toString() : value.slug ? `${BASE}/store/${value.slug}/${uuid}` : `${BASE}/search`,
   };
@@ -100,6 +191,7 @@ export function normalizeUberSearch(payload) {
     if (!store || !id || !title || seen.has(`${store.id}:${id}`)) return;
     seen.add(`${store.id}:${id}`);
     const unitPrice = price(item.price ?? item.itemPrice ?? item.priceTagline ?? item.subtitles?.[0]?.text ?? item.purchaseInfo?.purchaseOptions?.[0]?.purchasePriceV2);
+    const deal = itemPromotion(item, unitPrice);
     offers.push({
       provider: "ubereats",
       merchant: { id: store.id, name: store.name, rating: store.rating, ratingCount: store.ratingCount },
@@ -107,7 +199,16 @@ export function normalizeUberSearch(payload) {
       quantity: 1,
       etaMinutes: store.etaMinutes?.min ?? null,
       available: store.orderable !== false && item.isSoldOut !== true && item.isAvailable !== false,
-      pricing: { currency: "EUR", subtotal: unitPrice, total: null, exact: false, fees: { delivery: store.deliveryFee } },
+      pricing: {
+        currency: "EUR",
+        originalSubtotal: deal.originalPrice,
+        subtotal: unitPrice,
+        itemSavings: deal.itemSavings,
+        total: null,
+        exact: false,
+        fees: { delivery: store.deliveryFee },
+      },
+      promotion: mergePromotions(storeWidePromotion(store.promotion), deal.promotion),
       membershipEligible: store.membershipEligible,
       url: store.url,
       source: { adapter: "ubereats-api", storeUuid: store.id, itemUuid: id, sectionUuid: item.sectionUuid ?? "", subsectionUuid: item.subsectionUuid ?? "", rawPrice: item.price ?? item.itemPrice ?? (unitPrice === null ? null : Math.round(unitPrice * 100)), requiresCustomizations: Boolean(item.hasCustomizations ?? item.customizationsList?.length) },
@@ -169,7 +270,16 @@ function menuOffers(store, menu, query) {
     quantity: 1,
     etaMinutes: store.etaMinutes?.min ?? null,
     available: store.orderable !== false && menu.isOpen !== false && item.available !== false,
-    pricing: { currency: "EUR", subtotal: item.price, total: null, exact: false, fees: { delivery: store.deliveryFee } },
+    pricing: {
+      currency: "EUR",
+      originalSubtotal: item.originalPrice,
+      subtotal: item.price,
+      itemSavings: item.itemSavings,
+      total: null,
+      exact: false,
+      fees: { delivery: store.deliveryFee },
+    },
+    promotion: mergePromotions(storeWidePromotion(store.promotion), item.promotion),
     membershipEligible: store.membershipEligible,
     url: store.url,
     source: {
@@ -246,7 +356,23 @@ function collectCatalog(payload) {
     const nextSubsection = value.subsectionUuid ?? subsectionUuid;
     if (value.uuid && value.title && value.price !== undefined && !seen.has(value.uuid)) {
       seen.add(value.uuid);
-      items.push({ uuid: value.uuid, title: value.title, description: value.itemDescription ?? null, price: price(value.price), rawPrice: value.price, imageUrl: value.imageUrl ?? null, available: value.isSoldOut !== true && value.isAvailable !== false, hasCustomizations: Boolean(value.hasCustomizations ?? value.customizationsList?.length), sectionUuid: nextSection, subsectionUuid: nextSubsection });
+      const finalPrice = price(value.price);
+      const deal = itemPromotion(value, finalPrice);
+      items.push({
+        uuid: value.uuid,
+        title: value.title,
+        description: value.itemDescription ?? null,
+        price: finalPrice,
+        originalPrice: deal.originalPrice,
+        itemSavings: deal.itemSavings,
+        promotion: deal.promotion,
+        rawPrice: value.price,
+        imageUrl: value.imageUrl ?? null,
+        available: value.isSoldOut !== true && value.isAvailable !== false,
+        hasCustomizations: Boolean(value.hasCustomizations ?? value.customizationsList?.length),
+        sectionUuid: nextSection,
+        subsectionUuid: nextSubsection,
+      });
     }
     for (const [key, child] of Object.entries(value)) walk(child, key.includes("section") ? key : nextSection, nextSubsection);
   }
@@ -383,11 +509,18 @@ export function normalizeUberEatsQuote(quote) {
     ?? findNumber(farePayload, ["serviceFee", "serviceFeeAmount"]);
   const smallOrder = findFareAmount(farePayload, /small_order/i)
     ?? findNumber(farePayload, ["smallOrderFee", "smallOrderFeeAmount"]);
+  const fees = { delivery, service, smallOrder, bag: null, other: null };
+  const explicitDiscount = findNumber(findPayload(quote, "promotion"), ["discountAmount", "promotionAmount", "savingsAmount"])
+    ?? findNumber(findPayload(quote, "promoAndMembershipSavingBannerPayloadCheckout"), ["discountAmount", "promotionAmount", "savingsAmount", "amount"]);
+  const knownBeforeDiscount = subtotal === null ? null : subtotal + Object.values(fees)
+    .filter((value) => value !== null).reduce((sum, value) => sum + value, 0);
+  const inferredDiscount = knownBeforeDiscount !== null && total !== null && knownBeforeDiscount > total
+    ? Math.round((knownBeforeDiscount - total) * 100) / 100 : 0;
   return {
     currency: quote?.currencyCode ?? quote?.currency ?? "EUR",
     subtotal,
-    fees: { delivery, service, smallOrder, bag: null, other: null },
-    discount: findNumber(quote, ["discountAmount", "promotionAmount"]) ?? 0,
+    fees,
+    discount: explicitDiscount ?? inferredDiscount,
     total,
     exact: total !== null,
   };
@@ -413,4 +546,4 @@ export async function placeUberEatsOrder(draftOrderUuid, quote, options = {}) {
   }
 }
 
-export const uberEatsInternals = { apiHeaders, checkoutPayloadTypes: CHECKOUT_PAYLOAD_TYPES, collectCatalog, menuOffers, price, request };
+export const uberEatsInternals = { apiHeaders, checkoutPayloadTypes: CHECKOUT_PAYLOAD_TYPES, collectCatalog, itemPromotion, menuOffers, mergePromotions, price, request, storeValue, storeWidePromotion };

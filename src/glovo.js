@@ -111,8 +111,53 @@ function queryFromAction(object) {
 }
 
 function numericText(value) {
-  const number = Number(String(value ?? "").replace(/[^0-9,.-]/g, "").replace(",", "."));
+  const normalized = String(value ?? "").replace(/[^0-9,.-]/g, "").replace(",", ".").trim();
+  if (!normalized || normalized === "-" || normalized === ".") return null;
+  const number = Number(normalized);
   return Number.isFinite(number) ? number : null;
+}
+
+function promotionText(value) {
+  if (!value) return [];
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(promotionText);
+  if (typeof value !== "object") return [];
+  const direct = [typeof value.text === "string" ? value.text : null, value.accessibilityText]
+    .filter((entry) => typeof entry === "string" && entry.trim());
+  const semanticKeys = ["content", "richText", "richTextElements", "text", "label", "title"];
+  return [...direct, ...semanticKeys.filter((key) => typeof value[key] === "object").flatMap((key) => promotionText(value[key]))];
+}
+
+function promotionFromCard(card, finalPrice) {
+  const eventData = (card.actions ?? []).flatMap((action) => action?.data?.events ?? [])
+    .map((event) => event?.data).filter(Boolean);
+  const types = [...new Set(eventData.flatMap((event) => String(event.shopPromotionTypes ?? "").split(","))
+    .map((type) => type.trim().toUpperCase()).filter(Boolean))];
+  const ids = [...new Set(eventData.flatMap((event) => String(event.shopPromotionId ?? "").split(","))
+    .map((id) => id.trim()).filter((id) => id && id !== "-1"))];
+  const descriptions = [...new Set([
+    ...promotionText(card.data?.promotionTags),
+    ...promotionText(card.data?.bottomPromotionTags),
+  ])];
+  const originalPrice = numericText(card.data?.pricing?.originalPrice);
+  const itemSavings = originalPrice !== null && finalPrice !== null && originalPrice > finalPrice
+    ? Math.round((originalPrice - finalPrice) * 100) / 100 : 0;
+  if (!types.length && !ids.length && !descriptions.length && itemSavings <= 0) {
+    return { promotion: null, originalPrice: null, itemSavings: 0 };
+  }
+  return {
+    promotion: {
+      types,
+      ids,
+      descriptions,
+      eligible: true,
+      applied: itemSavings > 0,
+      savings: itemSavings,
+      source: "glovo-search-card",
+    },
+    originalPrice,
+    itemSavings,
+  };
 }
 
 function storeFromCard(card, location) {
@@ -154,14 +199,25 @@ function offersFromSearch(payload, location) {
       const key = `${store.addressId}:${id}`;
       if (id && !seen.has(key)) {
         seen.add(key);
+        const finalPrice = numericText(value.data?.pricing?.finalPrice);
+        const deal = promotionFromCard(value, finalPrice);
         offers.push({
           provider: "glovo",
           merchant: { id: store.id, addressId: store.addressId, name: store.name, rating: store.rating, ratingPercent: store.ratingPercent },
-          item: { id, externalId: query.product_external_id ?? null, storeProductId: query.store_product_id ?? null, name: value.data?.name?.text ?? value.data?.name, unitPrice: numericText(value.data?.pricing?.finalPrice) },
+          item: { id, externalId: query.product_external_id ?? null, storeProductId: query.store_product_id ?? null, name: value.data?.name?.text ?? value.data?.name, unitPrice: finalPrice },
           quantity: 1,
           etaMinutes: store.etaMinutes?.min ?? null,
           available: true,
-          pricing: { currency: "EUR", subtotal: numericText(value.data?.pricing?.finalPrice), total: null, exact: false, fees: { delivery: store.deliveryFee } },
+          pricing: {
+            currency: "EUR",
+            originalSubtotal: deal.originalPrice,
+            subtotal: finalPrice,
+            itemSavings: deal.itemSavings,
+            total: null,
+            exact: false,
+            fees: { delivery: store.deliveryFee },
+          },
+          promotion: deal.promotion,
           membershipEligible: store.prime,
           url: store.url,
           source: { adapter: "glovo-api", storeId: store.id, storeAddressId: store.addressId, storeCategoryId: store.categoryId, productId: id, productExternalId: query.product_external_id ?? null, storeProductId: query.store_product_id ?? null },
@@ -344,17 +400,24 @@ function findLabeledAmount(value, pattern) {
 
 export function normalizeGlovoQuote(quote) {
   const total = findAmount(quote, ["payableAmount", "finalPrice", "totalAmount", "total"]);
+  const subtotal = findAmount(quote, ["subtotal", "productsPrice", "itemsPrice"]);
+  const fees = {
+    delivery: findLabeledAmount(quote, /delivery|entrega|envio/i),
+    service: findLabeledAmount(quote, /service|servicio|gestion/i),
+    smallOrder: findLabeledAmount(quote, /small.?order|pedido.?minimo/i),
+    bag: findLabeledAmount(quote, /bag|bolsa/i),
+    other: null,
+  };
+  const explicitDiscount = findAmount(quote, ["discountAmount", "discount", "promotionDiscount"]);
+  const knownBeforeDiscount = subtotal === null ? null : subtotal + Object.values(fees)
+    .filter((value) => value !== null).reduce((sum, value) => sum + value, 0);
+  const inferredDiscount = knownBeforeDiscount !== null && total !== null && knownBeforeDiscount > total
+    ? Math.round((knownBeforeDiscount - total) * 100) / 100 : 0;
   return {
     currency: quote?.currencyCode ?? quote?.currency ?? "EUR",
-    subtotal: findAmount(quote, ["subtotal", "productsPrice", "itemsPrice"]),
-    fees: {
-      delivery: findLabeledAmount(quote, /delivery|entrega|envio/i),
-      service: findLabeledAmount(quote, /service|servicio|gestion/i),
-      smallOrder: findLabeledAmount(quote, /small.?order|pedido.?minimo/i),
-      bag: findLabeledAmount(quote, /bag|bolsa/i),
-      other: null,
-    },
-    discount: findAmount(quote, ["discountAmount", "discount", "promotionDiscount"]) ?? 0,
+    subtotal,
+    fees,
+    discount: explicitDiscount ?? inferredDiscount,
     total,
     exact: total !== null,
   };
@@ -431,4 +494,4 @@ export async function placeGlovoOrder(offer, quote, options = {}) {
   }
 }
 
-export const glovoInternals = { accessToken, offersFromSearch, nextFlightText, objectsOfType, headers, findSubmitAction, trustedApiPath };
+export const glovoInternals = { accessToken, offersFromSearch, nextFlightText, objectsOfType, headers, findSubmitAction, promotionFromCard, trustedApiPath };

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { collectUberStores, createUberEatsBasket, normalizeUberSearch, quoteUberEatsBasket, searchUberEats, uberEatsMe, uberEatsOrderConfirmation } from "../src/ubereats.js";
+import { collectUberStores, createUberEatsBasket, normalizeUberSearch, quoteUberEatsBasket, searchUberEats, uberEatsInternals, uberEatsMe, uberEatsOrderConfirmation } from "../src/ubereats.js";
 
 test("Uber Eats login uses the current getUserV1 account contract", async () => {
   const account = await uberEatsMe({
@@ -33,6 +33,29 @@ test("Uber Eats mini-store search response becomes a normalized offer", () => {
   assert.equal(offers[0].etaMinutes, 15);
   assert.equal(offers[0].membershipEligible, true);
   assert.equal(offers[0].source.sectionUuid, "s");
+  assert.equal(uberEatsInternals.price(""), null);
+});
+
+test("Uber Eats search retains discounted item prices and promotion metadata", () => {
+  const payload = { feedItems: [{ miniStoreWithItems: {
+    store: {
+      storeUuid: "store-1", title: "Deal Store", actionUrl: "/store/deal/store-1",
+      tracking: { storePayload: { offerMetadata: { promotionUUIDs: ["promo-1"], concatSignpost: "offers.signpost.promo.discounted_item" } } },
+    },
+    items: [{
+      uuid: "deal-1", title: "Deal Meal", price: 700,
+      priceTagline: { accessibilityText: "€7.00, discounted from €10.00" },
+      promoInfo: { promotionUUID: "promo-1", promoBadge: { accessibilityText: "30% off" } },
+      catalogItemAnalyticsData: { promoType: "DISCOUNTED_ITEM" },
+    }],
+  } }] };
+  const offer = normalizeUberSearch(payload)[0];
+  assert.equal(offer.pricing.originalSubtotal, 10);
+  assert.equal(offer.pricing.subtotal, 7);
+  assert.equal(offer.pricing.itemSavings, 3);
+  assert.ok(offer.promotion.types.includes("DISCOUNTED_ITEM"));
+  assert.ok(offer.promotion.descriptions.includes("30% off"));
+  assert.deepEqual(offer.promotion.ids, ["promo-1"]);
 });
 
 test("Uber Eats expands store-only search results into matching menu offers", async () => {
@@ -100,6 +123,20 @@ test("Uber Eats quote uses the current official checkout payload and normalizes 
   assert.equal(result.pricing.fees.delivery, 1.99);
   assert.equal(result.pricing.total, 28.74);
   assert.equal(result.pricing.exact, true);
+});
+
+test("Uber Eats checkout captures exact promotion savings", async () => {
+  const result = await quoteUberEatsBasket("draft-deal", {
+    cookieHeader: "sid=synthetic",
+    fetchImpl: async () => Response.json({ data: { checkoutPayloads: {
+      subtotal: { subtotal: { value: { amountE5: 2_000_000 } } },
+      fareBreakdown: { charges: [{ fareBreakdownChargeMetadata: { analyticsInfo: [{ fareInfoID: "eats_fare.delivery_fee", currencyAmount: { amountE5: 200_000 } }] } }] },
+      promotion: { promotionState: "APPLIED", savingsAmount: { amountE5: 500_000 } },
+      total: { total: { value: { amountE5: 1_700_000 } } },
+    } } }),
+  });
+  assert.equal(result.pricing.discount, 5);
+  assert.equal(result.pricing.total, 17);
 });
 
 test("Uber Eats final order requires a stable confirmation fingerprint", () => {

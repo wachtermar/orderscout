@@ -318,6 +318,9 @@ function cents(value) {
 export function normalizeCheckout(quote) {
   const lineItems = quote?.purchase?.lineItems ?? [];
   const amountForTag = (tag) => cents(lineItems.find((item) => item.tags?.includes(tag))?.price?.amount);
+  const discountItems = lineItems.filter((item) => item.type === "discount"
+    || item.tags?.some((tag) => /discount|promotion|promo|voucher|offer/i.test(String(tag))));
+  const discountCents = discountItems.reduce((sum, item) => sum + Math.abs(cents(item.price?.amount) ?? 0), 0);
   const subtotalCents = cents(lineItems.find((item) => item.type === "subtotal")?.price?.amount);
   const totalCents = cents(quote?.purchase?.total?.price?.amount ?? quote?.total);
   const minimumIssue = quote?.issues?.find((issue) => issue.code === "MINIMUM_ORDER_VALUE_NOT_MET");
@@ -327,6 +330,12 @@ export function normalizeCheckout(quote) {
     deliveryFeeCents: amountForTag("deliveryFee"),
     serviceFeeCents: amountForTag("serviceFee"),
     bagFeeCents: amountForTag("bagFee"),
+    discountCents,
+    discounts: discountItems.map((item) => ({
+      label: item.label ?? item.name ?? item.type,
+      amountCents: Math.abs(cents(item.price?.amount) ?? 0),
+      tags: item.tags ?? [],
+    })),
     totalCents,
     total: totalCents === null ? null : totalCents / 100,
     formattedTotal: quote?.purchase?.total?.price?.formattedAmount ?? null,

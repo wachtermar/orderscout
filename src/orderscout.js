@@ -33,7 +33,7 @@ Usage:
   orderscout accounts status [--cached]
   orderscout accounts set --providers justeat,glovo,ubereats [--accounts JSON] [--memberships JSON]
   orderscout accounts record <provider> --authenticated true [--membership true] [--transport api|browser] [--address-selected true]
-  orderscout recommend <what you want> [--providers list] [--at location] [--objective cheapest|fastest|best|value]
+  orderscout recommend <what you want> [--at location] [--objective cheapest|fastest|best|value]
   orderscout search begin <what you want> [the same flags]
   orderscout search ingest <search-id> <provider> --json '[normalized offers]'
   orderscout search error <search-id> <provider> --message text
@@ -109,6 +109,14 @@ function justEatOffers(result) {
       total: candidate.estimatedDeliveredTotal,
       exact: false,
     },
+    promotion: candidate.restaurant?.deals?.length ? {
+      types: ["MERCHANT_DEAL"],
+      descriptions: candidate.restaurant.deals,
+      eligible: true,
+      applied: false,
+      savings: 0,
+      source: "justeat-search-card",
+    } : null,
     signals: {
       health: candidate.ranking?.healthScore,
       taste: candidate.ranking?.tasteScore,
@@ -131,7 +139,7 @@ function justEatPricing(result) {
       bag: cents(quote?.bagFeeCents),
       other: null,
     },
-    discount: 0,
+    discount: cents(quote?.discountCents) ?? 0,
     total: Number.isFinite(Number(quote?.total)) ? Number(quote.total) : cents(quote?.totalCents),
     exact: Number.isFinite(Number(quote?.total)) || Number.isFinite(Number(quote?.totalCents)),
   };
@@ -152,10 +160,27 @@ async function saveCheckoutResult(searchId, offerId, result, pricing) {
     } : null,
     comparison: {
       exactPriceComparison: current.comparison.exactPriceComparison,
+      exactPriceCoverage: current.comparison.exactPriceCoverage,
       quotedOffer,
       warnings: current.warnings,
     },
   };
+}
+
+export function providerDiverseOffers(offers, limit) {
+  const anchors = [];
+  for (const provider of Object.keys(PROVIDERS)) {
+    const matches = offers.filter((offer) => offer.provider === provider);
+    const anchor = matches.find((offer) => offer.available && !offer.ranking?.overBudget) ?? matches[0];
+    if (anchor) anchors.push(anchor);
+  }
+  const selected = new Map(anchors.map((offer) => [offer.id, offer]));
+  for (const offer of offers) {
+    if (selected.size >= Math.max(limit, anchors.length)) break;
+    selected.set(offer.id, offer);
+  }
+  const positions = new Map(offers.map((offer, index) => [offer.id, index]));
+  return [...selected.values()].sort((left, right) => positions.get(left.id) - positions.get(right.id));
 }
 
 function compactSearchResult(result, flags) {
@@ -163,53 +188,90 @@ function compactSearchResult(result, flags) {
   if (!Number.isInteger(limit) || limit <= 0 || !result?.comparison?.offers) return result;
   return {
     ...result,
-    comparison: { ...result.comparison, offers: result.comparison.offers.slice(0, limit) },
+    comparison: { ...result.comparison, offers: providerDiverseOffers(result.comparison.offers, limit) },
   };
 }
 
-async function collectJustEat(searchId, intent, flags) {
+async function collectJustEat(intent, flags) {
   const args = ["recommend", intent, "--agent"];
   for (const [flag, value] of [["at", flags.at], ["stores", flags.stores], ["limit", flags.limit], ["vertical", flags.vertical]]) {
     if (value !== undefined) args.push(`--${flag}`, String(value));
   }
   const result = await runLegacyJustEat(args, { allowFailure: true });
-  if (result.error) return recordProviderError(searchId, "justeat", result.error.message ?? result.error.code);
-  return ingestOffers(searchId, "justeat", justEatOffers(result));
+  if (result.error) throw new CliError(result.error.message ?? result.error.code ?? "Just Eat search failed", result.error.code ?? "JUSTEAT_SEARCH_FAILED");
+  return justEatOffers(result);
 }
 
-async function collectGlovo(searchId, intent, flags) {
-  try {
-    let location;
-    if (flags.at) location = await resolveLocation(String(flags.at));
-    else {
-      const addresses = await glovoAddresses();
-      location = addresses.find((address) => address.isDefault) ?? addresses[0];
-      if (!location) throw new CliError("Glovo has no usable saved delivery address; pass --at once", "LOCATION_REQUIRED");
+async function collectGlovo(intent, flags) {
+  let location;
+  if (flags.at) location = await resolveLocation(String(flags.at));
+  else {
+    const addresses = await glovoAddresses();
+    location = addresses.find((address) => address.isDefault) ?? addresses[0];
+    if (!location) throw new CliError("Glovo has no usable saved delivery address; pass --at once", "LOCATION_REQUIRED");
+  }
+  const queries = providerSearchQueries(intent);
+  const results = await Promise.allSettled(queries.map((query) => searchGlovo(query, location, { limit: flags.limit })));
+  const fulfilled = results.filter((result) => result.status === "fulfilled");
+  if (!fulfilled.length) throw results[0].reason;
+  return [...new Map(fulfilled.flatMap((result) => result.value.offers)
+    .map((offer) => [`${offer.merchant?.id}:${offer.item?.id}`, offer])).values()];
+}
+
+async function collectUberEats(intent, flags) {
+  const queries = providerSearchQueries(intent);
+  const results = await Promise.allSettled(queries.map((query) => searchUberEats(query, { limit: flags.limit })));
+  const fulfilled = results.filter((result) => result.status === "fulfilled");
+  if (!fulfilled.length) throw results[0].reason;
+  return [...new Map(fulfilled.flatMap((result) => result.value.offers)
+    .map((offer) => [`${offer.merchant?.id}:${offer.item?.id}`, offer])).values()];
+}
+
+export async function runConcurrentProviderTasks(providers, task) {
+  return Promise.all(providers.map(async (provider) => {
+    const startedAt = new Date().toISOString();
+    const startedMs = Date.now();
+    try {
+      const value = await task(provider);
+      return { provider, value, startedAt, completedAt: new Date().toISOString(), durationMs: Date.now() - startedMs };
+    } catch (error) {
+      return { provider, error, startedAt, completedAt: new Date().toISOString(), durationMs: Date.now() - startedMs };
     }
-    const queries = providerSearchQueries(intent);
-    const results = await Promise.allSettled(queries.map((query) => searchGlovo(query, location, { limit: flags.limit })));
-    const fulfilled = results.filter((result) => result.status === "fulfilled");
-    if (!fulfilled.length) throw results[0].reason;
-    const offers = [...new Map(fulfilled.flatMap((result) => result.value.offers)
-      .map((offer) => [`${offer.merchant?.id}:${offer.item?.id}`, offer])).values()];
-    return ingestOffers(searchId, "glovo", offers);
-  } catch (error) {
-    return recordProviderError(searchId, "glovo", error.message ?? error.code);
+  }));
+}
+
+async function collectAllProviders(searchId, providers, intent, flags) {
+  const collectors = { justeat: collectJustEat, glovo: collectGlovo, ubereats: collectUberEats };
+  const outcomes = await runConcurrentProviderTasks(providers, async (provider) => {
+    try {
+      return await collectors[provider](intent, flags);
+    } catch (error) {
+      if (provider === "justeat" || !["AUTH_EXPIRED", "AUTH_REQUIRED"].includes(error.code)) throw error;
+      await refreshChromeProviderSession(provider);
+      return collectors[provider](intent, flags);
+    }
+  });
+
+  // Provider I/O is concurrent, but local search-file updates are serialized so
+  // one provider cannot overwrite another provider's offers.
+  for (const outcome of outcomes) {
+    const timing = { startedAt: outcome.startedAt, completedAt: outcome.completedAt, durationMs: outcome.durationMs };
+    if (outcome.error) await recordProviderError(searchId, outcome.provider, outcome.error.message ?? outcome.error.code, timing);
+    else await ingestOffers(searchId, outcome.provider, outcome.value, { timing });
   }
 }
 
-async function collectUberEats(searchId, intent, flags) {
-  try {
-    const queries = providerSearchQueries(intent);
-    const results = await Promise.allSettled(queries.map((query) => searchUberEats(query, { limit: flags.limit })));
-    const fulfilled = results.filter((result) => result.status === "fulfilled");
-    if (!fulfilled.length) throw results[0].reason;
-    const offers = [...new Map(fulfilled.flatMap((result) => result.value.offers)
-      .map((offer) => [`${offer.merchant?.id}:${offer.item?.id}`, offer])).values()];
-    return ingestOffers(searchId, "ubereats", offers);
-  } catch (error) {
-    return recordProviderError(searchId, "ubereats", error.message ?? error.code);
-  }
+async function refreshChromeProviderSession(provider) {
+  const imported = await importChromeSession(provider, {
+    profile: "auto",
+    timeout: 30_000,
+    verify: (session) => provider === "glovo"
+      ? glovoMe({ cookieHeader: session.cookieHeader })
+      : uberEatsMe({ cookieHeader: session.cookieHeader }),
+  });
+  const account = imported.verified;
+  await recordProviderStatus(provider, { authenticated: true, membershipActive: account.membershipActive, transport: "api" });
+  return { imported, account };
 }
 
 async function providerAuthStatus(provider) {
@@ -224,27 +286,38 @@ async function providerAuthStatus(provider) {
     const account = provider === "glovo" ? await glovoMe() : await uberEatsMe();
     return { provider, ...account, source: stored.source, importedAt: stored.importedAt ?? null };
   } catch (error) {
+    if (["AUTH_EXPIRED", "AUTH_REQUIRED"].includes(error.code)) {
+      try {
+        const refreshed = await refreshChromeProviderSession(provider);
+        return { provider, ...refreshed.account, source: refreshed.imported.source, importedAt: refreshed.imported.importedAt ?? null, refreshed: true };
+      } catch { /* return the original direct verification error below */ }
+    }
     return { provider, authenticated: false, source: stored.source, importedAt: stored.importedAt ?? null, error: { code: error.code, message: error.message } };
   }
 }
 
 async function liveAccountsStatus() {
   const cached = publicAccountStatus(await loadAccounts());
-  const providers = [];
-  for (const account of cached.providers) {
-    const live = await providerAuthStatus(account.id);
-    providers.push({
-      ...account,
+  const liveResults = await Promise.all(cached.providers.map((account) => providerAuthStatus(account.id)));
+  // Persist verified auth and membership state sequentially to avoid concurrent
+  // account-file writers dropping another provider's update.
+  for (const live of liveResults) {
+    await recordProviderStatus(live.provider, {
       authenticated: Boolean(live.authenticated),
+      membershipActive: live.membershipActive,
       transport: "api",
-      membership: account.membership && live.membershipActive !== undefined
-        ? { ...account.membership, active: Boolean(live.membershipActive), source: "detected" }
-        : account.membership,
-      checkedAt: new Date().toISOString(),
-      source: live.source ?? null,
-      ...(live.error ? { error: live.error } : {}),
     });
   }
+  const persisted = publicAccountStatus(await loadAccounts());
+  const providers = persisted.providers.map((account) => {
+    const live = liveResults.find((entry) => entry.provider === account.id);
+    return {
+      ...account,
+      source: live?.source ?? null,
+      ...(live?.refreshed ? { refreshed: true } : {}),
+      ...(live?.error ? { error: live.error } : {}),
+    };
+  });
   return { providers, live: true, verifiedAt: new Date().toISOString() };
 }
 
@@ -264,7 +337,7 @@ export async function runOrderScout(argv) {
       providers: Object.values(PROVIDERS),
       accounts,
       comparison: ["exact delivered total", "fees", "membership benefits", "promotions", "ETA", "ratings", "quantity", "health/taste signals"],
-      priceRule: "A provider can only win an exact cheapest comparison after its final checkout total is recorded.",
+      priceRule: "Exact cheapest requires a final checkout total for the best suitable offer from every enabled provider that returned a match; listed promotions count as exact only when checkout applies them.",
       purchaseBoundary: "Search, ingest, compare, quote recording, and browser opening never place an order. Final purchase remains provider-specific and requires exact human confirmation.",
     }, flags);
   }
@@ -285,16 +358,21 @@ export async function runOrderScout(argv) {
     }
     if (action === "login") return writeOutput(beginBrowserLogin(provider), flags);
     if (action === "complete") {
-      const imported = await importChromeSession(provider, {
-        profile: flags.profile ?? "auto",
-        cookiePath: flags["cookie-path"],
-        timeout: Number(flags.timeout ?? 30_000),
-        verify: (session) => provider === "glovo"
-          ? glovoMe({ cookieHeader: session.cookieHeader })
-          : uberEatsMe({ cookieHeader: session.cookieHeader }),
-      });
-      const { verified: account, profile: chromeProfile, ...result } = imported;
-      await recordProviderStatus(provider, { authenticated: true, membershipActive: account.membershipActive, transport: "api" });
+      const refreshed = flags.profile || flags["cookie-path"]
+        ? await importChromeSession(provider, {
+          profile: flags.profile ?? "auto",
+          cookiePath: flags["cookie-path"],
+          timeout: Number(flags.timeout ?? 30_000),
+          verify: (session) => provider === "glovo"
+            ? glovoMe({ cookieHeader: session.cookieHeader })
+            : uberEatsMe({ cookieHeader: session.cookieHeader }),
+        }).then(async (imported) => {
+          await recordProviderStatus(provider, { authenticated: true, membershipActive: imported.verified.membershipActive, transport: "api" });
+          return { imported, account: imported.verified };
+        })
+        : await refreshChromeProviderSession(provider);
+      const { verified: _verified, profile: chromeProfile, ...result } = refreshed.imported;
+      const account = refreshed.account;
       return writeOutput({
         ...result,
         chromeProfile,
@@ -342,16 +420,14 @@ export async function runOrderScout(argv) {
     const args = command === "recommend" ? rest : rest.slice(1);
     if (action === "begin") {
       const intent = args.join(" ");
+      if (flags.providers) throw new CliError("Search always uses every enabled account. Change providers with `orderscout accounts set --providers ...`.", "PROVIDER_SELECTION_IS_ACCOUNT_SETTING");
       const started = await startSearch(intent, {
-        providers: flags.providers,
         objective: flags.objective,
         locationHint: flags.at,
       });
       let result = started;
       if (!flags["skip-api"]) {
-        if (started.apiProviders.includes("justeat")) await collectJustEat(started.search.id, intent, flags);
-        if (started.apiProviders.includes("glovo")) await collectGlovo(started.search.id, intent, flags);
-        if (started.apiProviders.includes("ubereats")) await collectUberEats(started.search.id, intent, flags);
+        await collectAllProviders(started.search.id, started.apiProviders, intent, flags);
         result = { ...started, results: compactSearchResult(await searchResults(started.search.id), flags) };
       }
       return writeOutput(result, flags);

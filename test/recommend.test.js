@@ -119,7 +119,7 @@ test("recommend ranks real quantities and excludes unavailable stores", async ()
 });
 
 test("recommend explains health and taste heuristics", async () => {
-  const fetchImpl = async () => Response.json({ restaurants: [restaurant()], metaData: {} });
+  const fetchImpl = async () => Response.json({ restaurants: [restaurant({ deals: [{ description: "20% off orders over €20" }] })], metaData: {} });
   const result = await recommend(
     { latitude: 36.5, longitude: -4.8, postcode: "29603" },
     "healthy tasty food under 15 EUR",
@@ -134,6 +134,7 @@ test("recommend explains health and taste heuristics", async () => {
   assert.equal(result.candidates[0].item.id, "healthy");
   assert.ok(result.candidates[0].ranking.healthScore > 0);
   assert.ok(result.candidates[0].ranking.reasons.some((reason) => reason.includes("restaurant rating")));
+  assert.deepEqual(result.candidates[0].restaurant.deals, ["20% off orders over €20"]);
 });
 
 test("recommend finds arbitrary non-food products across all verticals", async () => {

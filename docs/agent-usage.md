@@ -3,12 +3,12 @@ Call `orderscout_context` and the live `orderscout_accounts_status` first. Confi
 
 ## Workflow
 
-1. `orderscout_search_begin` directly searches every enabled provider.
-2. `orderscout_results` returns normalized rankings and provisional-price warnings. For multi-person meals, use the explicit `lines`; never multiply one ordinary dish by party size.
+1. `orderscout_search_begin` directly and concurrently searches every provider enabled in account settings. The MCP tool intentionally has no provider-subset argument.
+2. Require `coverage.allConfiguredAttempted`. Report `failedProviders` instead of silently omitting them. `orderscout_results` returns normalized rankings, listed promotions, membership eligibility, and provisional-price warnings. For multi-person meals, use the explicit `lines`; never multiply one ordinary dish by party size.
 3. `orderscout_prepare_basket` previews the direct payload only. Do not call it a created basket or an exact quote.
 4. After selection, `orderscout_create_basket` performs the remote basket write.
 5. `orderscout_checkout_review_task` reads the current quote, normalizes it, records it, and re-ranks.
-6. Exclude an offer when its exact total exceeds a hard delivered budget. Exact cheapest requires current quotes from two providers.
+6. Exclude an offer when its exact total exceeds a hard delivered budget. Exact cheapest requires `exactPriceCoverage.missingQuoteProviders` to be empty—quote the best suitable offer from every provider that returned a match. Count a promotion or membership saving as exact only when checkout applied it.
 7. Use `orderscout_open_basket` for manual official checkout.
 8. A final order requires a fresh summary, explicit approval, a dry-run fingerprint, the matching second call, and the independent placement environment gate.
 
