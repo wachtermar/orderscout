@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "justeat-es": {
+      "command": "justeat",
+      "args": ["mcp"],
+      "note": "Unofficial Just Eat Spain MCP server. Authentication uses Just Eat's official OAuth flow; final placement requires explicit fingerprint confirmation and JUSTEAT_ENABLE_ORDER_PLACEMENT=1."
+    }
+  }
+}

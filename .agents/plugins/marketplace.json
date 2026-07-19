@@ -1,0 +1,20 @@
+{
+  "name": "justeat-es-marketplace",
+  "interface": {
+    "displayName": "Just Eat Spain"
+  },
+  "plugins": [
+    {
+      "name": "justeat-es",
+      "source": {
+        "source": "local",
+        "path": "./plugins/justeat-es"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Lifestyle"
+    }
+  ]
+}

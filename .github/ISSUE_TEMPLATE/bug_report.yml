@@ -1,0 +1,28 @@
+name: Bug report
+description: Report a reproducible CLI problem without personal data.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Never include tokens, cookies, email addresses, physical addresses, payment details, or raw account responses.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: Output of justeat --version
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Sanitized command and output
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true

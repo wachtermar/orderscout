@@ -1,0 +1,46 @@
+{
+  "name": "justeat-es-cli",
+  "version": "0.3.4",
+  "description": "Agent-friendly CLI for safe Just Eat Spain discovery, comparison, checkout, and ordering",
+  "keywords": [
+    "just-eat",
+    "cli",
+    "food-delivery",
+    "agents",
+    "spain"
+  ],
+  "author": "Marcel Wachter",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wachtermar/justeat-cli.git"
+  },
+  "homepage": "https://github.com/wachtermar/justeat-cli#readme",
+  "bugs": {
+    "url": "https://github.com/wachtermar/justeat-cli/issues"
+  },
+  "type": "module",
+  "files": [
+    "src/",
+    "docs/",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "bin": {
+    "justeat": "./src/cli.js"
+  },
+  "scripts": {
+    "test": "node --test",
+    "test:coverage": "node --experimental-test-coverage --test",
+    "check": "node --check src/cli.js && node --check src/lib.js && node --check src/auth.js && node --check src/doctor.js && node --check src/output.js && node --check src/recommend.js && node --check src/order.js && node --check src/mcp.js && node --test",
+    "pack:check": "npm pack --dry-run"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

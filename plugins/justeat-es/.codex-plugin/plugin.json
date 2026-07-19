@@ -1,0 +1,41 @@
+{
+  "name": "justeat-es",
+  "version": "0.3.4+codex.20260719174134",
+  "description": "Find, compare, prepare, and explicitly confirm Just Eat Spain orders from ChatGPT Work or Codex.",
+  "author": {
+    "name": "Marcel Wachter",
+    "email": "marcel.wachter@gmail.com",
+    "url": "https://github.com/wachtermar"
+  },
+  "homepage": "https://github.com/wachtermar/justeat-cli#readme",
+  "repository": "https://github.com/wachtermar/justeat-cli",
+  "license": "MIT",
+  "keywords": [
+    "just-eat",
+    "food-delivery",
+    "spain",
+    "shopping",
+    "agents"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Just Eat Spain",
+    "shortDescription": "Ask for food, water, or groceries",
+    "longDescription": "Tell ChatGPT what you want from Just Eat Spain. It compares real delivered totals, prepares a basket, and never places an order without your exact confirmation.",
+    "developerName": "Marcel Wachter",
+    "category": "Lifestyle",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/wachtermar/justeat-cli",
+    "defaultPrompt": [
+      "Find the cheapest way to get at least 20 litres of still water delivered. Compare the full price including fees, but do not order.",
+      "Find me a healthy, tasty dinner under \u20ac20. Show me the best three choices, but do not order.",
+      "Add option 1 to my basket, but do not place the order.",
+      "Open my Just Eat basket so I can check out myself."
+    ],
+    "brandColor": "#FF8000"
+  },
+  "mcpServers": "./.mcp.json"
+}
