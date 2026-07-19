@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { CliError } from "./lib.js";
 import { PROVIDERS, assertProvider } from "./providers.js";
-import { parsePackVolume } from "./recommend.js";
+import { parseIntent, parsePackVolume } from "./recommend.js";
 
 const numberOrNull = (value) => value === null || value === undefined || value === "" || !Number.isFinite(Number(value))
   ? null : Number(value);
@@ -39,7 +39,19 @@ export function normalizeOffer(provider, input, context = {}) {
     ? input.package
     : parsePackVolume(`${itemName} ${input.item?.description ?? ""}`);
   const suppliedLiters = numberOrNull(input.suppliedLiters) ?? (volume ? volume.totalLiters * quantity : null);
-  const stable = JSON.stringify([provider, input.merchant?.id, merchantName, input.item?.id, itemName, input.url]);
+  const stable = JSON.stringify([provider, input.merchant?.id, merchantName, input.item?.id, itemName,
+    input.lines?.map((line) => [line.item?.id, line.quantity]), input.url]);
+  const lines = Array.isArray(input.lines) ? input.lines.map((line) => ({
+    item: {
+      id: line.item?.id ?? null,
+      name: String(line.item?.name ?? "").trim(),
+      description: line.item?.description ?? null,
+      unitPrice: money(numberOrNull(line.item?.unitPrice)),
+    },
+    quantity: Math.max(1, Math.trunc(numberOrNull(line.quantity) ?? 1)),
+    source: line.source ?? null,
+    signals: line.signals ?? null,
+  })) : null;
   return {
     id: input.id ?? createHash("sha256").update(stable).digest("hex").slice(0, 20),
     provider,
@@ -57,6 +69,9 @@ export function normalizeOffer(provider, input, context = {}) {
       unitPrice: money(unitPrice),
     },
     quantity,
+    servesPeople: numberOrNull(input.servesPeople),
+    composition: input.composition ?? null,
+    lines,
     package: volume,
     suppliedLiters,
     etaMinutes: numberOrNull(input.etaMinutes),
@@ -119,9 +134,14 @@ function scoreOffer(offer, objective) {
 }
 
 export function rankOffers(offers, intent, objective = parseObjective(intent)) {
-  const ranked = offers.map((offer) => ({ ...offer, ranking: { objective, score: scoreOffer(offer, objective), badges: [] } }))
+  const parsed = parseIntent(intent);
+  const ranked = offers.map((offer) => {
+    const overBudget = parsed.budget !== null && offer.pricing.exact
+      && offer.pricing.total !== null && offer.pricing.total > parsed.budget;
+    return { ...offer, ranking: { objective, score: overBudget ? -999_999 : scoreOffer(offer, objective), badges: [], overBudget } };
+  })
     .sort((a, b) => b.ranking.score - a.ranking.score || String(a.id).localeCompare(String(b.id)));
-  const available = ranked.filter((offer) => offer.available);
+  const available = ranked.filter((offer) => offer.available && !offer.ranking.overBudget);
   const exactPriced = available.filter((offer) => offer.pricing.exact && offer.pricing.total !== null);
   const fastest = [...available].filter((offer) => offer.etaMinutes !== null).sort((a, b) => a.etaMinutes - b.etaMinutes)[0];
   const cheapest = [...exactPriced].sort((a, b) => a.pricing.total - b.pricing.total)[0];
@@ -131,7 +151,8 @@ export function rankOffers(offers, intent, objective = parseObjective(intent)) {
     if (offer.id === cheapest?.id) offer.ranking.badges.push("cheapest exact total");
     if (offer.id === fastest?.id) offer.ranking.badges.push("fastest displayed ETA");
     if (offer.id === bestRated?.id) offer.ranking.badges.push("strongest rating signal");
+    if (offer.ranking.overBudget) offer.ranking.badges.push(`exact total exceeds €${parsed.budget} budget`);
     if (!offer.pricing.exact) offer.ranking.badges.push("estimate—validate checkout");
   }
-  return { objective, offers: ranked, exactPriceComparison: exactPriced.length >= 2 };
+  return { objective, offers: ranked, exactPriceComparison: new Set(exactPriced.map((offer) => offer.provider)).size >= 2 };
 }

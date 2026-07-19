@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { applyIntent, providerRoutes } from "../src/searches.js";
 import { defaultAccounts, publicAccountStatus } from "../src/providers.js";
-import { parseObjective } from "../src/ranking.js";
+import { parseObjective, rankOffers } from "../src/ranking.js";
 
 test("taste-focused requests use the quality objective", () => {
   assert.equal(parseObjective("healthy but very tasty"), "best");
@@ -39,7 +39,8 @@ test("water intent computes packs and excludes sparkling water and soft drinks",
 
 test("meal intent applies party size, total budget, and health signals", () => {
   const offers = applyIntent([
-    { merchant: { name: "Poke", rating: 4.8 }, item: { name: "Poke de salmón y verduras", unitPrice: 13 }, pricing: { currency: "EUR" } },
+    { merchant: { id: "poke", name: "Poke", rating: 4.8 }, item: { id: "salmon", name: "Poke de salmón y verduras", unitPrice: 13 }, pricing: { currency: "EUR" }, source: { storeId: "poke", productId: "salmon" } },
+    { merchant: { id: "poke", name: "Poke", rating: 4.8 }, item: { id: "tuna", name: "Poke de atún y quinoa", unitPrice: 12.5 }, pricing: { currency: "EUR" }, source: { storeId: "poke", productId: "tuna" } },
     { merchant: { name: "Pizza", rating: 4.9 }, item: { name: "Pizza frita", unitPrice: 9 }, pricing: { currency: "EUR" } },
     { merchant: { name: "Chicken", rating: 4.9 }, item: { name: "Filete de pollo empanado", unitPrice: 4 }, pricing: { currency: "EUR" } },
     { merchant: { name: "Soup", rating: 4.9 }, item: { name: "Sopa de pollo", unitPrice: 5 }, pricing: { currency: "EUR" } },
@@ -47,8 +48,26 @@ test("meal intent applies party size, total budget, and health signals", () => {
     { merchant: { name: "Premium", rating: 5 }, item: { name: "Ensalada de pollo", unitPrice: 16 }, pricing: { currency: "EUR" } },
   ], "healthy tasty meal for two under €30");
   assert.equal(offers.length, 1);
-  assert.equal(offers[0].quantity, 2);
-  assert.equal(offers[0].pricing.subtotal, 26);
+  assert.equal(offers[0].quantity, 1);
+  assert.equal(offers[0].servesPeople, 2);
+  assert.equal(offers[0].composition.kind, "distinct-dishes");
+  assert.deepEqual(offers[0].lines.map((line) => line.item.name).sort(), ["Poke de atún y quinoa", "Poke de salmón y verduras"].sort());
+  assert.equal(offers[0].pricing.subtotal, 25.5);
+  assert.equal(offers[0].pricing.total, 29.5);
   assert.ok(offers[0].signals.health > 0);
   assert.equal(offers[0].signals.taste, 96);
+});
+
+test("exact totals over a hard budget are disqualified and comparisons require two providers", () => {
+  const base = {
+    available: true, etaMinutes: 20, signals: { health: 20, taste: 80 }, merchant: { rating: 4.8, ratingCount: 100 },
+  };
+  const result = rankOffers([
+    { ...base, id: "over", provider: "ubereats", pricing: { exact: true, total: 36 } },
+    { ...base, id: "within", provider: "justeat", pricing: { exact: true, total: 28 } },
+    { ...base, id: "same-provider", provider: "justeat", pricing: { exact: true, total: 29 } },
+  ], "healthy meal for two under 30 euros", "best");
+  assert.equal(result.offers.at(-1).id, "over");
+  assert.equal(result.offers.at(-1).ranking.overBudget, true);
+  assert.equal(result.exactPriceComparison, false);
 });

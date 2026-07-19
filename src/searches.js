@@ -94,7 +94,7 @@ export function applyIntent(inputs, text) {
       vegan: ["vegan", "vegano", "vegana"], vegetarian: ["vegetarian", "vegetariano", "vegetariana"],
       halal: ["halal"], glutenFree: ["gluten free", "sin gluten"], lactoseFree: ["lactose free", "sin lactosa"],
     };
-    return inputs.flatMap((input) => {
+    const eligible = inputs.flatMap((input) => {
       const itemText = `${input.item?.name ?? input.itemName ?? ""} ${input.item?.description ?? ""}`
         .normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
       if (Object.entries(intent.dietary).some(([key, required]) => required && !dietaryTerms[key].some((term) => itemText.includes(term)))) return [];
@@ -103,14 +103,13 @@ export function applyIntent(inputs, text) {
       if (intent.healthy && (health <= 0
         || !healthyAnchors.some((term) => itemText.includes(term))
         || stronglyIndulgent.some((term) => itemText.includes(term)))) return [];
-      const quantity = Math.max(1, intent.people ?? 1);
       const unitPrice = Number(input.item?.unitPrice ?? input.unitPrice);
-      const subtotal = Number.isFinite(unitPrice) ? Math.round(unitPrice * quantity * 100) / 100 : null;
+      const subtotal = Number.isFinite(unitPrice) ? Math.round(unitPrice * 100) / 100 : null;
       if (intent.budget !== null && subtotal !== null && subtotal > intent.budget) return [];
       const rating = Number(input.merchant?.rating ?? input.rating);
       return [{
         ...input,
-        quantity,
+        quantity: 1,
         pricing: { ...input.pricing, subtotal, total: null, exact: false },
         signals: {
           ...input.signals,
@@ -119,6 +118,7 @@ export function applyIntent(inputs, text) {
         },
       }];
     });
+    return (intent.people ?? 1) > 1 ? composeMealBundles(eligible, intent) : eligible;
   }
   if (intent.kind !== "water") return inputs;
   return inputs.flatMap((input) => {
@@ -143,6 +143,133 @@ export function applyIntent(inputs, text) {
   });
 }
 
+function mealText(input) {
+  return `${input.item?.name ?? input.itemName ?? ""} ${input.item?.description ?? ""}`
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+function isMainCourse(input) {
+  const value = mealText(input);
+  const unitPrice = Number(input.item?.unitPrice ?? input.unitPrice ?? 0);
+  const complete = /\b(menu|meal|combo|plato|plate|poke|bowl|ramen|sushi|pasta|noodles?|tallarines?|curry|tikka|tandoori|kebab|kabse|paella)\b/.test(value);
+  const protein = /\b(pollo|chicken|pavo|turkey|salmon|atun|tuna|tofu|seitan|ternera|beef|carne|cordero|lamb|pescado|fish|gambas?|prawns?)\b/.test(value);
+  const preparation = /\b(plancha|grilled|roast|asado|verduras?|vegetables?)\b/.test(value);
+  const salad = /\b(ensalada|salad)\b/.test(value);
+  const sideOnly = /\b(gyozas?|dumplings?|empanadillas?|dim sum|spring rolls?|rollitos?|sopa|soup|patatas|fries|arroz|rice|pan|bread|bebida|drink|postre|dessert|edamame|hummus|tabbouleh|wakame|salsa)\b/.test(value);
+  return complete || (!sideOnly && protein && unitPrice >= 8 && (preparation || !salad)) || (salad && protein && unitPrice >= 8);
+}
+
+function mealIdentity(name) {
+  return String(name).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+    .replace(/\b(?:small|medium|large|pequeno|pequena|mediano|mediana|grande|xl|\d+\s*(?:g|gr|ml))\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function servesParty(input, people) {
+  const value = mealText(input);
+  return new RegExp(`(?:for|para)\\s*${people}\\b|${people}\\s*(?:people|personas?|comensales?)\\b|\\b(?:sharing|compartir|familiar|family)\\b`).test(value);
+}
+
+function estimatedFeeReserve(group) {
+  const sample = group[0]?.pricing ?? {};
+  const deliveryValue = sample.fees?.delivery ?? sample.deliveryFee;
+  const serviceValue = sample.fees?.service;
+  const delivery = deliveryValue === null || deliveryValue === undefined ? Number.NaN : Number(deliveryValue);
+  const service = serviceValue === null || serviceValue === undefined ? Number.NaN : Number(serviceValue);
+  const provider = group[0]?.provider;
+  const unknownReserve = provider === "justeat" ? { delivery: 1.5, service: 1 }
+    : provider === "glovo" ? { delivery: 2.5, service: 1 }
+      : { delivery: 2.5, service: 1.5 };
+  return Math.round(((Number.isFinite(delivery) ? delivery : unknownReserve.delivery)
+    + (Number.isFinite(service) ? service : unknownReserve.service)) * 100) / 100;
+}
+
+function bundleCombinations(values, size, limit = 80) {
+  const output = [];
+  function visit(start, selected) {
+    if (output.length >= limit) return;
+    if (selected.length === size) {
+      output.push([...selected]);
+      return;
+    }
+    for (let index = start; index < values.length; index += 1) {
+      selected.push(values[index]);
+      visit(index + 1, selected);
+      selected.pop();
+      if (output.length >= limit) return;
+    }
+  }
+  visit(0, []);
+  return output;
+}
+
+export function composeMealBundles(inputs, intent) {
+  const people = Math.max(2, Math.min(8, Number(intent.people ?? 2)));
+  const grouped = new Map();
+  for (const input of inputs) {
+    const merchantKey = String(input.merchant?.id ?? input.merchant?.name ?? input.merchantName ?? "");
+    if (!merchantKey) continue;
+    const key = `${input.provider ?? ""}:${merchantKey}`;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(input);
+  }
+  const bundles = [];
+  for (const group of grouped.values()) {
+    const feeReserve = estimatedFeeReserve(group);
+    const budgetSubtotal = intent.budget === null ? Number.POSITIVE_INFINITY : Math.max(0, intent.budget - feeReserve);
+    const shared = group.filter((input) => servesParty(input, people));
+    const mains = group.filter(isMainCourse)
+      .sort((left, right) => (Number(right.signals?.health ?? 0) + Number(right.signals?.taste ?? 0) * 0.2)
+        - (Number(left.signals?.health ?? 0) + Number(left.signals?.taste ?? 0) * 0.2)
+        || Number(left.item?.unitPrice ?? Infinity) - Number(right.item?.unitPrice ?? Infinity))
+      .slice(0, 12);
+    const combinations = [
+      ...shared.map((input) => [input]),
+      ...bundleCombinations(mains, people),
+    ];
+    const merchantBundles = [];
+    for (const lines of combinations) {
+      const names = lines.map((line) => String(line.item?.name ?? line.itemName ?? "").trim());
+      if (new Set(names.map(mealIdentity)).size !== names.length) continue;
+      const subtotal = Math.round(lines.reduce((sum, line) => sum + Number(line.item?.unitPrice ?? line.unitPrice ?? 0), 0) * 100) / 100;
+      if (!Number.isFinite(subtotal) || subtotal <= 0 || subtotal > budgetSubtotal) continue;
+      const estimatedTotal = Math.round((subtotal + feeReserve) * 100) / 100;
+      const first = lines[0];
+      const health = Math.round(lines.reduce((sum, line) => sum + Number(line.signals?.health ?? 0), 0) / lines.length);
+      const taste = Math.round(lines.reduce((sum, line) => sum + Number(line.signals?.taste ?? 0), 0) / lines.length);
+      const lineItems = lines.map((line) => ({
+        item: { ...line.item },
+        quantity: 1,
+        source: line.source,
+        signals: line.signals,
+      }));
+      merchantBundles.push({
+        ...first,
+        item: {
+          id: lineItems.map((line) => line.item.id).filter(Boolean).join("+") || null,
+          name: names.join(" + "),
+          description: `A ${people}-person meal with ${names.join(" and ")}.`,
+          unitPrice: subtotal,
+        },
+        quantity: 1,
+        servesPeople: people,
+        composition: { kind: lines.length === 1 ? "sharing-item" : "distinct-dishes", distinctItems: lines.length > 1 },
+        lines: lineItems,
+        pricing: { ...first.pricing, subtotal, total: estimatedTotal, exact: false },
+        source: { ...first.source, bundle: true },
+        signals: { ...first.signals, health, taste },
+      });
+    }
+    merchantBundles.sort((left, right) => Number(right.signals?.health ?? 0) - Number(left.signals?.health ?? 0)
+      || Number(right.signals?.taste ?? 0) - Number(left.signals?.taste ?? 0)
+      || Number(left.pricing?.total ?? Infinity) - Number(right.pricing?.total ?? Infinity));
+    bundles.push(...merchantBundles.slice(0, 8));
+  }
+  return bundles.sort((left, right) => Number(right.signals?.health ?? 0) - Number(left.signals?.health ?? 0)
+    || Number(right.signals?.taste ?? 0) - Number(left.signals?.taste ?? 0)
+    || Number(left.pricing?.total ?? Infinity) - Number(right.pricing?.total ?? Infinity));
+}
+
 export async function recordProviderError(id, provider, error) {
   const search = await loadSearch(id);
   search.providerStatus[provider] = { state: "error", error: String(error).slice(0, 300) };
@@ -160,6 +287,18 @@ export async function recordQuote(id, offerId, pricing) {
   });
   await writeSearch(search);
   return resultsFor(search);
+}
+
+export async function recordBasket(id, offerId, basket) {
+  const search = await loadSearch(id);
+  const index = search.offers.findIndex((offer) => offer.id === offerId);
+  if (index < 0) throw new CliError("Offer not found in this search", "OFFER_NOT_FOUND");
+  search.offers[index] = {
+    ...search.offers[index],
+    basket: { ...basket, createdAt: new Date().toISOString() },
+  };
+  await writeSearch(search);
+  return search.offers[index];
 }
 
 export function resultsFor(search) {

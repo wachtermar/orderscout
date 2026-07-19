@@ -377,6 +377,8 @@ export async function recommend(location, text, options = {}) {
   return {
     intent,
     location: {
+      source: location.source ?? null,
+      addressIndex: location.addressIndex ?? null,
       matched: location.matched,
       latitude: location.latitude,
       longitude: location.longitude,

@@ -168,6 +168,24 @@ test("buildCheckoutPatch maps account details to the checkout JSON Patch schema"
   });
 });
 
+test("buildCheckoutPatch accepts Just Eat's current full-name account field", () => {
+  const patch = buildCheckoutPatch(
+    { Name: "Ada Lovelace", PhoneNumber: "+34123456789" },
+    { lines: ["Private street"], city: "Marbella", postcode: "29603", latitude: 36.5, longitude: -4.8 },
+  );
+  assert.deepEqual(patch.find((entry) => entry.path === "/customer").value, {
+    firstName: "Ada", lastName: "Lovelace", phoneNumber: "+34123456789",
+  });
+});
+
+test("buildCheckoutPatch does not invent a surname when Just Eat does not require one", () => {
+  const patch = buildCheckoutPatch(
+    { Name: "Ada", PhoneNumber: "+34123456789" },
+    { lines: ["Private street"], city: "Marbella", postcode: "29603", latitude: 36.5, longitude: -4.8 },
+  );
+  assert.equal(patch.find((entry) => entry.path === "/customer").value.lastName, "");
+});
+
 test("compareCandidates ranks validated delivered totals", async () => {
   const comparisonPlan = plan();
   comparisonPlan.recommendation.candidates.push({

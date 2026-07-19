@@ -72,7 +72,7 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_search_begin",
-    description: "Search all enabled Just Eat, Glovo, and Uber Eats accounts directly for restaurant meals, groceries, pharmacy or convenience products, household supplies, drinks, or any other available item, then rank matching offers. It never creates a basket.",
+    description: "Search all enabled Just Eat, Glovo, and Uber Eats accounts directly for restaurant meals, groceries, pharmacy or convenience products, household supplies, drinks, or any other available item, then rank matching offers. Multi-person meals contain explicit distinct dish lines or a genuine sharing item. It never creates a basket.",
     inputSchema: objectSchema({
       intent: string("Complete natural-language request including quantity, budget, dietary needs, and cheapest/fastest/best preference."),
       providers: { type: "array", items: { type: "string", enum: ["justeat", "glovo", "ubereats"] } },
@@ -106,7 +106,7 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_record_checkout_quote",
-    description: "Record the exact final review-screen subtotal, itemized fees, discounts, and total for one offer. Reading a quote is safe and does not submit checkout.",
+    description: "Record an externally obtained exact final review-screen subtotal, itemized fees, discounts, and total. Normal CLI checkout review records its normalized quote automatically. This never submits checkout.",
     inputSchema: objectSchema({
       searchId: string("OrderScout search ID."), offerId: string("Offer ID."),
       pricing: { type: "object", properties: {
@@ -119,7 +119,7 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_prepare_basket",
-    description: "Preview the exact direct-provider basket payload for the selected offer. No basket is changed.",
+    description: "Preview the exact direct-provider basket payload and all meal lines for the selected offer. No basket is changed and no exact checkout total is available yet.",
     inputSchema: objectSchema({ searchId: string("OrderScout search ID."), offerId: string("Offer ID.") }, ["searchId", "offerId"]), annotations: readOnly,
     command: (input) => ["basket", "prepare", input.searchId, input.offerId, "--agent"],
   },
@@ -131,8 +131,8 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_checkout_review_task",
-    description: "Read the selected provider's current checkout quote directly, including fees and total. It does not submit checkout.",
-    inputSchema: objectSchema({ searchId: string("OrderScout search ID."), offerId: string("Offer ID.") }, ["searchId", "offerId"]), annotations: readOnly,
+    description: "Read the selected provider's current checkout quote directly, including fees and total, and attach the normalized exact pricing to the comparison. It does not submit checkout or change the remote basket.",
+    inputSchema: objectSchema({ searchId: string("OrderScout search ID."), offerId: string("Offer ID.") }, ["searchId", "offerId"]), annotations: localWrite,
     command: (input) => ["basket", "checkout", input.searchId, input.offerId, "--agent"],
   },
   {

@@ -13,7 +13,7 @@ import { CliError, parseArgs, resolveLocation } from "./lib.js";
 import { errorEnvelope, exitCodeFor, writeOutput } from "./output.js";
 import { PROVIDERS, configureAccounts, loadAccounts, parseProviderList, publicAccountStatus, recordProviderStatus } from "./providers.js";
 import {
-  ingestOffers, loadSearch, recordProviderError, recordQuote, searchResults, startSearch,
+  ingestOffers, loadSearch, recordBasket, recordProviderError, recordQuote, searchResults, startSearch,
 } from "./searches.js";
 import { runOrderScoutMcpServer } from "./orderscout-mcp.js";
 import {
@@ -114,8 +114,57 @@ function justEatOffers(result) {
       taste: candidate.ranking?.tasteScore,
     },
     url: candidate.restaurant?.slug ? `https://www.just-eat.es/restaurants-${candidate.restaurant.slug}/menu` : null,
-    source: { planId: result.planId, candidateIndex: index, adapter: "justeat-api" },
+    source: { planId: result.planId, candidateIndex: index, addressIndex: result.location?.addressIndex ?? 0, adapter: "justeat-api" },
   }));
+}
+
+function justEatPricing(result) {
+  const quote = result?.quote?.quote ?? result?.quote ?? result;
+  const cents = (value) => Number.isFinite(Number(value)) ? Number(value) / 100 : null;
+  return {
+    currency: quote?.currency ?? "EUR",
+    subtotal: cents(quote?.subtotalCents),
+    fees: {
+      delivery: cents(quote?.deliveryFeeCents),
+      service: cents(quote?.serviceFeeCents),
+      smallOrder: null,
+      bag: cents(quote?.bagFeeCents),
+      other: null,
+    },
+    discount: 0,
+    total: Number.isFinite(Number(quote?.total)) ? Number(quote.total) : cents(quote?.totalCents),
+    exact: Number.isFinite(Number(quote?.total)) || Number.isFinite(Number(quote?.totalCents)),
+  };
+}
+
+async function saveCheckoutResult(searchId, offerId, result, pricing) {
+  if (pricing?.exact && Number.isFinite(Number(pricing.total))) await recordQuote(searchId, offerId, pricing);
+  const current = await searchResults(searchId);
+  const quotedOffer = current.comparison.offers.find((offer) => offer.id === offerId) ?? null;
+  const { quote, ...summary } = result;
+  return {
+    ...summary,
+    pricing,
+    review: result.provider === "justeat" ? {
+      fulfillable: quote?.quote?.isFulfillable ?? quote?.isFulfillable ?? null,
+      issues: quote?.quote?.issues ?? quote?.issues ?? [],
+      paymentMethods: quote?.quote?.paymentMethods ?? quote?.paymentMethods ?? [],
+    } : null,
+    comparison: {
+      exactPriceComparison: current.comparison.exactPriceComparison,
+      quotedOffer,
+      warnings: current.warnings,
+    },
+  };
+}
+
+function compactSearchResult(result, flags) {
+  const limit = Number(flags.top ?? (flags.agent ? 20 : 0));
+  if (!Number.isInteger(limit) || limit <= 0 || !result?.comparison?.offers) return result;
+  return {
+    ...result,
+    comparison: { ...result.comparison, offers: result.comparison.offers.slice(0, limit) },
+  };
 }
 
 async function collectJustEat(searchId, intent, flags) {
@@ -303,7 +352,7 @@ export async function runOrderScout(argv) {
         if (started.apiProviders.includes("justeat")) await collectJustEat(started.search.id, intent, flags);
         if (started.apiProviders.includes("glovo")) await collectGlovo(started.search.id, intent, flags);
         if (started.apiProviders.includes("ubereats")) await collectUberEats(started.search.id, intent, flags);
-        result = { ...started, results: await searchResults(started.search.id) };
+        result = { ...started, results: compactSearchResult(await searchResults(started.search.id), flags) };
       }
       return writeOutput(result, flags);
     }
@@ -317,7 +366,7 @@ export async function runOrderScout(argv) {
       const [searchId, provider] = args;
       return writeOutput(await recordProviderError(searchId, provider, flags.message ?? "Provider search failed"), flags);
     }
-    if (action === "results" || action === "show") return writeOutput(await searchResults(args[0]), flags);
+    if (action === "results" || action === "show") return writeOutput(compactSearchResult(await searchResults(args[0]), flags), flags);
     throw new CliError("Use `orderscout search begin|ingest|error|results`");
   }
 
@@ -345,22 +394,42 @@ export async function runOrderScout(argv) {
     }
     if (offer.provider === "glovo") {
       if (action === "checkout") {
-        const baskets = await glovoBaskets();
-        const basket = baskets.baskets.find((entry) => String(entry.storeId) === String(offer.source?.storeId));
-        if (!basket) throw new CliError("Create this Glovo basket before requesting checkout", "BASKET_REQUIRED");
-        return writeOutput(await quoteGlovoBasket(basket.basketId ?? basket.id), flags);
+        let basketId = offer.basket?.id;
+        if (!basketId) {
+          const baskets = await glovoBaskets();
+          const basket = baskets.baskets.find((entry) => String(entry.storeId) === String(offer.source?.storeId));
+          basketId = basket?.basketId ?? basket?.id;
+        }
+        if (!basketId) throw new CliError("Create this Glovo basket before requesting checkout", "BASKET_REQUIRED");
+        const quoted = await quoteGlovoBasket(basketId);
+        return writeOutput(await saveCheckoutResult(searchId, offerId, quoted, quoted.pricing), flags);
       }
-      return writeOutput(await createGlovoBasket(offer, { prepareOnly: action === "prepare", customizations: jsonFlag(flags, "customizations") }), flags);
+      const result = await createGlovoBasket(offer, { prepareOnly: action === "prepare", customizations: jsonFlag(flags, "customizations") });
+      if (action === "create") {
+        const id = result.basket?.basketId ?? result.basket?.id;
+        if (id) await recordBasket(searchId, offerId, { provider: "glovo", id: String(id) });
+      }
+      return writeOutput(result, flags);
     }
     if (offer.provider === "ubereats") {
       if (action === "checkout") {
-        const carts = await uberEatsCarts();
-        const draft = carts.draftOrders.find((entry) => String(entry.storeUuid ?? entry.storeUUID) === String(offer.source?.storeUuid));
-        const id = draft?.uuid ?? draft?.draftOrderUUID ?? draft?.draftOrderUuid;
+        let id = offer.basket?.id;
+        if (!id) {
+          const carts = await uberEatsCarts();
+          const draft = carts.draftOrders.find((entry) => String(entry.storeUuid ?? entry.storeUUID) === String(offer.source?.storeUuid));
+          id = draft?.uuid ?? draft?.draftOrderUUID ?? draft?.draftOrderUuid;
+        }
         if (!id) throw new CliError("Create this Uber Eats basket before requesting checkout", "BASKET_REQUIRED");
-        return writeOutput(await quoteUberEatsBasket(id), flags);
+        const quoted = await quoteUberEatsBasket(id);
+        return writeOutput(await saveCheckoutResult(searchId, offerId, quoted, quoted.pricing), flags);
       }
-      return writeOutput(await createUberEatsBasket(offer, { prepareOnly: action === "prepare", customizations: jsonFlag(flags, "customizations") }), flags);
+      const result = await createUberEatsBasket(offer, { prepareOnly: action === "prepare", customizations: jsonFlag(flags, "customizations") });
+      if (action === "create") {
+        const draft = result.draftOrder;
+        const id = draft?.uuid ?? draft?.draftOrderUUID ?? draft?.draftOrderUuid;
+        if (id) await recordBasket(searchId, offerId, { provider: "ubereats", id: String(id) });
+      }
+      return writeOutput(result, flags);
     }
     const source = offer.source;
     if (!source?.planId || !Number.isInteger(source.candidateIndex)) {
@@ -368,12 +437,29 @@ export async function runOrderScout(argv) {
     }
     if (action === "checkout") {
       const quote = await runLegacyJustEat(["order", "quote", source.planId, "--agent"]);
-      return writeOutput({ provider: "justeat", offerId, quote, submitted: false }, flags);
+      const result = { provider: "justeat", offerId, quote, submitted: false };
+      return writeOutput(await saveCheckoutResult(searchId, offerId, result, justEatPricing(result)), flags);
     }
     const args = ["order", "prepare", source.planId, "--candidate", String(source.candidateIndex), "--agent"];
+    if (offer.lines?.length) {
+      args.push("--lines", JSON.stringify(offer.lines.map((line) => ({
+        candidateIndex: line.source?.candidateIndex,
+        quantity: line.quantity ?? 1,
+      }))));
+    } else {
+      args.push("--quantity", String(offer.quantity ?? 1));
+    }
     if (action === "create") args.push("--create");
     const result = await runLegacyJustEat(args);
-    return writeOutput({ provider: "justeat", offerId, action, result, submitted: false }, flags);
+    let configuration = null;
+    if (action === "create") {
+      configuration = await runLegacyJustEat([
+        "order", "configure", source.planId,
+        "--address-index", String(source.addressIndex ?? 0), "--apply", "--agent",
+      ], { allowFailure: true });
+      if (result?.basketId) await recordBasket(searchId, offerId, { provider: "justeat", id: String(result.basketId) });
+    }
+    return writeOutput({ provider: "justeat", offerId, action, result, configuration, submitted: false }, flags);
   }
 
   if (command === "order" && rest[0] === "place") {
@@ -381,17 +467,23 @@ export async function runOrderScout(argv) {
     const offer = search.offers.find((entry) => entry.id === rest[2]);
     if (!offer) throw new CliError("Offer not found", "OFFER_NOT_FOUND");
     if (offer.provider === "ubereats") {
-      const carts = await uberEatsCarts();
-      const draft = carts.draftOrders.find((entry) => String(entry.storeUuid ?? entry.storeUUID) === String(offer.source?.storeUuid));
-      const id = draft?.uuid ?? draft?.draftOrderUUID ?? draft?.draftOrderUuid;
+      let id = offer.basket?.id;
+      if (!id) {
+        const carts = await uberEatsCarts();
+        const draft = carts.draftOrders.find((entry) => String(entry.storeUuid ?? entry.storeUUID) === String(offer.source?.storeUuid));
+        id = draft?.uuid ?? draft?.draftOrderUUID ?? draft?.draftOrderUuid;
+      }
       if (!id) throw new CliError("Create this Uber Eats basket first", "BASKET_REQUIRED");
       const quoted = await quoteUberEatsBasket(id);
       return writeOutput(await placeUberEatsOrder(id, quoted.quote, { confirm: flags.confirm }), flags);
     }
     if (offer.provider === "glovo") {
-      const baskets = await glovoBaskets();
-      const basket = baskets.baskets.find((entry) => String(entry.storeId) === String(offer.source?.storeId));
-      const basketId = basket?.basketId ?? basket?.id;
+      let basketId = offer.basket?.id;
+      if (!basketId) {
+        const baskets = await glovoBaskets();
+        const basket = baskets.baskets.find((entry) => String(entry.storeId) === String(offer.source?.storeId));
+        basketId = basket?.basketId ?? basket?.id;
+      }
       if (!basketId) throw new CliError("Create this Glovo basket first", "BASKET_REQUIRED");
       const quoted = await quoteGlovoBasket(basketId);
       return writeOutput(await placeGlovoOrder(offer, { basketId, ...quoted.quote }, { confirm: flags.confirm }), flags);

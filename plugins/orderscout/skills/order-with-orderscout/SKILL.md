@@ -27,15 +27,19 @@ Never ask for account credentials in chat. Never expose saved session material.
 
 Preserve quantity, budget, timing, diet, taste, health, and still/sparkling constraints. For water, parse the entire pack expression and meet or exceed requested litres. For meals, describe health and taste as ranking signals, not medical facts.
 
+For two or more people, prefer offers with `composition.kind: distinct-dishes` and show every line. A valid result contains different mains with quantity 1 each, or one item explicitly sold for that party size. Never silently turn a single ordinary dish into quantity N. Do not present sides, sauces, drinks, or appetizers as a complete meal. If no complete composition is available from a merchant, omit it instead of improvising.
+
 Rank cheapest by delivered checkout total, fastest by displayed ETA, best by rating confidence plus request-specific quality signals, and default requests by balanced value. Do not call a result exact-cheapest until at least two providers have current exact quotes.
 
 ## Baskets and exact totals
 
 - Do not modify a non-empty unrelated cart without explaining the conflict and receiving approval.
-- Call `orderscout_prepare_basket` before mutation, resolve required modifiers, then call `orderscout_create_basket` and `orderscout_checkout_review_task` through the CLI.
-- Record its subtotal, fees, discount, and total with `orderscout_record_checkout_quote`, then call `orderscout_results` again.
+- `orderscout_prepare_basket` only previews a payload. Never describe it as a created or quoted basket.
+- A hard delivered budget cannot be verified from search-card prices. When the request explicitly requires an all-in delivered limit or exact provider comparison, use isolated draft baskets for the shortlist. Call `orderscout_prepare_basket`, resolve required modifiers, then call `orderscout_create_basket` and `orderscout_checkout_review_task` through the CLI. Stop on `CART_CONFLICT`; never append comparison items to an unrelated cart.
+- `orderscout_checkout_review_task` normalizes and records subtotal, fees, discount, and total automatically. Use `orderscout_record_checkout_quote` only for an exact quote obtained outside the normal CLI review.
+- After quoting, call `orderscout_results` again. Exclude offers whose exact total exceeds the requested budget. Never substitute “about,” a fee guess, or the food subtotal when an exact quote failed.
 - Only count Prime or Uber One savings when the provider quote shows them.
-- In Work, call `orderscout_open_basket` only after the CLI created the basket. Navigate the in-app Browser to its trusted checkout URL for optional visual review or manual edits. The Browser must not create the basket or replace CLI checkout quoting.
+- In Work, call `orderscout_open_basket` only after the CLI created the basket. Navigate the in-app Browser to its trusted checkout URL for optional visual review or manual edits. Verify that the displayed merchant and every line match the selected basket; if a provider shows another active cart, stop and report the mismatch instead of implying that it synced. The Browser must not create the basket or replace CLI checkout quoting.
 
 ## Checkout review and changes
 
@@ -51,6 +55,8 @@ Cart, address, delivery timing, tip, and saved payment method may be changed thr
 After any checkout change, discard the previous quote, screenshot, summary, fingerprint, and approval. Reload the final checkout state, obtain and record a fresh exact quote, create a new safe screenshot, and ask for approval again.
 
 Verify provider, merchant, item, quantity, modifiers, address label, ETA, subtotal, every fee, discount, total, and payment-method summary. Do not repeat full addresses or payment details in chat.
+
+When reporting a multi-person meal, list each distinct dish and quantity. Say `food subtotal` for estimates and `exact delivered total` only after checkout review returned `pricing.exact: true`.
 
 ## Purchase boundary
 

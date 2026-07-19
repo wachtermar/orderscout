@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createGlovoBasket, glovoAddresses, glovoInternals, glovoOrderConfirmation, glovoSubmissionRequest, placeGlovoOrder } from "../src/glovo.js";
+import { createGlovoBasket, glovoAddresses, glovoInternals, glovoOrderConfirmation, glovoSubmissionRequest, normalizeGlovoQuote, placeGlovoOrder } from "../src/glovo.js";
 
 test("Glovo browser cookie token is parsed without exposing other cookies", () => {
   const encoded = encodeURIComponent(JSON.stringify({ access: { accessToken: "a".repeat(40) } }));
@@ -47,6 +47,14 @@ test("Glovo basket prepare is a non-mutating direct API payload", async () => {
   assert.equal(prepared.payload.storeAddressId, 34);
 });
 
+test("Glovo basket prepare preserves distinct meal lines", async () => {
+  const prepared = await createGlovoBasket({ lines: [
+    { item: { name: "Chicken poke" }, quantity: 1, source: { storeId: "12", storeAddressId: "34", productId: "56", productExternalId: "P56", storeProductId: "sp56" } },
+    { item: { name: "Salmon poke" }, quantity: 1, source: { storeId: "12", storeAddressId: "34", productId: "57", productExternalId: "P57", storeProductId: "sp57" } },
+  ] }, { prepareOnly: true });
+  assert.deepEqual(prepared.payload.products.map((product) => product.ids.id), ["56", "57"]);
+});
+
 test("Glovo checkout prefers the submit action returned by validation", () => {
   const request = glovoSubmissionRequest("basket-1", {
     actions: [{ type: "SUBMIT_ORDER", data: { method: "POST", path: "/v2/checkout/orders", body: { checkoutSessionId: "session-1", basketId: "basket-1" } } }],
@@ -57,6 +65,23 @@ test("Glovo checkout prefers the submit action returned by validation", () => {
     body: { checkoutSessionId: "session-1", basketId: "basket-1" },
     source: "checkout-action",
   });
+});
+
+test("Glovo checkout normalizes exact itemized pricing", () => {
+  const pricing = normalizeGlovoQuote({
+    subtotal: 22,
+    charges: [
+      { name: "Delivery fee", amount: 2.5 },
+      { name: "Service fee", amount: 1 },
+    ],
+    total: 25.5,
+    currency: "EUR",
+  });
+  assert.equal(pricing.subtotal, 22);
+  assert.equal(pricing.fees.delivery, 2.5);
+  assert.equal(pricing.fees.service, 1);
+  assert.equal(pricing.total, 25.5);
+  assert.equal(pricing.exact, true);
 });
 
 test("Glovo final order is preview-first and fingerprint protected", async () => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { collectUberStores, createUberEatsBasket, normalizeUberSearch, searchUberEats, uberEatsMe, uberEatsOrderConfirmation } from "../src/ubereats.js";
+import { collectUberStores, createUberEatsBasket, normalizeUberSearch, quoteUberEatsBasket, searchUberEats, uberEatsMe, uberEatsOrderConfirmation } from "../src/ubereats.js";
 
 test("Uber Eats login uses the current getUserV1 account contract", async () => {
   const account = await uberEatsMe({
@@ -62,6 +62,44 @@ test("Uber Eats basket prepare uses createDraftOrderV2 shape without mutation", 
   assert.equal(prepared.payload.isMulticart, true);
   assert.equal(prepared.payload.shoppingCartItems[0].quantity, 2);
   assert.equal(prepared.payload.shoppingCartItems[0].price, 445);
+});
+
+test("Uber Eats basket prepare preserves distinct meal lines", async () => {
+  const prepared = await createUberEatsBasket({
+    lines: [
+      { item: { name: "Salmon poke", unitPrice: 13 }, quantity: 1, source: { storeUuid: "store-1", itemUuid: "salmon", rawPrice: 1300 } },
+      { item: { name: "Tuna poke", unitPrice: 12.5 }, quantity: 1, source: { storeUuid: "store-1", itemUuid: "tuna", rawPrice: 1250 } },
+    ],
+  }, { prepareOnly: true });
+  assert.deepEqual(prepared.payload.shoppingCartItems.map((item) => [item.title, item.quantity]), [
+    ["Salmon poke", 1], ["Tuna poke", 1],
+  ]);
+});
+
+test("Uber Eats quote uses the current official checkout payload and normalizes totals", async () => {
+  let requestBody;
+  const result = await quoteUberEatsBasket("draft-1", {
+    cookieHeader: "sid=synthetic",
+    fetchImpl: async (url, options) => {
+      assert.match(String(url), /getCheckoutPresentationV1$/);
+      requestBody = JSON.parse(options.body);
+      return Response.json({ data: { checkoutPayloads: {
+        subtotal: { subtotal: { value: { amountE5: 2_550_000, currencyCode: "EUR" } } },
+        fareBreakdown: { charges: [
+          { fareBreakdownChargeMetadata: { analyticsInfo: [{ fareInfoID: "eats_fare.delivery_fee", currencyAmount: { amountE5: 199_000 } }] } },
+          { fareBreakdownChargeMetadata: { analyticsInfo: [{ fareInfoID: "eats.mp.charges.byoc_basket_dependent_fee.net", currencyAmount: { amountE5: 125_000 } }] } },
+        ] },
+        total: { total: { value: { amountE5: 2_874_000, currencyCode: "EUR" } } },
+      } } });
+    },
+  });
+  assert.ok(requestBody.payloadTypes.includes("total"));
+  assert.equal(requestBody.isGroupOrder, false);
+  assert.match(requestBody.clientFeaturesData.paymentSelectionContext.value, /thirdPartyApplications/);
+  assert.equal(result.pricing.subtotal, 25.5);
+  assert.equal(result.pricing.fees.delivery, 1.99);
+  assert.equal(result.pricing.total, 28.74);
+  assert.equal(result.pricing.exact, true);
 });
 
 test("Uber Eats final order requires a stable confirmation fingerprint", () => {

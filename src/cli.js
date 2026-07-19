@@ -63,7 +63,7 @@ Usage:
   justeat menu <slug-or-url> [--search text] [--raw]
   justeat recommend <intent> [--at address] [--stores 12] [--limit 10] [--include-closed]
   justeat order show <plan-id>
-  justeat order prepare <plan-id> [--candidate 0|--optimized] [--modifiers JSON] [--create]
+  justeat order prepare <plan-id> [--candidate 0|--optimized] [--lines JSON] [--modifiers JSON] [--create]
   justeat order quote <plan-id>
   justeat order open <plan-id>
   justeat order compare <plan-id> [--top 3] [--create]
@@ -251,11 +251,17 @@ async function run(argv) {
       if (!Number.isInteger(candidateIndex) || candidateIndex < 0) {
         throw new CliError("--candidate must be a non-negative integer");
       }
+      let explicitLines;
+      if (flags.lines !== undefined) {
+        try { explicitLines = JSON.parse(String(flags.lines)); }
+        catch { throw new CliError("--lines must be a JSON array", "INVALID_LINES"); }
+        if (!Array.isArray(explicitLines) || !explicitLines.length) throw new CliError("--lines must be a non-empty JSON array", "INVALID_LINES");
+      }
       const options = {
         quantity: flags.quantity,
         note: flags.note,
         modifiers: flags.modifiers,
-        lines: optimizedLines,
+        lines: explicitLines ?? optimizedLines,
         allergenReviewed: Boolean(flags["allergen-reviewed"]),
       };
       const payload = buildBasketPayload(plan, candidateIndex, options);
@@ -342,8 +348,17 @@ async function run(argv) {
         accountGet("addresses", token),
       ]);
       const addressIndex = Number(flags["address-index"] ?? 0);
-      const address = normalizeSavedAddresses(addressPayload)[addressIndex];
-      if (!address) throw new CliError(`Saved address ${addressIndex} does not exist`, "ADDRESS_NOT_FOUND");
+      const savedAddress = normalizeSavedAddresses(addressPayload)[addressIndex];
+      if (!savedAddress) throw new CliError(`Saved address ${addressIndex} does not exist`, "ADDRESS_NOT_FOUND");
+      const hasCoordinates = Number.isFinite(Number(savedAddress.latitude)) && Number.isFinite(Number(savedAddress.longitude));
+      const resolved = hasCoordinates ? null : await resolveSavedLocation(token, addressIndex);
+      const address = resolved ? {
+        ...savedAddress,
+        latitude: resolved.latitude,
+        longitude: resolved.longitude,
+        postcode: savedAddress.postcode ?? resolved.postcode,
+        city: savedAddress.city ?? resolved.city,
+      } : savedAddress;
       const patch = buildCheckoutPatch(profile, address, { scheduled: flags.scheduled });
       if (!flags.apply) {
         writeOutput({

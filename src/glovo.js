@@ -259,24 +259,34 @@ function glovoProduct(source, quantity) {
 }
 
 export async function createGlovoBasket(offer, options = {}) {
-  const source = offer.source ?? {};
-  if (!source.storeId || !source.storeAddressId || !source.productId) throw new CliError("Glovo offer is missing basket identifiers", "SOURCE_PLAN_MISSING");
-  if (options.prepareOnly) return { mutated: false, payload: { products: [glovoProduct(source, offer.quantity ?? 1)], storeId: source.storeId, storeAddressId: Number(source.storeAddressId), storeCategoryId: source.storeCategoryId ?? "1", handlingStrategy: "DELIVERY" } };
+  const lines = offer.lines?.length ? offer.lines : [{ item: offer.item, quantity: offer.quantity ?? 1, source: offer.source }];
+  const stores = new Set(lines.map((line) => line.source?.storeId).filter(Boolean));
+  if (stores.size !== 1 || lines.some((line) => !line.source?.storeAddressId || !line.source?.productId)) {
+    throw new CliError("Glovo basket lines must belong to one store and include product identifiers", "SOURCE_PLAN_MISSING");
+  }
+  const source = lines[0].source;
+  const products = lines.map((line) => glovoProduct(line.source, line.quantity ?? 1));
+  if (options.prepareOnly) return { mutated: false, payload: { products, storeId: source.storeId, storeAddressId: Number(source.storeAddressId), storeCategoryId: source.storeCategoryId ?? "1", handlingStrategy: "DELIVERY" } };
   const me = await glovoMe(options);
   const existing = await request(`/v1/authenticated/customers/${me.id}/baskets/stores/${source.storeId}`, { auth: true, location: options.location, fetchImpl: options.fetchImpl });
   let basket;
   if (!existing) {
-    basket = await request(`/v1/authenticated/customers/${me.id}/baskets`, { method: "POST", auth: true, location: options.location, fetchImpl: options.fetchImpl, body: { products: [glovoProduct(source, offer.quantity ?? 1)], storeId: source.storeId, storeAddressId: Number(source.storeAddressId), storeCategoryId: source.storeCategoryId ?? "1", handlingStrategy: "DELIVERY" } });
+    basket = await request(`/v1/authenticated/customers/${me.id}/baskets`, { method: "POST", auth: true, location: options.location, fetchImpl: options.fetchImpl, body: { products, storeId: source.storeId, storeAddressId: Number(source.storeAddressId), storeCategoryId: source.storeCategoryId ?? "1", handlingStrategy: "DELIVERY" } });
   } else {
-    const product = glovoProduct(source, offer.quantity ?? 1);
-    basket = await request(`/v1/authenticated/customers/${me.id}/baskets/${existing.basketId}/products`, { method: "PUT", auth: true, location: options.location, fetchImpl: options.fetchImpl, body: { ...existing, products: [...(existing.products ?? []), product] } });
+    if ((existing.products ?? []).length) {
+      throw new CliError("This Glovo store already has a non-empty basket; review it before adding comparison items", "CART_CONFLICT", {
+        storeId: source.storeId,
+        existingItemCount: existing.products.length,
+      });
+    }
+    basket = await request(`/v1/authenticated/customers/${me.id}/baskets/${existing.basketId}/products`, { method: "PUT", auth: true, location: options.location, fetchImpl: options.fetchImpl, body: { ...existing, products: [...(existing.products ?? []), ...products] } });
   }
   return { mutated: true, basket, submitted: false };
 }
 
 export async function quoteGlovoBasket(basketId, options = {}) {
   const quote = await request(`/v1/authenticated/customers/baskets/${encodeURIComponent(basketId)}/validate`, { method: "POST", auth: true, location: options.location, fetchImpl: options.fetchImpl });
-  return { provider: "glovo", basketId, quote, submitted: false };
+  return { provider: "glovo", basketId, quote, pricing: normalizeGlovoQuote(quote), submitted: false };
 }
 
 export function glovoCheckoutUrl(offer) {
@@ -316,6 +326,38 @@ function findAmount(value, keys) {
     if (amount !== null) return amount;
   }
   return null;
+}
+
+function findLabeledAmount(value, pattern) {
+  if (!value || typeof value !== "object") return null;
+  const label = String(value.type ?? value.name ?? value.label ?? value.title ?? value.id ?? "");
+  if (pattern.test(label)) {
+    const amount = findAmount(value, ["amount", "price", "value", "total"]);
+    if (amount !== null) return amount;
+  }
+  for (const child of Object.values(value)) {
+    const amount = findLabeledAmount(child, pattern);
+    if (amount !== null) return amount;
+  }
+  return null;
+}
+
+export function normalizeGlovoQuote(quote) {
+  const total = findAmount(quote, ["payableAmount", "finalPrice", "totalAmount", "total"]);
+  return {
+    currency: quote?.currencyCode ?? quote?.currency ?? "EUR",
+    subtotal: findAmount(quote, ["subtotal", "productsPrice", "itemsPrice"]),
+    fees: {
+      delivery: findLabeledAmount(quote, /delivery|entrega|envio/i),
+      service: findLabeledAmount(quote, /service|servicio|gestion/i),
+      smallOrder: findLabeledAmount(quote, /small.?order|pedido.?minimo/i),
+      bag: findLabeledAmount(quote, /bag|bolsa/i),
+      other: null,
+    },
+    discount: findAmount(quote, ["discountAmount", "discount", "promotionDiscount"]) ?? 0,
+    total,
+    exact: total !== null,
+  };
 }
 
 function findSubmitAction(value) {

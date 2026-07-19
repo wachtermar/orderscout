@@ -432,8 +432,10 @@ function valueFrom(object, keys) {
 }
 
 export function buildCheckoutPatch(profile, address, options = {}) {
-  const firstName = valueFrom(profile, ["firstName", "FirstName", "givenName", "GivenName"]);
-  const lastName = valueFrom(profile, ["lastName", "LastName", "familyName", "FamilyName"]);
+  const fullName = String(valueFrom(profile, ["name", "Name", "fullName", "FullName"]) ?? "").trim();
+  const nameParts = fullName.split(/\s+/).filter(Boolean);
+  const firstName = valueFrom(profile, ["firstName", "FirstName", "givenName", "GivenName"]) ?? nameParts[0];
+  const lastName = valueFrom(profile, ["lastName", "LastName", "familyName", "FamilyName"]) ?? nameParts.slice(1).join(" ");
   const phoneNumber = valueFrom(profile, ["phoneNumber", "PhoneNumber", "phone", "Phone"]);
   const lines = address?.lines ?? [
     valueFrom(address, ["line1", "Line1"]),
@@ -444,14 +446,14 @@ export function buildCheckoutPatch(profile, address, options = {}) {
   const postalCode = valueFrom(address, ["postcode", "PostCode", "zipCode", "ZipCode"]);
   const latitude = Number(valueFrom(address, ["latitude", "Latitude"]));
   const longitude = Number(valueFrom(address, ["longitude", "Longitude"]));
-  const required = { firstName, lastName, phoneNumber, lines: lines?.length ? lines : null, locality, postalCode };
+  const required = { firstName, phoneNumber, lines: lines?.length ? lines : null, locality, postalCode };
   const missing = Object.entries(required).filter(([, value]) => !value).map(([key]) => key);
   if (missing.length) throw new CliError("Account details are incomplete for checkout", "CHECKOUT_DETAILS_REQUIRED", { missing });
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
     throw new CliError("Saved address has no checkout coordinates", "INVALID_LOCATION");
   }
   return [
-    { op: "add", path: "/customer", value: { firstName, lastName, phoneNumber } },
+    { op: "add", path: "/customer", value: { firstName, lastName: lastName ?? "", phoneNumber } },
     {
       op: "add",
       path: "/fulfilment/location",

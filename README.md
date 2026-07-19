@@ -56,9 +56,9 @@ Only providers enabled for your household are searched. For example, if you use 
 | Best | Rating confidence plus request-specific quality signals |
 | Value | A balance of total price, ETA, ratings, quantity, and preferences |
 
-Search-card prices are estimates. OrderScout only calls a provider the exact cheapest after comparing at least two current checkout quotes.
+Search-card prices are estimates. OrderScout only calls a provider the exact cheapest after comparing current checkout quotes from at least two providers. Checkout review records the normalized subtotal, every available fee, discounts, and exact total back into the comparison; exact totals over a hard budget are disqualified.
 
-Product matching is general. Quantity-aware helpers add extra understanding where useful—for example bottle sizes, multipacks, total litres, still versus sparkling, and price per litre for water. For meals, “healthy” and “tasty” are transparent ranking signals, not medical or nutritional claims.
+Product matching is general. Quantity-aware helpers add extra understanding where useful—for example bottle sizes, multipacks, total litres, still versus sparkling, and price per litre for water. Multi-person meal results contain explicit distinct dish lines, or one item explicitly sold for sharing; OrderScout does not multiply one ordinary dish by the party size. “Healthy” and “tasty” remain transparent ranking signals, not medical or nutritional claims.
 
 ## Will it accidentally order?
 
@@ -157,6 +157,8 @@ orderscout basket open <search-id> <offer-id>
 orderscout order place <search-id> <offer-id>
 ```
 
+`basket prepare` is a local payload preview. `basket create` creates the provider draft, preserving every distinct meal line. `basket checkout` uses the provider's current checkout contract and automatically records normalized exact pricing. Glovo refuses to append comparison items when that store already has a non-empty unrelated basket.
+
 The original Just Eat-specific commands remain available under `orderscout justeat ...` and the legacy `justeat` executable.
 
 ## Direct adapter coverage
@@ -168,7 +170,7 @@ The original Just Eat-specific commands remain available under `orderscout juste
 | Saved account/address context | Direct | Direct | Session-backed direct API |
 | Server-side basket | Direct | Direct | Direct |
 | Checkout quote | Direct | Direct validation | Direct |
-| Open same basket in official site | Yes | Yes | Yes |
+| Open basket in official site | Yes | Verify selected cart | Yes |
 | Guarded programmatic final submit | Yes | Experimental | Yes |
 
 Private state lives under `~/.config/orderscout-cli/` with owner-only permissions. Just Eat retains its existing state under `~/.config/justeat-es-cli/`. Never publish these directories. Raw provider responses may contain personal information.

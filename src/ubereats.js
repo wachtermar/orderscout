@@ -3,6 +3,11 @@ import { CliError } from "./lib.js";
 import { loadBrowserSession } from "./browser-session.js";
 
 const BASE = "https://www.ubereats.com";
+const CHECKOUT_PAYLOAD_TYPES = [
+  "subtotal", "paymentBarPayload", "total", "fareBreakdown", "upfrontTipping", "promotion",
+  "requestUtensilPayload", "promoAndMembershipSavingBannerPayloadCheckout", "deliveryOptInInfo",
+  "eta", "restrictedItems", "orderConfirmations", "paymentProfilesEligibility",
+];
 
 function apiHeaders(cookieHeader) {
   return {
@@ -39,6 +44,10 @@ async function request(operation, body = {}, { auth = false, fetchImpl = fetch, 
 
 function price(value) {
   if (typeof value === "object" && value) {
+    if (value.amountE5 !== undefined) {
+      const amountE5 = typeof value.amountE5 === "object" ? value.amountE5.low : value.amountE5;
+      return Number.isFinite(Number(amountE5)) ? Number(amountE5) / 100_000 : null;
+    }
     if (value.base?.low !== undefined && Number.isFinite(Number(value.exponent))) return Number(value.base.low) * 10 ** Number(value.exponent);
     return price(value.amount ?? value.value ?? value.price ?? value.purchasePriceV2);
   }
@@ -275,31 +284,55 @@ export async function uberEatsCarts(options = {}) {
 }
 
 export async function createUberEatsBasket(offer, options = {}) {
-  const source = offer.source ?? {};
-  if (!source.storeUuid || !source.itemUuid) throw new CliError("Uber Eats offer is missing cart identifiers", "SOURCE_PLAN_MISSING");
-  if (source.requiresCustomizations && !options.customizations) {
-    const details = await uberEatsItem(source, options);
-    throw new CliError("This item requires customization choices", "MODIFIERS_REQUIRED", { customizations: details.customizationsList ?? [] });
+  const lines = offer.lines?.length ? offer.lines : [{ item: offer.item, quantity: offer.quantity ?? 1, source: offer.source }];
+  const stores = new Set(lines.map((line) => line.source?.storeUuid).filter(Boolean));
+  if (stores.size !== 1 || lines.some((line) => !line.source?.itemUuid)) {
+    throw new CliError("Uber Eats basket lines must belong to one store and include item identifiers", "SOURCE_PLAN_MISSING");
   }
-  const item = {
-    uuid: source.itemUuid,
-    shoppingCartItemUuid: randomUUID(),
-    storeUuid: source.storeUuid,
-    sectionUuid: source.sectionUuid ?? "",
-    subsectionUuid: source.subsectionUuid ?? "",
-    price: source.rawPrice ?? Math.round(Number(offer.item?.unitPrice ?? 0) * 100),
-    title: offer.item?.name,
-    quantity: offer.quantity ?? 1,
-    customizations: options.customizations ?? {},
-  };
-  if (options.prepareOnly) return { mutated: false, payload: { isMulticart: true, shoppingCartItems: [item] }, submitted: false };
-  const payload = await request("createDraftOrderV2", { isMulticart: true, shoppingCartItems: [item] }, { ...options, auth: true });
+  const shoppingCartItems = [];
+  for (const [index, line] of lines.entries()) {
+    const source = line.source;
+    const customizations = options.customizations?.[source.itemUuid] ?? options.customizations?.[index]
+      ?? (lines.length === 1 ? options.customizations : null);
+    if (source.requiresCustomizations && !customizations) {
+      const details = await uberEatsItem(source, options);
+      throw new CliError(`"${line.item?.name}" requires customization choices`, "MODIFIERS_REQUIRED", {
+        itemId: source.itemUuid,
+        customizations: details.customizationsList ?? [],
+      });
+    }
+    shoppingCartItems.push({
+      uuid: source.itemUuid,
+      shoppingCartItemUuid: randomUUID(),
+      storeUuid: source.storeUuid,
+      sectionUuid: source.sectionUuid ?? "",
+      subsectionUuid: source.subsectionUuid ?? "",
+      price: source.rawPrice ?? Math.round(Number(line.item?.unitPrice ?? 0) * 100),
+      title: line.item?.name,
+      quantity: line.quantity ?? 1,
+      customizations: customizations ?? {},
+    });
+  }
+  const requestBody = { isMulticart: true, shoppingCartItems };
+  if (options.prepareOnly) return { mutated: false, payload: requestBody, submitted: false };
+  const payload = await request("createDraftOrderV2", requestBody, { ...options, auth: true });
   return { mutated: true, draftOrder: payload.draftOrder ?? payload, submitted: false };
 }
 
 export async function quoteUberEatsBasket(draftOrderUuid, options = {}) {
-  const quote = await request("getCheckoutPresentationV1", { draftOrderUUID: draftOrderUuid }, { ...options, auth: true });
-  return { provider: "ubereats", draftOrderUuid, quote, submitted: false };
+  const requestBody = {
+    payloadTypes: CHECKOUT_PAYLOAD_TYPES,
+    draftOrderUUID: draftOrderUuid,
+    isGroupOrder: false,
+    clientFeaturesData: {
+      paymentSelectionContext: {
+        value: JSON.stringify({ deviceContext: { thirdPartyApplications: ["google_pay", "venmo"] } }),
+      },
+    },
+    webGiftingPersonalizationEnabled: true,
+  };
+  const quote = await request("getCheckoutPresentationV1", requestBody, { ...options, auth: true });
+  return { provider: "ubereats", draftOrderUuid, quote, pricing: normalizeUberEatsQuote(quote), submitted: false };
 }
 
 function findNumber(value, keys) {
@@ -307,6 +340,57 @@ function findNumber(value, keys) {
   for (const key of keys) if (value[key] !== undefined) { const amount = price(value[key]); if (amount !== null) return amount; }
   for (const child of Object.values(value)) { const amount = findNumber(child, keys); if (amount !== null) return amount; }
   return null;
+}
+
+function findPayload(value, type) {
+  if (!value || typeof value !== "object") return null;
+  if (value[type] && typeof value[type] === "object") return value[type];
+  if (value.checkoutPayloads?.[type] && typeof value.checkoutPayloads[type] === "object") return value.checkoutPayloads[type];
+  const label = String(value.type ?? value.payloadType ?? value.name ?? "").toLowerCase();
+  if (label === type.toLowerCase()) return value.payload ?? value;
+  for (const child of Object.values(value)) {
+    const match = findPayload(child, type);
+    if (match) return match;
+  }
+  return null;
+}
+
+function findFareAmount(value, pattern) {
+  if (!value || typeof value !== "object") return null;
+  if (pattern.test(String(value.fareInfoID ?? ""))) {
+    const amount = price(value.currencyAmount ?? value.amount ?? value.value);
+    if (amount !== null) return amount;
+  }
+  for (const child of Object.values(value)) {
+    const amount = findFareAmount(child, pattern);
+    if (amount !== null) return amount;
+  }
+  return null;
+}
+
+export function normalizeUberEatsQuote(quote) {
+  const subtotalPayload = findPayload(quote, "subtotal");
+  const totalPayload = findPayload(quote, "total");
+  const farePayload = findPayload(quote, "fareBreakdown");
+  const subtotal = price(subtotalPayload?.subtotal?.value ?? subtotalPayload?.value)
+    ?? findNumber(subtotalPayload, ["subtotal", "amount", "price", "value"]);
+  const total = price(totalPayload?.total?.value ?? totalPayload?.value)
+    ?? findNumber(totalPayload, ["total", "amount", "price", "value"])
+    ?? findNumber(quote, ["totalAmount", "payableAmount"]);
+  const delivery = findFareAmount(farePayload, /delivery_fee/i)
+    ?? findNumber(farePayload, ["deliveryFee", "deliveryFeeAmount"]);
+  const service = findFareAmount(farePayload, /basket_dependent_fee|service_fee|marketplace_fee/i)
+    ?? findNumber(farePayload, ["serviceFee", "serviceFeeAmount"]);
+  const smallOrder = findFareAmount(farePayload, /small_order/i)
+    ?? findNumber(farePayload, ["smallOrderFee", "smallOrderFeeAmount"]);
+  return {
+    currency: quote?.currencyCode ?? quote?.currency ?? "EUR",
+    subtotal,
+    fees: { delivery, service, smallOrder, bag: null, other: null },
+    discount: findNumber(quote, ["discountAmount", "promotionAmount"]) ?? 0,
+    total,
+    exact: total !== null,
+  };
 }
 
 export function uberEatsOrderConfirmation(draftOrderUuid, quote) {
@@ -329,4 +413,4 @@ export async function placeUberEatsOrder(draftOrderUuid, quote, options = {}) {
   }
 }
 
-export const uberEatsInternals = { apiHeaders, collectCatalog, menuOffers, price, request };
+export const uberEatsInternals = { apiHeaders, checkoutPayloadTypes: CHECKOUT_PAYLOAD_TYPES, collectCatalog, menuOffers, price, request };
