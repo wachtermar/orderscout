@@ -155,10 +155,17 @@ function toolByName(name) { return ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name
 export async function executeOrderScoutMcpTool(name, input = {}) {
   const tool = toolByName(name);
   if (!tool) throw new Error(`Unknown OrderScout tool: ${name}`);
-  const { stdout, stderr } = await execFileAsync(process.execPath, [CLI_PATH, ...tool.command(input)], { encoding: "utf8", maxBuffer: 20 * 1024 * 1024 });
+  const env = placementEnvironment(name, input, process.env);
+  const { stdout, stderr } = await execFileAsync(process.execPath, [CLI_PATH, ...tool.command(input)], { encoding: "utf8", maxBuffer: 20 * 1024 * 1024, env });
   if (stderr?.trim()) process.stderr.write(stderr);
   const structured = stdout.trim() ? JSON.parse(stdout) : null;
   return { content: [{ type: "text", text: JSON.stringify(structured) }], structuredContent: structured, isError: false };
+}
+
+export function placementEnvironment(name, input = {}, base = {}) {
+  return name === "orderscout_place_order" && Boolean(input.confirm)
+    ? { ...base, ORDERSCOUT_ENABLE_ORDER_PLACEMENT: "1", JUSTEAT_ENABLE_ORDER_PLACEMENT: "1" }
+    : base;
 }
 
 export async function handleOrderScoutMcpMessage(message) {

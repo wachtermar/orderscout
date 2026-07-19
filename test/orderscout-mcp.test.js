@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ORDERSCOUT_MCP_TOOLS, handleOrderScoutMcpMessage } from "../src/orderscout-mcp.js";
+import { ORDERSCOUT_MCP_TOOLS, handleOrderScoutMcpMessage, placementEnvironment } from "../src/orderscout-mcp.js";
 
 test("OrderScout MCP exposes direct login, basket, checkout, and guarded order tools", () => {
   const names = new Set(ORDERSCOUT_MCP_TOOLS.map((tool) => tool.name));
@@ -12,6 +12,17 @@ test("OrderScout MCP exposes direct login, basket, checkout, and guarded order t
   const search = ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_search_begin");
   assert.match(search.description, /directly/i);
   assert.doesNotMatch(search.description, /Browser tasks/i);
+});
+
+test("only a fingerprint-confirmed purchase tool receives process-scoped placement gates", () => {
+  const base = { PATH: "/test" };
+  assert.equal(placementEnvironment("orderscout_place_order", {}, base), base);
+  assert.equal(placementEnvironment("orderscout_search_begin", { confirm: "x" }, base), base);
+  assert.deepEqual(placementEnvironment("orderscout_place_order", { confirm: "fingerprint" }, base), {
+    PATH: "/test",
+    ORDERSCOUT_ENABLE_ORDER_PLACEMENT: "1",
+    JUSTEAT_ENABLE_ORDER_PLACEMENT: "1",
+  });
 });
 
 test("OrderScout MCP tool list does not expose implementation commands", async () => {

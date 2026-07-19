@@ -28,6 +28,6 @@ The imported sessions are used by direct Node HTTP adapters. Playwright is not a
 
 ## Safety contract
 
-Discovery and quotes are reads. Local search state and remote baskets are explicit writes. `orderscout_place_order` is destructive, preview-first, requires a current fingerprint, and remains disabled unless `ORDERSCOUT_ENABLE_ORDER_PLACEMENT=1`. Never enable placement in a shared or unattended process.
+Discovery and quotes are reads. Local search state and remote baskets are explicit writes. `orderscout_place_order` is destructive, preview-first, and requires a current fingerprint. The confirmed MCP call enables the provider placement gates only for its one child process, so a Work user does not need a terminal. Standalone CLI placement still requires the documented environment gate. Never enable placement persistently in a shared or unattended process.
 
 The current stdio plugin is for desktop Work/Codex. A separate hosted MCP deployment with per-user authentication is required for ChatGPT web or mobile use.

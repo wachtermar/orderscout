@@ -67,7 +67,7 @@ Searching, opening a menu, creating a basket, reading checkout, and opening the 
 Programmatic placement has two locks:
 
 1. A dry run returns the current exact order and a short confirmation fingerprint.
-2. The same process must separately enable final placement with `ORDERSCOUT_ENABLE_ORDER_PLACEMENT=1`.
+2. The destructive ChatGPT tool enables placement only inside its fingerprint-confirmed second call. Standalone CLI users must separately set `ORDERSCOUT_ENABLE_ORDER_PLACEMENT=1` (`JUSTEAT_ENABLE_ORDER_PLACEMENT=1` for the retained Just Eat adapter).
 
 The fingerprint changes when the provider, basket, total, or payment request changes. An agent must ask for approval of the exact current order immediately before the second call. Ambiguous submit results are never retried automatically.
 

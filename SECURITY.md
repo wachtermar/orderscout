@@ -8,7 +8,7 @@ Do not open a public issue for credential exposure, authentication bypasses, or 
 
 OrderScout account configuration, provider sessions, and searches are stored under `~/.config/orderscout-cli/` with owner-only permissions (`0600`). Just Eat OAuth state remains under `~/.config/justeat-es-cli/`. Glovo and Uber Eats login imports only cookies valid for the selected provider domain from a native Chrome profile after explicit user action. OrderScout never asks for cookie values in chat and does not store payment credentials.
 
-Uber Eats and experimental Glovo order submission are disabled unless the caller supplies both `ORDERSCOUT_ENABLE_ORDER_PLACEMENT=1` and the fingerprint for the current validated request. Just Eat retains its `JUSTEAT_ENABLE_ORDER_PLACEMENT=1` gate and the same fingerprint rule. Never put either gate in a persistent profile or unattended agent. A fresh quote and explicit human approval are required for every order.
+Standalone Uber Eats and experimental Glovo order submission are disabled unless the caller supplies both `ORDERSCOUT_ENABLE_ORDER_PLACEMENT=1` and the fingerprint for the current validated request. Standalone Just Eat retains its `JUSTEAT_ENABLE_ORDER_PLACEMENT=1` gate and the same fingerprint rule. In ChatGPT Work, only the destructive `orderscout_place_order` tool with a non-empty confirmation fingerprint receives both gates, scoped to that single child process. A fresh quote and explicit human approval are required for every order.
 
 Before attaching logs to an issue, remove tokens, authorization codes, email addresses, phone numbers, physical addresses, coordinates, basket/order IDs, confirmation fingerprints, payment methods, and upstream responses containing personal data.
 
