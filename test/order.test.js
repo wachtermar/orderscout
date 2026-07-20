@@ -14,6 +14,7 @@ import {
   normalizeCheckout,
   optimizeWaterBasket,
   selectFulfilmentWindow,
+  verifyJustEatCheckoutLines,
 } from "../src/order.js";
 
 process.env.JUSTEAT_CONFIG_DIR = await mkdtemp(join(tmpdir(), "justeat-order-test-"));
@@ -62,6 +63,22 @@ test("required modifiers must be selected before basket creation", () => {
   }]);
 });
 
+test("single-choice Just Eat modifiers accept a scalar choice ID", () => {
+  const configured = plan();
+  configured.recommendation.candidates[0].modifierGroups = [{
+    id: "protein",
+    name: "Choose protein",
+    minChoices: 1,
+    maxChoices: 1,
+    choices: [{ id: "chicken", setId: "1", name: "Chicken", price: 0, defaultChoices: 0 }],
+  }];
+  const payload = buildBasketPayload(configured, 0, { modifiers: { protein: "chicken" } });
+  assert.deepEqual(payload.products[0].modifierGroups, [{
+    modifierGroupId: "protein",
+    modifiers: [{ modifierId: "chicken", quantity: 1 }],
+  }]);
+});
+
 test("createBasket can be verified with an injected API without placing an order", async () => {
   let requestBody;
   const fetchImpl = async (_url, options) => {
@@ -70,7 +87,38 @@ test("createBasket can be verified with an injected API without placing an order
   };
   const result = await createBasket(plan(), 0, { fetchImpl });
   assert.equal(result.plan.remote.basketId, "basket-123");
+  assert.deepEqual(result.plan.remote.expectedLines, [{ name: "Water", quantity: 4 }]);
   assert.equal(requestBody.products[0].quantity, 4);
+});
+
+test("multi-line baskets anchor merchant validation to the first selected line", async () => {
+  const configured = plan();
+  configured.recommendation.candidates.unshift({
+    restaurant: { slug: "unrelated-store", name: "Unrelated Store" },
+    menuGroupId: "unrelated-menu",
+    item: { variationId: "other", name: "Other" },
+    modifierGroups: [],
+  });
+  configured.recommendation.candidates.push({
+    restaurant: { slug: "test-store", name: "Test Store" },
+    menuGroupId: "menu-group",
+    item: { variationId: "juice", name: "Juice" },
+    modifierGroups: [],
+  });
+  let requestBody;
+  const result = await createBasket(configured, 0, {
+    lines: [{ candidateIndex: 1, quantity: 2 }, { candidateIndex: 2, quantity: 1 }],
+    fetchImpl: async (_url, options) => {
+      requestBody = JSON.parse(options.body);
+      return Response.json({ basketId: "basket-multi" });
+    },
+  });
+  assert.equal(requestBody.restaurantSeoName, "test-store");
+  assert.deepEqual(requestBody.products.map(({ productId, quantity }) => ({ productId, quantity })), [
+    { productId: "water-variation", quantity: 2 },
+    { productId: "juice", quantity: 1 },
+  ]);
+  assert.equal(result.plan.remote.candidateIndex, 1);
 });
 
 test("browser handoff converts a basket to an official restorable group basket", async () => {
@@ -134,10 +182,28 @@ test("payment placement is preview-first and fingerprint protected", async () =>
   }
 });
 
+test("Just Eat payment preview is blocked when the quoted checkout lost a selected line", () => {
+  const quoted = plan({
+    remote: {
+      basketId: "basket-123",
+      expectedLines: [{ name: "Dinner A", quantity: 1 }, { name: "Dinner B", quantity: 1 }],
+      lastQuote: {
+        purchase: {
+          groups: [{ products: [{ name: "Dinner A", quantity: 1 }] }],
+          total: { price: { amount: 2000 } },
+        },
+        payment: { methods: [{ type: "card", id: "masked" }] },
+      },
+    },
+  });
+  assert.throws(() => buildPaymentRequest(quoted), { code: "REMOTE_BASKET_MISMATCH" });
+});
+
 test("normalizeCheckout exposes delivered total, fees, and minimum-order constraints", () => {
   const result = normalizeCheckout({
     currency: "EUR",
     purchase: {
+      groups: [{ products: [{ name: "Mineral Water", quantity: 2 }] }],
       lineItems: [
         { type: "subtotal", price: { amount: 445 } },
         { type: "fee", tags: ["deliveryFee"], price: { amount: 399 } },
@@ -152,6 +218,29 @@ test("normalizeCheckout exposes delivered total, fees, and minimum-order constra
   assert.equal(result.deliveryFeeCents, 399);
   assert.equal(result.serviceFeeCents, 75);
   assert.equal(result.additionalSpendRequiredCents, 555);
+  assert.deepEqual(result.items, [{ name: "Mineral Water", quantity: 2 }]);
+});
+
+test("Just Eat checkout verification rejects missing products before an exact quote can be trusted", () => {
+  const checkout = {
+    purchase: { groups: [{ products: [
+      { name: "Pad Thai Original", quantity: 1 },
+      { name: "Water", quantity: 2 },
+    ] }] },
+  };
+  assert.deepEqual(verifyJustEatCheckoutLines(checkout, [
+    { item: { name: "Pad Thai Original" }, quantity: 1 },
+    { item: { name: "Water" }, quantity: 2 },
+  ]), {
+    verified: true,
+    lines: [{ name: "pad thai original", quantity: 1 }, { name: "water", quantity: 2 }],
+    itemCount: 3,
+  });
+  assert.throws(() => verifyJustEatCheckoutLines(checkout, [
+    { item: { name: "Pad Thai Original" }, quantity: 1 },
+    { item: { name: "Pad Thai Calle" }, quantity: 1 },
+    { item: { name: "Water" }, quantity: 2 },
+  ]), { code: "REMOTE_BASKET_MISMATCH" });
 });
 
 test("normalizeCheckout exposes Just Eat promotion savings", () => {
@@ -182,6 +271,13 @@ test("buildCheckoutPatch maps account details to the checkout JSON Patch schema"
   assert.deepEqual(patch.find((entry) => entry.path === "/fulfilment/time").value, {
     asap: true, scheduled: null,
   });
+});
+
+test("buildCheckoutPatch rejects a saved address whose coordinates are missing", () => {
+  assert.throws(() => buildCheckoutPatch(
+    { FirstName: "Ada", PhoneNumber: "+34123456789" },
+    { lines: ["Test street"], city: "Marbella", postcode: "29603", latitude: null, longitude: null },
+  ), { code: "INVALID_LOCATION" });
 });
 
 test("buildCheckoutPatch accepts Just Eat's current full-name account field", () => {

@@ -23,11 +23,12 @@ import {
   uberEatsCarts, uberEatsDraftDeliveryLocation, uberEatsMe, uberEatsMenu,
 } from "./ubereats.js";
 import { parseIntent, productIntentSpec, providerSearchQueries } from "./recommend.js";
-import { planProviderRetrieval } from "./retrieval-plan.js";
+import { expandProviderDiscoveryQueries, planProviderRetrieval } from "./retrieval-plan.js";
 
 const execFileAsync = promisify(execFile);
 const JUSTEAT_CLI = fileURLToPath(new URL("./cli.js", import.meta.url));
 const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+const MAX_GLOVO_DISCOVERED_STORES = 120;
 
 const HELP = `orderscout — compare Just Eat, Glovo, and Uber Eats in Spain
 
@@ -145,15 +146,35 @@ async function runLegacyJustEat(args, { allowFailure = false } = {}) {
     });
     return result.stdout.trim() ? JSON.parse(result.stdout) : null;
   } catch (error) {
-    if (allowFailure) return { error: parseChildError(error) };
-    if (error.stderr) process.stderr.write(error.stderr);
-    throw new CliError("Just Eat adapter failed", "JUSTEAT_ADAPTER_FAILED", { message: error.message });
+    const parsed = parseChildError(error);
+    if (allowFailure) return { error: parsed };
+    throw new CliError(parsed.message ?? "Just Eat adapter failed", parsed.code ?? "JUSTEAT_ADAPTER_FAILED", parsed.details);
   }
 }
 
 function parseChildError(error) {
   try { return JSON.parse(String(error.stderr).trim()).error ?? { message: error.message }; }
   catch { return { code: "JUSTEAT_ADAPTER_FAILED", message: error.message }; }
+}
+
+export function justEatLineModifierSelections(offer, customizations) {
+  if (!customizations || typeof customizations !== "object" || Array.isArray(customizations)) return null;
+  const lines = offer.lines?.length
+    ? offer.lines
+    : [{ item: offer.item, source: offer.source }];
+  const result = {};
+  for (const [index, line] of lines.entries()) {
+    const candidateIndex = line.source?.candidateIndex;
+    if (!Number.isInteger(candidateIndex)) continue;
+    const keyed = customizations[String(candidateIndex)]
+      ?? customizations[line.item?.id]
+      ?? customizations[String(index)];
+    const selections = keyed ?? (lines.length === 1 ? customizations : null);
+    if (selections && typeof selections === "object" && !Array.isArray(selections)) {
+      result[candidateIndex] = selections;
+    }
+  }
+  return Object.keys(result).length ? result : null;
 }
 
 function justEatOffers(result) {
@@ -296,6 +317,8 @@ async function createBasketForOffer(search, offer, options = {}) {
       quantity: line.quantity ?? 1,
     }))));
   } else args.push("--quantity", String(offer.quantity ?? 1));
+  const lineModifiers = justEatLineModifierSelections(offer, options.customizations);
+  if (lineModifiers) args.push("--line-modifiers", JSON.stringify(lineModifiers));
   args.push("--create");
   const result = await runLegacyJustEat(args);
   const id = result?.basketId;
@@ -358,6 +381,9 @@ async function quoteBasketForOffer(search, offer, basket) {
     const quoted = await quoteUberEatsBasket(basket.id, {
       scheduledAt: search.fulfilment?.requestedAt,
       timeZone: search.fulfilment?.timeZone,
+      expectedLines: offer.lines?.length
+        ? offer.lines
+        : [{ item: offer.item, quantity: offer.quantity ?? 1, source: offer.source }],
     });
     const fulfilment = checkoutFulfilment(quoted, { ...offer, basket });
     return { quoted: { ...quoted, fulfilment }, ...quoteReview("ubereats", quoted, quoted.pricing), fulfilment };
@@ -368,7 +394,11 @@ async function quoteBasketForOffer(search, offer, basket) {
       expectedBasketId: String(basket.id), returnedBasketId: String(response.basketId),
     });
   }
-  const quoted = { provider: "justeat", offerId: offer.id, quote: response, fulfilment: basket.fulfilment ?? offer.fulfilment, submitted: false };
+  const quoted = {
+    provider: "justeat", offerId: offer.id, quote: response,
+    remoteBasketVerification: response.remoteBasketVerification ?? null,
+    fulfilment: basket.fulfilment ?? offer.fulfilment, submitted: false,
+  };
   const pricing = justEatPricing(quoted);
   return { quoted, ...quoteReview("justeat", quoted, pricing), fulfilment: quoted.fulfilment };
 }
@@ -463,6 +493,14 @@ export function providerDiverseOffers(offers, limit) {
   return [...selected.values()].sort((left, right) => positions.get(left.id) - positions.get(right.id));
 }
 
+export function completedSearchResponse(started, finalResults) {
+  return {
+    ...started,
+    search: finalResults.search,
+    results: finalResults,
+  };
+}
+
 function compactSearchResult(result, flags) {
   const limit = Number(flags.top ?? (flags.agent ? 20 : 0));
   if (!Number.isInteger(limit) || limit <= 0 || !result?.comparison?.offers) return result;
@@ -520,17 +558,22 @@ async function collectGlovo(intent, flags) {
   }
   const parsed = parseIntent(intent);
   const fallbackQueries = providerSearchQueries(parsed);
-  const discoveryQueries = flags.retrievalPlan?.discovery?.queries?.length
+  const plannedDiscoveryQueries = flags.retrievalPlan?.discovery?.queries?.length
     ? flags.retrievalPlan.discovery.queries : mergedQueries(flags.discoveryQueries, fallbackQueries, 24);
+  const discoveryQueries = expandProviderDiscoveryQueries("glovo", plannedDiscoveryQueries, 24);
   const catalogQueries = flags.retrievalPlan?.catalog?.queries?.length
     ? flags.retrievalPlan.catalog.queries : mergedQueries(flags.catalogQueries, fallbackQueries, 24);
-  const results = await settleConcurrent(discoveryQueries, 3, (query) => searchGlovo(query, location, { limit: flags.limit, storeLimit: 60 }));
+  const results = await settleConcurrent(discoveryQueries, 3, (query) => searchGlovo(query, location, {
+    limit: flags.limit,
+    storeLimit: MAX_GLOVO_DISCOVERED_STORES,
+  }));
   const fulfilled = results.filter((result) => result.status === "fulfilled");
   if (!fulfilled.length) throw results[0].reason;
   const discoveryFailures = results.filter((result) => result.status === "rejected");
   const allStores = [...new Map(fulfilled.flatMap((result) => result.value.stores ?? [])
     .map((store) => [`${store.id}:${store.addressId}`, store])).values()];
-  const maxStores = Math.max(1, Math.min(60, Number(flags.stores ?? 60)));
+  const maxStores = Math.max(1, Math.min(MAX_GLOVO_DISCOVERED_STORES,
+    Number(flags.stores ?? MAX_GLOVO_DISCOVERED_STORES)));
   const stores = allStores.slice(0, maxStores);
   const requireEligibility = [parsed, ...(flags.shoppingItems ?? []).map((item) => parseIntent(item.intent))]
     .some((itemIntent) => productIntentSpec(itemIntent).concept?.id === "vape");
@@ -714,12 +757,20 @@ async function collectAllProviders(searchId, providers, intent, flags) {
       const providerMeta = Array.isArray(value) ? null : value.providerMeta;
       const wasRateLimited = Object.entries(providerMeta ?? {})
         .some(([key, entry]) => /rateLimited/i.test(key) && Number(entry) > 0);
-      if (wasRateLimited) await recordProviderRateLimit(provider);
-      else await clearProviderCooldown(provider);
+      if (wasRateLimited) {
+        const cooldown = await recordProviderRateLimit(provider);
+        if (providerMeta) providerMeta.cooldown = { retryAt: cooldown.retryAt, attempt: cooldown.attempt };
+      } else await clearProviderCooldown(provider);
       return value;
     } catch (error) {
       if (error.code === "RATE_LIMITED" && error.details?.source !== "local-cooldown") {
-        await recordProviderRateLimit(provider, { retryAfter: error.details?.retryAfter });
+        const cooldown = await recordProviderRateLimit(provider, { retryAfter: error.details?.retryAfter });
+        error.details = {
+          ...(error.details ?? {}),
+          provider,
+          retryAt: cooldown.retryAt,
+          attempt: cooldown.attempt,
+        };
       }
       if (provider === "justeat" || !["AUTH_EXPIRED", "AUTH_REQUIRED"].includes(error.code)) throw error;
       await refreshChromeProviderSession(provider);
@@ -958,7 +1009,8 @@ export async function runOrderScout(argv) {
         await collectAllProviders(started.search.id, started.apiProviders, intent, {
           ...flags, discoveryQueries, catalogQueries, shoppingItems, semanticMode, retrievalPlan,
         });
-        result = { ...started, results: compactSearchResult(await searchResults(started.search.id), flags) };
+        const finalResults = compactSearchResult(await searchResults(started.search.id), flags);
+        result = completedSearchResponse(started, finalResults);
       }
       return writeOutput(result, flags);
     }
@@ -1085,6 +1137,8 @@ export async function runOrderScout(argv) {
     } else {
       args.push("--quantity", String(offer.quantity ?? 1));
     }
+    const lineModifiers = justEatLineModifierSelections(offer, jsonFlag(flags, "customizations"));
+    if (lineModifiers) args.push("--line-modifiers", JSON.stringify(lineModifiers));
     if (action === "create") args.push("--create");
     const result = await runLegacyJustEat(args);
     let configuration = null;
@@ -1119,6 +1173,9 @@ export async function runOrderScout(argv) {
       if (!id) throw new CliError("Create this Uber Eats basket first", "BASKET_REQUIRED");
       const quoted = await quoteUberEatsBasket(id, {
         scheduledAt: search.fulfilment?.requestedAt, timeZone: search.fulfilment?.timeZone,
+        expectedLines: offer.lines?.length
+          ? offer.lines
+          : [{ item: offer.item, quantity: offer.quantity ?? 1, source: offer.source }],
       });
       if (!quoted.pricing.exact) throw new CliError("The scheduled Uber Eats checkout must be configured and requoted in the official checkout before placement", "SCHEDULED_CHECKOUT_REQUIRED");
       return writeOutput(await placeUberEatsOrder(id, quoted.quote, { confirm: flags.confirm }), flags);
@@ -1133,6 +1190,9 @@ export async function runOrderScout(argv) {
       if (!basketId) throw new CliError("Create this Glovo basket first", "BASKET_REQUIRED");
       const quoted = await quoteGlovoBasket(basketId, {
         scheduledAt: search.fulfilment?.requestedAt, timeZone: search.fulfilment?.timeZone,
+        expectedLines: offer.lines?.length
+          ? offer.lines
+          : [{ item: offer.item, quantity: offer.quantity ?? 1, source: offer.source }],
       });
       return writeOutput(await placeGlovoOrder(offer, { basketId, ...quoted.quote }, { confirm: flags.confirm }), flags);
     }

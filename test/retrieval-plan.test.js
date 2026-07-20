@@ -1,7 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { planProviderRetrieval, planRoundRobinQueries } from "../src/retrieval-plan.js";
+import { expandProviderDiscoveryQueries, planProviderRetrieval, planRoundRobinQueries } from "../src/retrieval-plan.js";
+
+test("Glovo discovery adds provider-index language aliases without changing catalog semantics", () => {
+  assert.deepEqual(
+    expandProviderDiscoveryQueries("glovo", ["farmacia", "parafarmacia"]),
+    ["farmacia", "parafarmacia", "pharmacy"],
+  );
+  assert.deepEqual(expandProviderDiscoveryQueries("glovo", ["thai", "healthy"]), [
+    "thai", "healthy", "tailandes", "tailandesa", "saludable",
+  ]);
+  assert.deepEqual(expandProviderDiscoveryQueries("ubereats", ["farmacia"]), ["farmacia"]);
+});
+
+test("provider discovery alias expansion remains bounded and deduplicated", () => {
+  assert.deepEqual(expandProviderDiscoveryQueries("glovo", ["Farmácia", "pharmacy", "shop"], 4), [
+    "Farmácia", "pharmacy", "shop", "parafarmacia",
+  ]);
+});
 
 test("round-robin planning gives each of 1-12 shopping lines a first query", () => {
   for (let size = 1; size <= 12; size += 1) {

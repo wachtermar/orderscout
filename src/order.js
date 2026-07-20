@@ -73,7 +73,10 @@ function normalizeModifierSelections(value) {
 function selectedModifierGroups(candidate, selectionValue) {
   const selections = normalizeModifierSelections(selectionValue);
   return (candidate.modifierGroups ?? []).map((group) => {
-    const requested = Array.isArray(selections[group.id]) ? selections[group.id] : [];
+    const value = selections[group.id];
+    const requested = value === undefined || value === null
+      ? []
+      : Array.isArray(value) ? value : [value];
     const defaults = group.choices.filter((choice) => choice.defaultChoices > 0).map((choice) => choice.id);
     const selectedIds = requested.length ? requested : defaults;
     if (selectedIds.length < group.minChoices || selectedIds.length > group.maxChoices) {
@@ -96,13 +99,14 @@ export function buildBasketPayload(plan, candidateIndex = 0, options = {}) {
   if (plan.recommendation.intent?.allergyMentioned && !options.allergenReviewed) {
     throw new CliError("This request mentions an allergy; verify with the restaurant, then pass --allergen-reviewed", "ALLERGEN_REVIEW_REQUIRED");
   }
-  const candidate = plan.recommendation.candidates?.[candidateIndex];
-  if (!candidate) throw new CliError(`Candidate ${candidateIndex} does not exist`, "CANDIDATE_NOT_FOUND");
+  const lines = options.lines ?? [{ candidateIndex, quantity: options.quantity ?? plan.recommendation.candidates?.[candidateIndex]?.quantity ?? 1 }];
+  const anchorIndex = options.lines?.length ? options.lines[0].candidateIndex : candidateIndex;
+  const candidate = plan.recommendation.candidates?.[anchorIndex];
+  if (!candidate) throw new CliError(`Candidate ${anchorIndex} does not exist`, "CANDIDATE_NOT_FOUND");
   const location = plan.recommendation.location;
   if (!Number.isFinite(Number(location.latitude)) || !Number.isFinite(Number(location.longitude))) {
     throw new CliError("The order plan has no usable delivery coordinates", "INVALID_LOCATION");
   }
-  const lines = options.lines ?? [{ candidateIndex, quantity: options.quantity ?? candidate.quantity ?? 1 }];
   const restaurantSlug = candidate.restaurant.slug;
   const products = lines.map((line) => {
     const lineCandidate = plan.recommendation.candidates?.[line.candidateIndex];
@@ -167,11 +171,18 @@ export async function createBasket(plan, candidateIndex, options = {}) {
   }, options.fetchImpl);
   const basketId = basketIdFrom(response);
   if (!basketId) throw new CliError("Just Eat created a basket without returning its ID", "BASKET_PROTOCOL_ERROR");
+  const expectedLines = (options.lines ?? [{ candidateIndex, quantity: options.quantity ?? plan.recommendation.candidates?.[candidateIndex]?.quantity ?? 1 }])
+    .map((line) => ({
+      name: plan.recommendation.candidates?.[line.candidateIndex]?.item?.name,
+      quantity: Number(line.quantity ?? 1),
+    }));
+  const anchorIndex = options.lines?.length ? options.lines[0].candidateIndex : candidateIndex;
   const updated = {
     ...plan,
     remote: {
       basketId,
-      candidateIndex,
+      candidateIndex: anchorIndex,
+      expectedLines,
       createdAt: new Date().toISOString(),
       lastQuote: null,
     },
@@ -302,12 +313,15 @@ export async function getCheckout(plan, options = {}) {
   const quote = await requestJson(`${API_BASE}/checkout/es/${encodeURIComponent(basketId)}`, {
     headers: apiHeaders(options.token),
   }, options.fetchImpl);
+  const remoteBasketVerification = plan.remote?.expectedLines?.length
+    ? verifyJustEatCheckoutLines(quote, plan.remote.expectedLines)
+    : null;
   const updated = {
     ...plan,
     remote: { ...plan.remote, lastQuote: quote, quotedAt: new Date().toISOString() },
   };
   await writePlan(updated);
-  return { plan: updated, quote };
+  return { plan: updated, quote, remoteBasketVerification };
 }
 
 function cents(value) {
@@ -324,6 +338,10 @@ export function normalizeCheckout(quote) {
   const subtotalCents = cents(lineItems.find((item) => item.type === "subtotal")?.price?.amount);
   const totalCents = cents(quote?.purchase?.total?.price?.amount ?? quote?.total);
   const minimumIssue = quote?.issues?.find((issue) => issue.code === "MINIMUM_ORDER_VALUE_NOT_MET");
+  const items = (quote?.purchase?.groups ?? []).flatMap((group) => group?.products ?? []).map((product) => ({
+    name: product?.name ?? "Item",
+    quantity: Number(product?.quantity ?? 1),
+  })).filter((item) => item.name && Number.isFinite(item.quantity) && item.quantity > 0);
   return {
     currency: quote?.currency ?? "EUR",
     subtotalCents,
@@ -344,7 +362,38 @@ export function normalizeCheckout(quote) {
     additionalSpendRequiredCents: cents(minimumIssue?.additionalSpendRequired),
     issues: (quote?.issues ?? []).map((issue) => ({ code: issue.code, ...issue })),
     paymentMethods: quote?.payment?.methods ?? [],
+    items,
   };
+}
+
+function normalizedCheckoutLineName(value) {
+  return String(value ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function checkoutLineQuantities(lines) {
+  const quantities = new Map();
+  for (const line of lines ?? []) {
+    const name = normalizedCheckoutLineName(line.item?.name ?? line.name);
+    const quantity = Number(line.quantity ?? 1);
+    if (!name || !Number.isFinite(quantity) || quantity <= 0) continue;
+    quantities.set(name, (quantities.get(name) ?? 0) + quantity);
+  }
+  return [...quantities.entries()].sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, quantity]) => ({ name, quantity }));
+}
+
+export function verifyJustEatCheckoutLines(checkout, expectedLines) {
+  const normalized = checkout?.purchase ? normalizeCheckout(checkout) : checkout;
+  const expected = checkoutLineQuantities(expectedLines);
+  const actual = checkoutLineQuantities(normalized?.items ?? []);
+  if (!expected.length || JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new CliError("Just Eat checkout does not match the selected items and quantities", "REMOTE_BASKET_MISMATCH", {
+      expected,
+      actual,
+    });
+  }
+  return { verified: true, lines: actual, itemCount: actual.reduce((sum, line) => sum + line.quantity, 0) };
 }
 
 export async function compareCandidates(plan, options = {}) {
@@ -482,8 +531,10 @@ export function buildCheckoutPatch(profile, address, options = {}) {
   ].filter(Boolean);
   const locality = valueFrom(address, ["city", "City", "locality", "Locality"]);
   const postalCode = valueFrom(address, ["postcode", "PostCode", "zipCode", "ZipCode"]);
-  const latitude = Number(valueFrom(address, ["latitude", "Latitude"]));
-  const longitude = Number(valueFrom(address, ["longitude", "Longitude"]));
+  const latitudeValue = valueFrom(address, ["latitude", "Latitude"]);
+  const longitudeValue = valueFrom(address, ["longitude", "Longitude"]);
+  const latitude = latitudeValue === null || latitudeValue === "" ? NaN : Number(latitudeValue);
+  const longitude = longitudeValue === null || longitudeValue === "" ? NaN : Number(longitudeValue);
   const required = { firstName, phoneNumber, lines: lines?.length ? lines : null, locality, postalCode };
   const missing = Object.entries(required).filter(([, value]) => !value).map(([key]) => key);
   if (missing.length) throw new CliError("Account details are incomplete for checkout", "CHECKOUT_DETAILS_REQUIRED", { missing });
@@ -535,6 +586,7 @@ function parseMethods(value) {
 export function buildPaymentRequest(plan, options = {}) {
   const quote = plan.remote?.lastQuote;
   if (!quote) throw new CliError("Run `justeat order quote <plan-id>` immediately before placement", "QUOTE_REQUIRED");
+  if (plan.remote?.expectedLines?.length) verifyJustEatCheckoutLines(quote, plan.remote.expectedLines);
   const checkoutId = findValue(quote, ["id", "checkoutId", "data.id", "data.checkoutId"])
     ?? plan.remote?.basketId;
   const total = Number(findValue(quote, [

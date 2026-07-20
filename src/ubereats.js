@@ -46,9 +46,94 @@ async function request(operation, body = {}, { auth = false, fetchImpl = fetch, 
   }
   if (payload?.status === "failure" || payload?.code === 3) {
     const message = payload?.data?.message || payload?.message || "Uber Eats rejected the session";
-    throw new CliError(message, /session|status code error|unauth/i.test(message) || payload?.code === 3 ? "AUTH_EXPIRED" : "UBEREATS_API_ERROR", { operation });
+    const upstreamCode = Number(payload?.data?.code ?? payload?.code);
+    const authExpired = upstreamCode === 401 || upstreamCode === 403
+      || /session (?:has )?expired|unauth(?:enticated|orized)|not logged in|login required/i.test(message)
+      || (operation === "getUserV1" && payload?.code === 3);
+    throw new CliError(message, authExpired ? "AUTH_EXPIRED" : "UBEREATS_API_ERROR", {
+      operation,
+      upstreamCode: Number.isFinite(upstreamCode) ? upstreamCode : null,
+    });
   }
   return payload?.data ?? payload;
+}
+
+function cookieValue(header, name) {
+  const prefix = `${name}=`;
+  return String(header ?? "").split(/;\s*/).find((entry) => entry.startsWith(prefix))?.slice(prefix.length) ?? null;
+}
+
+export function uberEatsDeliveryAddressFromCookies(cookieHeader) {
+  const encoded = cookieValue(cookieHeader, "uev2.loc");
+  if (!encoded) return null;
+  try {
+    const location = JSON.parse(decodeURIComponent(encoded));
+    const latitude = finiteCoordinate(location?.latitude);
+    const longitude = finiteCoordinate(location?.longitude);
+    return latitude === null || longitude === null ? null : { ...location, latitude, longitude };
+  } catch { return null; }
+}
+
+function localScheduleParts(value, timeZone = "Europe/Madrid", windowMinutes = 30) {
+  const requested = new Date(value);
+  if (Number.isNaN(requested.getTime())) throw new CliError("Scheduled delivery requires a valid ISO date and time", "INVALID_SCHEDULE");
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(requested).filter((part) => part.type !== "literal").map((part) => [part.type, Number(part.value)]));
+  const startTime = parts.hour * 60 + parts.minute;
+  return {
+    scheduled: true,
+    date: `${String(parts.year).padStart(4, "0")}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`,
+    startTime,
+    startTimeMs: requested.getTime(),
+    endTime: startTime + Math.max(15, Number(windowMinutes) || 30),
+    deliveryType: "ASAP",
+  };
+}
+
+export async function updateUberEatsDraftSchedule(draftOrderUuid, scheduledAt, options = {}) {
+  const session = options.cookieHeader
+    ? { cookieHeader: options.cookieHeader }
+    : await loadBrowserSession("ubereats");
+  const deliveryAddress = options.deliveryAddress ?? uberEatsDeliveryAddressFromCookies(session?.cookieHeader);
+  if (!deliveryAddress) {
+    throw new CliError("Select a delivery address in Uber Eats before scheduling an order", "LOCATION_REQUIRED");
+  }
+  const targetDeliveryTimeRange = localScheduleParts(
+    scheduledAt,
+    options.timeZone,
+    options.windowMinutes,
+  );
+  const payload = await request("updateDraftOrderV2", {
+    promotionOptions: {
+      autoApplyPromotionUUIDs: [],
+      selectedPromotionInstanceUUIDs: [],
+      skipApplyingPromotion: false,
+    },
+    useCredits: true,
+    deliveryType: "ASAP",
+    extraPaymentProfiles: [],
+    interactionType: "door_to_door",
+    businessDetails: {
+      profileUUID: null,
+      profileType: "Personal",
+      policyUUID: null,
+      policyVersion: null,
+      expenseCode: null,
+      expenseMemo: null,
+      voucherUUID: null,
+      voucherPolicyVersion: null,
+    },
+    cartLockOptions: null,
+    targetDeliveryTimeRange,
+    deliveryAddress,
+    diningMode: "DELIVERY",
+    draftOrderUUID: draftOrderUuid,
+  }, { ...options, cookieHeader: session?.cookieHeader, auth: true });
+  return {
+    draftOrder: payload.draftOrder ?? payload,
+    targetDeliveryTimeRange,
+  };
 }
 
 function price(value) {
@@ -454,15 +539,27 @@ function collectCatalog(payload) {
 export async function uberEatsMenu(storeUuid, options = {}) {
   const requestedAt = options.scheduledAt ? new Date(options.scheduledAt) : null;
   const scheduled = requestedAt && !Number.isNaN(requestedAt.getTime());
+  const target = scheduled ? localScheduleParts(requestedAt, options.timeZone, options.windowMinutes) : null;
   const payload = await request("getStoreV1", {
-    storeUuid, sfNuggetCount: 0,
-    ...(scheduled ? {
-      date: new Intl.DateTimeFormat("en-CA", { timeZone: options.timeZone ?? "Europe/Madrid", year: "numeric", month: "2-digit", day: "2-digit" }).format(requestedAt),
-      startTime: Math.floor(requestedAt.getTime() / 1_000),
-      endTime: Math.floor(requestedAt.getTime() / 1_000) + Math.max(900, Number(options.windowMinutes ?? 30) * 60),
-    } : {}),
+    storeUuid,
+    sfNuggetCount: 0,
+    diningMode: "DELIVERY",
+    ...(target ? { time: target, cbType: "EATER_ENDORSED" } : {}),
   }, options);
-  return { storeUuid, title: payload.title ?? payload.store?.title ?? "", isOpen: payload.isOpen !== false, items: collectCatalog(payload), raw: options.raw ? payload : undefined };
+  const unavailableMessage = /(?:delivery |currently |not )?unavailable|no disponible|cerrad|closed/i.test(String(payload.closedMessage ?? ""));
+  const scheduledRanges = target ? payload.adaptedDeliveryHoursInfos?.timeRanges?.[target.date] : null;
+  const scheduledSlotAvailable = !target || !Array.isArray(scheduledRanges)
+    || scheduledRanges.some((range) => Number(range.startTime) <= target.startTime && Number(range.endTime) >= target.endTime);
+  return {
+    storeUuid,
+    title: payload.title ?? payload.store?.title ?? "",
+    isOpen: payload.isOpen !== false && payload.isWithinDeliveryRange !== false
+      && !unavailableMessage && scheduledSlotAvailable,
+    closedMessage: payload.closedMessage ?? null,
+    scheduledSlotAvailable,
+    items: collectCatalog(payload),
+    raw: options.raw ? payload : undefined,
+  };
 }
 
 export async function uberEatsItem(source, options = {}) {
@@ -493,6 +590,7 @@ function draftItems(draft) {
   const candidates = [
     draft?.shoppingCartItems,
     draft?.shoppingCart?.shoppingCartItems,
+    draft?.shoppingCart?.items,
     draft?.cart?.shoppingCartItems,
     draft?.cart?.items,
     draft?.items,
@@ -509,6 +607,87 @@ function draftStore(draft) {
   return {
     id: draft?.storeUuid ?? draft?.storeUUID ?? store?.storeUuid ?? store?.uuid ?? store?.id ?? null,
     name: store?.title ?? store?.name ?? draft?.storeName ?? null,
+  };
+}
+
+function draftId(draft) {
+  return draft?.uuid ?? draft?.draftOrderUUID ?? draft?.draftOrderUuid ?? null;
+}
+
+function normalizedLineName(value) {
+  return String(value ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function summarizedLineQuantities(lines, mapper) {
+  const quantities = new Map();
+  for (const line of lines) {
+    const mapped = mapper(line);
+    const name = normalizedLineName(mapped.name);
+    const quantity = Number(mapped.quantity);
+    if (!name || !Number.isFinite(quantity) || quantity <= 0) continue;
+    quantities.set(name, (quantities.get(name) ?? 0) + quantity);
+  }
+  return [...quantities.entries()].sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, quantity]) => ({ name, quantity }));
+}
+
+export function verifyUberEatsDraftLines(carts, draftOrderUuid, expectedLines) {
+  const draft = (carts?.draftOrders ?? []).find((entry) => String(draftId(entry)) === String(draftOrderUuid));
+  if (!draft) {
+    throw new CliError("Uber Eats did not return the created draft for verification", "REMOTE_BASKET_MISMATCH", {
+      draftOrderUuid: String(draftOrderUuid),
+    });
+  }
+  const expected = summarizedLineQuantities(expectedLines ?? [], (line) => ({
+    name: line.item?.name ?? line.name,
+    quantity: line.quantity ?? 1,
+  }));
+  const actual = summarizedLineQuantities(draftItems(draft), (line) => line);
+  if (!expected.length || JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new CliError("Uber Eats remote draft does not match the selected items and quantities", "REMOTE_BASKET_MISMATCH", {
+      expected,
+      actual,
+    });
+  }
+  return { verified: true, lines: actual, itemCount: actual.reduce((sum, line) => sum + line.quantity, 0) };
+}
+
+export function verifyUberEatsDraftSchedule(carts, draftOrderUuid, scheduledAt, timeZone = "Europe/Madrid") {
+  const draft = (carts?.draftOrders ?? []).find((entry) => String(draftId(entry)) === String(draftOrderUuid));
+  if (!draft) {
+    throw new CliError("Uber Eats did not return the scheduled draft for verification", "SCHEDULE_UNVERIFIED", {
+      draftOrderUuid: String(draftOrderUuid),
+    });
+  }
+  const expected = localScheduleParts(scheduledAt, timeZone);
+  const actual = draft.targetDeliveryTimeRange ?? draft.deliveryTime ?? null;
+  const verified = actual?.scheduled === true
+    && String(actual.date) === expected.date
+    && Number(actual.startTime) === expected.startTime
+    && Number(actual.endTime) === expected.endTime;
+  if (!verified) {
+    throw new CliError("Uber Eats did not persist the requested delivery window", "SCHEDULE_UNVERIFIED", {
+      requestedAt: new Date(scheduledAt).toISOString(),
+      expected: { date: expected.date, startTime: expected.startTime },
+      actual: actual ? {
+        scheduled: actual.scheduled,
+        date: actual.date ?? null,
+        startTime: actual.startTime ?? null,
+        endTime: actual.endTime ?? null,
+      } : null,
+    });
+  }
+  return {
+    verified: true,
+    requestedAt: new Date(scheduledAt).toISOString(),
+    timeZone,
+    selectedWindow: {
+      date: expected.date,
+      startMinute: expected.startTime,
+      endMinute: Number(actual.endTime ?? expected.endTime),
+    },
+    source: "ubereats-remote-draft",
   };
 }
 
@@ -596,21 +775,51 @@ export async function createUberEatsBasket(offer, options = {}) {
       title: line.item?.name,
       quantity: line.quantity ?? 1,
       customizations: customizations ?? {},
+      imageURL: null,
+      specialInstructions: "",
+      itemId: null,
     });
   }
-  const requestBody = { isMulticart: true, shoppingCartItems };
-  if (options.scheduledAt) {
-    const start = new Date(options.scheduledAt);
-    if (Number.isNaN(start.getTime())) throw new CliError("Scheduled delivery requires a valid ISO date and time", "INVALID_SCHEDULE");
-    const end = new Date(start.getTime() + Math.max(900, Number(options.windowMinutes ?? 30) * 60) * 1_000);
-    requestBody.targetDeliveryTimeRange = { asap: false, startTime: start.toISOString(), endTime: end.toISOString() };
-  }
+  const requestBody = {
+    removeAdapters: true,
+    isMulticart: true,
+    useCredits: true,
+    extraPaymentProfiles: [],
+    promotionOptions: {
+      autoApplyPromotionUUIDs: [],
+      selectedPromotionInstanceUUIDs: [],
+      skipApplyingPromotion: false,
+    },
+    deliveryTime: { asap: true },
+    deliveryType: "ASAP",
+    currencyCode: lines[0]?.source?.currencyCode ?? "EUR",
+    interactionType: "door_to_door",
+    checkMultipleDraftOrdersCap: true,
+    actionMeta: { isQuickAdd: false, numClicks: 0 },
+    analyticsRelevantData: { profileSource: "" },
+    businessDetails: {},
+    shoppingCartItems,
+  };
   if (options.prepareOnly) return { mutated: false, payload: requestBody, submitted: false };
   const payload = await request("createDraftOrderV2", requestBody, { ...options, auth: true });
-  return { mutated: true, draftOrder: payload.draftOrder ?? payload, submitted: false };
+  const draftOrder = payload.draftOrder ?? payload;
+  const draftOrderUuid = draftId(draftOrder);
+  let scheduling = null;
+  if (options.scheduledAt) {
+    if (!draftOrderUuid) throw new CliError("Uber Eats created a draft without returning its ID", "BASKET_PROTOCOL_ERROR");
+    scheduling = await updateUberEatsDraftSchedule(draftOrderUuid, options.scheduledAt, options);
+  }
+  return { mutated: true, draftOrder, scheduling, submitted: false };
 }
 
 export async function quoteUberEatsBasket(draftOrderUuid, options = {}) {
+  const carts = options.expectedLines || options.scheduledAt ? await uberEatsCarts(options) : null;
+  const remoteBasketVerification = options.expectedLines
+    ? verifyUberEatsDraftLines(carts, draftOrderUuid, options.expectedLines)
+    : null;
+  const scheduleVerification = options.scheduledAt
+    ? verifyUberEatsDraftSchedule(carts, draftOrderUuid, options.scheduledAt, options.timeZone)
+    : null;
   const requestBody = {
     payloadTypes: CHECKOUT_PAYLOAD_TYPES,
     draftOrderUUID: draftOrderUuid,
@@ -624,13 +833,25 @@ export async function quoteUberEatsBasket(draftOrderUuid, options = {}) {
   };
   const quote = await request("getCheckoutPresentationV1", requestBody, { ...options, auth: true });
   const pricing = normalizeUberEatsQuote(quote);
-  if (!options.scheduledAt) return { provider: "ubereats", draftOrderUuid, quote, pricing, submitted: false };
-  const fulfilment = uberEatsScheduleAvailability(quote, options.scheduledAt, options.timeZone);
+  if (!options.scheduledAt) return {
+    provider: "ubereats", draftOrderUuid, quote, pricing, remoteBasketVerification, submitted: false,
+  };
+  const blockingErrors = (quote?.validationErrors ?? []).filter((error) => ![
+    "STORE_UNAVAILABLE_BUT_SCHEDULABLE",
+  ].includes(error.type));
+  if (blockingErrors.length) {
+    throw new CliError("Uber Eats rejected the scheduled checkout", "SCHEDULE_UNAVAILABLE", {
+      requestedAt: new Date(options.scheduledAt).toISOString(),
+      issues: blockingErrors.map((error) => ({ type: error.type, title: error.alert?.title?.text ?? null })),
+    });
+  }
   return {
-    provider: "ubereats", draftOrderUuid, quote, fulfilment,
-    pricing: { ...pricing, exact: false, missing: ["scheduled checkout configuration"] },
+    provider: "ubereats", draftOrderUuid, quote,
+    fulfilment: { ...scheduleVerification, status: "verified" },
+    remoteBasketVerification,
+    scheduleVerification,
+    pricing,
     submitted: false,
-    warning: "Uber Eats exposed the requested slot, but its web API did not persist that slot into the draft checkout. Open the prepared checkout, select the time, and requote before treating the total as exact.",
   };
 }
 
@@ -749,4 +970,4 @@ export async function placeUberEatsOrder(draftOrderUuid, quote, options = {}) {
   }
 }
 
-export const uberEatsInternals = { apiHeaders, checkoutPayloadTypes: CHECKOUT_PAYLOAD_TYPES, collectCatalog, draftItems, findDeliveryLocation, itemPromotion, menuOffers: uberEatsMenuOffers, mergePromotions, price, request, storeValue, storeWidePromotion, uberEatsScheduleAvailability };
+export const uberEatsInternals = { apiHeaders, checkoutPayloadTypes: CHECKOUT_PAYLOAD_TYPES, collectCatalog, draftItems, findDeliveryLocation, itemPromotion, localScheduleParts, menuOffers: uberEatsMenuOffers, mergePromotions, price, request, storeValue, storeWidePromotion, uberEatsScheduleAvailability };

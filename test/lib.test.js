@@ -4,6 +4,7 @@ import {
   normalizeMenu,
   normalizeRestaurants,
   normalizeSavedAddresses,
+  hasUsableCoordinates,
   normalizeSlug,
   parseArgs,
   requestJson,
@@ -101,6 +102,13 @@ test("saved addresses without coordinates are geocoded instead of becoming zero-
   ]);
 });
 
+test("coordinate validation rejects missing values without rejecting real zero coordinates", () => {
+  assert.equal(hasUsableCoordinates({ latitude: null, longitude: null }), false);
+  assert.equal(hasUsableCoordinates({ latitude: "", longitude: "" }), false);
+  assert.equal(hasUsableCoordinates({ latitude: 0, longitude: 0 }), true);
+  assert.equal(hasUsableCoordinates({ latitude: 36.5, longitude: -4.8 }), true);
+});
+
 test("requestJson never retries mutating requests automatically", async () => {
   let calls = 0;
   const fetchImpl = async () => {
@@ -112,4 +120,29 @@ test("requestJson never retries mutating requests automatically", async () => {
     { code: "HTTP_ERROR" },
   );
   assert.equal(calls, 1);
+});
+
+test("requestJson exposes only useful sanitized Just Eat rejection fields", async () => {
+  const fetchImpl = async () => Response.json({
+    ErrorType: "RestaurantDoesNotDeliverToLocation",
+    SubErrorType: "PartnerThrottled",
+    IsOrderable: false,
+    ServiceType: "Delivery",
+    Address: "must not leak",
+  }, { status: 400 });
+  await assert.rejects(
+    () => requestJson("https://example.test/basket", { method: "POST" }, fetchImpl),
+    (error) => {
+      assert.equal(error.code, "MERCHANT_UNAVAILABLE");
+      assert.deepEqual(error.details, {
+        status: 400,
+        url: "https://example.test/basket",
+        providerErrorType: "RestaurantDoesNotDeliverToLocation",
+        providerSubErrorType: "PartnerThrottled",
+        isOrderable: false,
+        serviceType: "Delivery",
+      });
+      return true;
+    },
+  );
 });

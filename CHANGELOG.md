@@ -2,6 +2,15 @@
 
 This project follows Semantic Versioning. It is currently pre-1.0; command and normalized response changes may occur between minor releases and will be listed here.
 
+## 0.1.13 - 2026-07-20
+
+- Verify every Uber Eats draft line and scheduled delivery window against the remote cart, use the current two-step create/update scheduling contract, and distinguish provider payload rejection from expired authentication.
+- Stop treating a closed Glovo store's next opening time as proof of schedulability; require current store status and checkout-verified requested windows.
+- Scan up to 120 discovered Glovo merchants instead of silently truncating common searches at 60, and attach the persisted retry time to partial or rate-limited provider status.
+- Fix Just Eat saved-address geocoding, independent per-line modifiers, scalar modifier choices, multi-line merchant anchoring, remote checkout-line verification, and sanitized merchant-unavailable diagnostics.
+- Preserve search completion state and verified baskets across quote recording, expand provider-specific discovery aliases, and document lexical AND candidate narrowing.
+- Add a privacy-safe production canary suite spanning 12 real-user verticals, retain the 456-request deterministic corpus, and require an exact CLI version match in the Work skill to stop stale MCP processes.
+
 ## 0.1.12 - 2026-07-20
 
 - Resolve Glovo's authoritative store and address IDs from the current store page before catalog selection and basket creation, instead of trusting stale search-card `shop_id` values.

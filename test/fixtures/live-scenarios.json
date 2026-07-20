@@ -1,0 +1,144 @@
+[
+  {
+    "id": "healthy-dinner-two",
+    "request": "Find a healthy but very tasty dinner for two under €30 delivered",
+    "objective": "best",
+    "discoveryQueries": ["healthy", "poke", "mediterranean", "pollo"],
+    "catalogQueries": ["pollo a la parrilla", "bowl", "ensalada", "verduras"],
+    "shoppingItems": [
+      { "id": "main-1", "intent": "healthy tasty main course for person one", "quantity": 1, "discoveryQueries": ["healthy", "poke"], "catalogQueries": ["pollo", "bowl", "ensalada"] },
+      { "id": "main-2", "intent": "different healthy tasty main course for person two", "quantity": 1, "discoveryQueries": ["healthy", "mediterranean"], "catalogQueries": ["pollo", "verduras", "bowl"] }
+    ]
+  },
+  {
+    "id": "thai-spicy-two-drinks",
+    "request": "Authentic super spicy Thai dinner for two under €30 with drinks, not Indian",
+    "objective": "best",
+    "discoveryQueries": ["thai", "tailandesa", "pad thai", "wok"],
+    "catalogQueries": ["thai picante", "muy picante", "pad krapow", "tom yum", "bebida"],
+    "externalDimensions": ["spiciness", "authenticity", "food_quality"],
+    "shoppingItems": [
+      { "id": "main-1", "intent": "authentic Thai main with maximum available heat for person one", "quantity": 1, "discoveryQueries": ["thai", "tailandesa"], "catalogQueries": ["thai picante", "pad krapow", "tom yum"] },
+      { "id": "main-2", "intent": "different authentic Thai main with maximum available heat for person two", "quantity": 1, "discoveryQueries": ["thai", "tailandesa"], "catalogQueries": ["thai picante", "pad thai", "curry"] },
+      { "id": "drinks", "intent": "non-alcoholic drinks for two", "quantity": 2, "discoveryQueries": ["thai", "wok"], "catalogQueries": ["agua", "coca cola", "bebida"] }
+    ]
+  },
+  {
+    "id": "water-twenty-litres",
+    "request": "Find the cheapest good still mineral water, at least 20 litres delivered now",
+    "objective": "cheapest",
+    "discoveryQueries": ["supermercado", "agua", "gasolinera", "tienda"],
+    "catalogQueries": ["agua mineral", "agua sin gas", "6 x 1.5 l", "5 l", "8 l"],
+    "shoppingItems": [
+      { "id": "water", "intent": "still natural mineral water totaling at least 20 litres", "quantity": 1, "discoveryQueries": ["supermercado", "agua"], "catalogQueries": ["agua mineral", "agua sin gas", "6 x 1.5 l", "5 l"] }
+    ]
+  },
+  {
+    "id": "scheduled-breakfast-two",
+    "request": "Best-rated healthy breakfast for tomorrow at 10am under €30 for two people",
+    "objective": "best",
+    "discoveryQueries": ["desayuno", "brunch", "acai", "cafeteria"],
+    "catalogQueries": ["tostada", "huevos", "avena", "yogur", "acai", "granola"],
+    "shoppingItems": [
+      { "id": "breakfast-1", "intent": "healthy breakfast dish for person one", "quantity": 1, "discoveryQueries": ["desayuno", "brunch"], "catalogQueries": ["tostada", "huevos", "avena"] },
+      { "id": "breakfast-2", "intent": "different healthy breakfast dish for person two", "quantity": 1, "discoveryQueries": ["desayuno", "acai"], "catalogQueries": ["yogur", "acai", "granola"] }
+    ]
+  },
+  {
+    "id": "weekly-groceries",
+    "request": "Get eggs, oat milk, bread, bananas, tomatoes and chicken breast as cheaply as possible under €40 delivered",
+    "objective": "cheapest",
+    "discoveryQueries": ["supermercado", "groceries", "alimentacion"],
+    "catalogQueries": ["huevos", "leche de avena", "pan", "platanos", "tomates", "pechuga de pollo"],
+    "shoppingItems": [
+      { "id": "eggs", "intent": "huevos", "quantity": 1, "discoveryQueries": ["supermercado"], "catalogQueries": ["huevos"] },
+      { "id": "oat-milk", "intent": "leche de avena", "quantity": 1, "discoveryQueries": ["supermercado"], "catalogQueries": ["leche de avena"] },
+      { "id": "bread", "intent": "pan", "quantity": 1, "discoveryQueries": ["supermercado"], "catalogQueries": ["pan"] },
+      { "id": "bananas", "intent": "platanos", "quantity": 1, "discoveryQueries": ["supermercado"], "catalogQueries": ["platanos"] },
+      { "id": "tomatoes", "intent": "tomates", "quantity": 1, "discoveryQueries": ["supermercado"], "catalogQueries": ["tomates"] },
+      { "id": "chicken", "intent": "pechuga de pollo", "quantity": 1, "discoveryQueries": ["supermercado"], "catalogQueries": ["pechuga de pollo"] }
+    ]
+  },
+  {
+    "id": "pharmacy-personal-care",
+    "request": "Find SPF 50 sunscreen, saline nasal spray and a digital thermometer from one pharmacy",
+    "objective": "fastest",
+    "discoveryQueries": ["farmacia", "parafarmacia", "pharmacy"],
+    "catalogQueries": ["protector solar spf 50", "suero fisiologico spray", "termometro digital"],
+    "shoppingItems": [
+      { "id": "sunscreen", "intent": "protector solar SPF 50", "quantity": 1, "discoveryQueries": ["farmacia", "pharmacy"], "catalogQueries": ["protector solar SPF 50"] },
+      { "id": "saline", "intent": "spray nasal de suero fisiologico", "quantity": 1, "discoveryQueries": ["farmacia", "pharmacy"], "catalogQueries": ["suero fisiologico", "spray nasal"] },
+      { "id": "thermometer", "intent": "termometro digital", "quantity": 1, "discoveryQueries": ["farmacia", "pharmacy"], "catalogQueries": ["termometro digital"] }
+    ]
+  },
+  {
+    "id": "baby-household",
+    "request": "I need size 4 nappies, baby wipes and fragrance-free laundry detergent delivered today",
+    "objective": "fastest",
+    "discoveryQueries": ["supermercado", "bebe", "farmacia"],
+    "catalogQueries": ["panales talla 4", "toallitas bebe", "detergente sin perfume"],
+    "shoppingItems": [
+      { "id": "nappies", "intent": "panales talla 4", "quantity": 1, "discoveryQueries": ["supermercado", "bebe"], "catalogQueries": ["panales talla 4"] },
+      { "id": "wipes", "intent": "toallitas para bebe", "quantity": 1, "discoveryQueries": ["supermercado", "bebe"], "catalogQueries": ["toallitas bebe"] },
+      { "id": "detergent", "intent": "detergente de ropa sin perfume", "quantity": 1, "discoveryQueries": ["supermercado"], "catalogQueries": ["detergente sin perfume"] }
+    ]
+  },
+  {
+    "id": "vegan-gluten-free-three",
+    "request": "A tasty vegan and gluten-free dinner for three people under €45 delivered",
+    "objective": "best",
+    "discoveryQueries": ["vegano", "sin gluten", "healthy", "poke"],
+    "catalogQueries": ["vegano", "sin gluten", "tofu", "bowl", "ensalada"],
+    "externalDimensions": ["food_quality", "dietary_fit"],
+    "shoppingItems": [
+      { "id": "main-1", "intent": "vegan gluten-free tasty main for person one", "quantity": 1, "discoveryQueries": ["vegano", "sin gluten"], "catalogQueries": ["vegano", "sin gluten", "tofu", "bowl"] },
+      { "id": "main-2", "intent": "different vegan gluten-free tasty main for person two", "quantity": 1, "discoveryQueries": ["vegano", "sin gluten"], "catalogQueries": ["vegano", "sin gluten", "tofu", "bowl"] },
+      { "id": "main-3", "intent": "third distinct vegan gluten-free tasty main", "quantity": 1, "discoveryQueries": ["vegano", "sin gluten"], "catalogQueries": ["vegano", "sin gluten", "tofu", "bowl"] }
+    ]
+  },
+  {
+    "id": "phone-charger-tonight",
+    "request": "Find a USB-C fast phone charger with cable that can arrive tonight under €25",
+    "objective": "fastest",
+    "discoveryQueries": ["electronica", "movil", "tienda", "convenience"],
+    "catalogQueries": ["cargador usb c", "carga rapida", "cable usb c"],
+    "shoppingItems": [
+      { "id": "charger", "intent": "USB-C fast wall charger", "quantity": 1, "discoveryQueries": ["electronica", "movil"], "catalogQueries": ["cargador usb c", "carga rapida"] },
+      { "id": "cable", "intent": "compatible USB-C charging cable", "quantity": 1, "discoveryQueries": ["electronica", "movil"], "catalogQueries": ["cable usb c"] }
+    ]
+  },
+  {
+    "id": "pet-supplies",
+    "request": "Find dry food for an adult indoor cat and unscented clumping litter from one shop",
+    "objective": "cheapest",
+    "discoveryQueries": ["mascotas", "pet shop", "supermercado"],
+    "catalogQueries": ["pienso gato adulto indoor", "arena aglomerante sin perfume"],
+    "shoppingItems": [
+      { "id": "cat-food", "intent": "dry food for an adult indoor cat", "quantity": 1, "discoveryQueries": ["mascotas", "pet shop"], "catalogQueries": ["pienso gato adulto indoor"] },
+      { "id": "litter", "intent": "unscented clumping cat litter", "quantity": 1, "discoveryQueries": ["mascotas", "pet shop"], "catalogQueries": ["arena aglomerante sin perfume"] }
+    ]
+  },
+  {
+    "id": "flowers-gift",
+    "request": "Find a tasteful bouquet and a small box of chocolates delivered today under €40",
+    "objective": "best",
+    "discoveryQueries": ["flores", "floristeria", "regalos"],
+    "catalogQueries": ["ramo flores", "bombones", "chocolate"],
+    "shoppingItems": [
+      { "id": "bouquet", "intent": "tasteful fresh flower bouquet", "quantity": 1, "discoveryQueries": ["flores", "floristeria"], "catalogQueries": ["ramo flores"] },
+      { "id": "chocolates", "intent": "small box of chocolates", "quantity": 1, "discoveryQueries": ["flores", "regalos"], "catalogQueries": ["bombones", "chocolate"] }
+    ]
+  },
+  {
+    "id": "office-lunch-six",
+    "request": "A varied lunch for six people with two vegetarian options and drinks under €70 delivered",
+    "objective": "value",
+    "discoveryQueries": ["menu", "mediterranean", "sandwich", "poke"],
+    "catalogQueries": ["menu", "pollo", "vegetariano", "bowl", "bebida"],
+    "shoppingItems": [
+      { "id": "regular-mains", "intent": "four varied non-vegetarian lunch mains", "quantity": 4, "discoveryQueries": ["menu", "mediterranean"], "catalogQueries": ["menu", "pollo", "bowl"] },
+      { "id": "vegetarian-mains", "intent": "two vegetarian lunch mains", "quantity": 2, "discoveryQueries": ["vegetariano", "poke"], "catalogQueries": ["vegetariano", "verduras", "bowl"] },
+      { "id": "drinks", "intent": "six non-alcoholic drinks", "quantity": 6, "discoveryQueries": ["menu", "mediterranean"], "catalogQueries": ["agua", "refresco", "bebida"] }
+    ]
+  }
+]

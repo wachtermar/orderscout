@@ -177,6 +177,29 @@ test("Glovo search preserves store-only results for second-stage catalog discove
   assert.deepEqual(stores[0].categories, ["Vapeo"]);
 });
 
+test("Glovo does not confuse a closed store's next opening time with schedulable checkout", () => {
+  const card = (status, openingAt) => ({
+    type: "STORE_CARD_V2",
+    actions: [{ data: { path: `open?store_id=12&shop_id=34&category_id=1&shop_availability_status=${status}&opening_or_schedulable_time=${encodeURIComponent(openingAt)}` } }],
+    data: { slug: "breakfast", title: { text: { text: "Breakfast" } }, labels: [] },
+  });
+  const closedPayload = { data: { elements: [card("CLOSED", "Tue Jul 21 06:30:00 UTC 2026"), {
+    type: "PRODUCT_ITEM_CARD_V2",
+    actions: [{ data: { path: "open?product_id=1" } }],
+    data: { name: { text: "Toast" }, pricing: { finalPrice: "4,50 €" } },
+  }] } };
+  const closedStore = glovoInternals.storesFromSearch(closedPayload, { citySlug: "marbella" })[0];
+  assert.equal(closedStore.open, false);
+  assert.equal(closedStore.schedulable, false);
+  assert.equal(glovoInternals.offersFromSearch(closedPayload, { citySlug: "marbella" })[0].available, false);
+
+  const scheduledStore = glovoInternals.storesFromSearch({ data: { elements: [
+    card("SCHEDULABLE", "Tue Jul 21 08:00:00 UTC 2026"),
+  ] } }, { citySlug: "marbella" })[0];
+  assert.equal(scheduledStore.open, false);
+  assert.equal(scheduledStore.schedulable, true);
+});
+
 test("Glovo reuses the saved city code and derives only the harmless URL slug", async () => {
   const calls = [];
   await searchGlovo("indio", { latitude: 36.5, longitude: -4.8, city: "Marbella", cityCode: "MBA" }, {
