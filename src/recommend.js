@@ -149,8 +149,11 @@ function budgetAmount(normalized) {
 
 function requestedLiters(normalized) {
   const liters = (amount, unit) => unit === "ml" ? amount / 1_000 : unit === "cl" ? amount / 100 : amount;
-  const multiplied = normalized.match(/\b(\d+)\s*(?:x|bottles?|botellas?|units?|unidades?|uds?)\s*(?:of|de)?\s*(\d+(?:\.\d+)?)\s*(ml|cl|l|litro|litros|litre|litres)\b/);
-  if (multiplied) return Number(multiplied[1]) * liters(Number(multiplied[2]), multiplied[3]);
+  const count = "(?:\\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|un|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|dieciseis|diecisiete|dieciocho|diecinueve|veinte)";
+  const pack = normalized.match(new RegExp(`\\b(${count})\\s*(?:packs?|paquetes?)\\s*(?:of|de)?\\s*(${count})\\s*(?:x|bottles?|botellas?|units?|unidades?|uds?)\\s*(?:of|de)?\\s*(\\d+(?:\\.\\d+)?)\\s*(ml|cl|l|litro|litros|litre|litres)\\b`));
+  if (pack) return numberToken(pack[1]) * numberToken(pack[2]) * liters(Number(pack[3]), pack[4]);
+  const multiplied = normalized.match(new RegExp(`\\b(${count})\\s*(?:x|bottles?|botellas?|units?|unidades?|uds?)\\s*(?:of|de)?\\s*(\\d+(?:\\.\\d+)?)\\s*(ml|cl|l|litro|litros|litre|litres)\\b`));
+  if (multiplied) return numberToken(multiplied[1]) * liters(Number(multiplied[2]), multiplied[3]);
   const volume = normalized.match(/(\d+(?:\.\d+)?)\s*(ml|cl|l|litro|litros|litre|litres)\b/);
   return volume ? liters(Number(volume[1]), volume[2]) : 1.5;
 }
@@ -221,9 +224,11 @@ function scheduledInstant(normalized, options = {}) {
 
 export function parseIntent(text, options = {}) {
   const normalized = normalizedText(text).replace(/,/g, ".");
-  const water = /\b(?:agua|water)\b/.test(normalized);
+  const water = /\b(?:agua|water)\b/.test(normalized)
+    && !/\b(?:tonic|coconut|vitamin|flavou?red|saborizada)\s+(?:agua|water)\b/.test(normalized);
   const packagedMealProduct = /\b(?:pasta sauce|salsa (?:de|para) pasta|pasta dental|instant ramen|ramen instantaneo|frozen pizza|pizza congelada|pizza dough|masa de pizza|meal kit|kit de comida|dog food|cat food|pet food|comida para perro|comida para gato|pienso)\b/.test(normalized);
-  const meal = MEAL_PATTERN.test(normalized) && !packagedMealProduct;
+  const productCollection = /\b(?:groceries|grocery shop|breakfast shop|supplies|birthday setup|movie night|lista de compra|hacer la compra|suministros)\b/.test(normalized);
+  const meal = MEAL_PATTERN.test(normalized) && !packagedMealProduct && !productCollection;
   const people = partySize(normalized);
   const scheduledAt = scheduledInstant(normalized, options);
   const occasion = /\b(?:breakfast|desayuno|brunch)\b/.test(normalized) ? "breakfast"
@@ -756,9 +761,12 @@ export async function recommend(location, text, options = {}) {
     vertical,
     token: options.token,
   }, options.fetchImpl);
-  const storeLimit = Number(options.stores ?? (intent.kind === "meal" ? 12 : intent.kind === "product" ? 30 : 20));
-  if (!Number.isInteger(storeLimit) || storeLimit < 1 || storeLimit > 50) {
-    throw new CliError("--stores must be an integer between 1 and 50");
+  const maximumStores = llmMode ? 200 : 50;
+  const storeLimit = Number(options.stores ?? (llmMode
+    ? Math.min(maximumStores, discovery.restaurants?.length ?? maximumStores)
+    : intent.kind === "meal" ? 12 : intent.kind === "product" ? 30 : 20));
+  if (!Number.isInteger(storeLimit) || storeLimit < 1 || storeLimit > maximumStores) {
+    throw new CliError(`--stores must be an integer between 1 and ${maximumStores}`);
   }
   const eligibleRestaurants = (discovery.restaurants ?? []).filter((restaurant) =>
     restaurant.isDelivery && !restaurant.isTemporarilyOffline);
@@ -786,8 +794,9 @@ export async function recommend(location, text, options = {}) {
       ...restaurants,
     ].map((restaurant) => [restaurant.id, restaurant])).values()];
   }
+  const candidateStoreCount = restaurants.length;
   restaurants = restaurants.slice(0, storeLimit);
-  const scanned = await mapConcurrent(restaurants, Number(options.concurrency ?? 4), async (restaurant) => {
+  const scanned = await mapConcurrent(restaurants, Number(options.concurrency ?? (llmMode ? 8 : 4)), async (restaurant) => {
     const menuData = await (options.fetchMenuImpl ?? fetchMenu)(restaurant.uniqueName, options.fetchImpl);
     const menu = normalizeMenu(menuData);
     return {
@@ -844,6 +853,8 @@ export async function recommend(location, text, options = {}) {
       vertical,
       semanticMode: llmMode ? "llm" : "deterministic",
       discoveredStores: discovery.restaurants?.length ?? 0,
+      eligibleStores: eligibleRestaurants.length,
+      candidateStores: candidateStoreCount,
       scannedStores: restaurants.length,
       failedMenus: scanned.filter((entry) => entry?.error).length,
       availability: restaurants.every((restaurant) => restaurant.isOpenNowForDelivery)

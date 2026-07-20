@@ -106,6 +106,7 @@ export function normalizeOffer(provider, input, context = {}) {
       name: merchantName,
       rating: numberOrNull(input.merchant?.rating ?? input.rating),
       ratingCount: numberOrNull(input.merchant?.ratingCount ?? input.ratingCount),
+      categories: stringList(input.merchant?.categories, false),
     },
     item: {
       id: input.item?.id ?? null,
@@ -137,6 +138,12 @@ export function normalizeOffer(provider, input, context = {}) {
     promotion,
     url: trustedProviderUrl(provider, input.url),
     source: input.source ?? null,
+    semanticAssessment: input.semanticAssessment ? {
+      requestFit: Math.max(0, Math.min(100, numberOrNull(input.semanticAssessment.requestFit) ?? 0)),
+      confidence: ["low", "medium", "high"].includes(input.semanticAssessment.confidence)
+        ? input.semanticAssessment.confidence : "low",
+      evidence: stringList(input.semanticAssessment.evidence, false).slice(0, 8),
+    } : null,
     signals: {
       health: numberOrNull(input.signals?.health) ?? 0,
       taste: numberOrNull(input.signals?.taste) ?? 0,
@@ -178,17 +185,20 @@ function scoreOffer(offer, objective, parsed) {
   const healthTaste = offer.signals.health * 0.7 + offer.signals.taste * 0.6;
   const productFit = parsed.kind === "product"
     ? offer.signals.relevance * 0.8 + offer.signals.preference * 1.5 : 0;
+  const semanticFit = Number(offer.semanticAssessment?.requestFit ?? 0);
   const dealSignal = Math.min(12, Number(offer.pricing.itemSavings ?? 0) * 2)
     + (offer.promotion?.types?.length ? 2 : 0)
     + (offer.membership?.active && offer.membership?.eligible ? 2 : 0);
   if (!offer.available) return -1_000_000;
-  if (objective === "cheapest") return -price * 20 - eta * 0.08 + rating * 0.08 + productFit * 0.25;
-  if (objective === "fastest") return -eta * 8 - price * 0.35 + rating * 0.08 + productFit * 0.25;
+  if (objective === "cheapest") return -price * 20 - eta * 0.08 + rating * 0.08 + productFit * 0.25 + semanticFit * 0.1;
+  if (objective === "fastest") return -eta * 8 - price * 0.35 + rating * 0.08 + productFit * 0.25 + semanticFit * 0.1;
   if (objective === "best") {
-    const ratingWeight = /\b(best[ -]rated|highest[ -]rated|mejor valorad)\b/.test(parsed.normalized) ? 20 : 2;
-    return rating * ratingWeight + healthTaste + productFit + dealSignal * 0.35 - price * 0.8 - eta * 0.12;
+    const explicitlyRatingLed = /\b(best[ -]rated|highest[ -]rated|mejor valorad)\b/.test(parsed.normalized);
+    const ratingWeight = explicitlyRatingLed ? 20 : 2;
+    const semanticWeight = explicitlyRatingLed ? 2 : 20;
+    return rating * ratingWeight + semanticFit * semanticWeight + healthTaste + productFit + dealSignal * 0.35 - price * 0.8 - eta * 0.12;
   }
-  return rating + healthTaste + productFit + dealSignal - price * 2.4 - eta * 0.45;
+  return rating + semanticFit * 5 + healthTaste + productFit + dealSignal - price * 2.4 - eta * 0.45;
 }
 
 export function rankOffers(offers, intent, objective = parseObjective(intent), options = {}) {
@@ -219,12 +229,21 @@ export function rankOffers(offers, intent, objective = parseObjective(intent), o
     if (offer.ranking.overBudget) offer.ranking.badges.push(`exact total exceeds €${parsed.budget} budget`);
     if (Number(offer.pricing.itemSavings) > 0) offer.ranking.badges.push(`listed item deal saves €${Number(offer.pricing.itemSavings).toFixed(2)}`);
     if (Number(offer.pricing.discount) > 0 && offer.pricing.exact) offer.ranking.badges.push(`€${Number(offer.pricing.discount).toFixed(2)} checkout discount applied`);
-    if (offer.promotion?.types?.includes("TWO_FOR_ONE") || offer.promotion?.types?.includes("BOGO")) offer.ranking.badges.push("listed 2-for-1 deal—validate checkout");
-    if (offer.promotion?.types?.includes("FREE_DELIVERY")) offer.ranking.badges.push("listed free delivery—validate checkout");
+    if (offer.promotion?.types?.includes("TWO_FOR_ONE") || offer.promotion?.types?.includes("BOGO")) offer.ranking.badges.push(
+      offer.pricing.exact ? "listed 2-for-1 deal—exact checkout total used" : "listed 2-for-1 deal—validate checkout",
+    );
+    if (offer.promotion?.types?.includes("FREE_DELIVERY")) offer.ranking.badges.push(
+      offer.pricing.exact ? "listed free delivery—exact checkout total used" : "listed free delivery—validate checkout",
+    );
     if ((offer.promotion?.types?.length || offer.promotion?.descriptions?.length)
-      && !offer.ranking.badges.some((badge) => /listed .*deal|listed free delivery/.test(badge))) offer.ranking.badges.push("listed provider deal—validate checkout");
+      && !offer.ranking.badges.some((badge) => /listed .*deal|listed free delivery/.test(badge))) offer.ranking.badges.push(
+      offer.pricing.exact ? "listed provider deal—exact checkout total used" : "listed provider deal—validate checkout",
+    );
     if (offer.membership?.active && offer.membership?.eligible) offer.ranking.badges.push(`${offer.membership.name ?? "membership"} eligible`);
     if (offer.signals.matchedPreference?.length) offer.ranking.badges.push(`matches preference: ${offer.signals.matchedPreference.join(", ")}`);
+    if (offer.semanticAssessment) offer.ranking.badges.push(
+      `model request fit ${offer.semanticAssessment.requestFit}/100 (${offer.semanticAssessment.confidence} confidence)`,
+    );
     if (!offer.pricing.exact) offer.ranking.badges.push("estimate—validate checkout");
     if (parsed.deliveryTime === "scheduled" && !offer.ranking.scheduleVerified) offer.ranking.badges.push("requested time not verified");
   }

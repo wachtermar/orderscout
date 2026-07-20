@@ -7,21 +7,23 @@ import { promisify } from "node:util";
 import { openSystemUrl } from "./auth.js";
 import { beginBrowserLogin, importChromeSession, loadBrowserSession, logoutBrowserSession } from "./browser-session.js";
 import {
-  createGlovoBasket, enrichGlovoOffers, glovoAddresses, glovoBaskets, glovoCheckoutUrl, glovoMe, glovoMenu, glovoStoreCatalog, placeGlovoOrder, quoteGlovoBasket, searchGlovo,
+  createGlovoBasket, glovoAddresses, glovoBaskets, glovoCheckoutUrl, glovoMe, glovoMenu, glovoMenuOffers, glovoStoreCatalog, placeGlovoOrder, quoteGlovoBasket, searchGlovo,
 } from "./glovo.js";
 import { CliError, parseArgs, resolveLocation } from "./lib.js";
 import { errorEnvelope, exitCodeFor, writeOutput } from "./output.js";
 import { PROVIDERS, configureAccounts, loadAccounts, parseProviderList, publicAccountStatus, recordProviderStatus } from "./providers.js";
 import { assertProviderAvailable, clearProviderCooldown, recordProviderRateLimit } from "./provider-cooldown.js";
 import {
-  confirmEligibility, ingestOffers, loadSearch, recordBasket, recordProviderError, recordQuote, searchCandidates,
-  searchResults, selectCandidates, startSearch,
+  confirmEligibility, ingestOffers, loadSearch, recordBasket, recordComparisonOutcomes, recordProviderError, recordQuote, resultsFor,
+  reviewProvider, searchCandidates, searchResults, selectCandidates, startSearch,
 } from "./searches.js";
 import { runOrderScoutMcpServer } from "./orderscout-mcp.js";
 import {
-  createUberEatsBasket, expandUberEatsCatalogs, placeUberEatsOrder, quoteUberEatsBasket, searchUberEats, uberEatsCarts, uberEatsMe, uberEatsMenu,
+  createUberEatsBasket, expandUberEatsCatalogs, placeUberEatsOrder, quoteUberEatsBasket, searchUberEats, summarizeUberEatsCarts,
+  uberEatsCarts, uberEatsDraftDeliveryLocation, uberEatsMe, uberEatsMenu,
 } from "./ubereats.js";
 import { parseIntent, productIntentSpec, providerSearchQueries } from "./recommend.js";
+import { planProviderRetrieval } from "./retrieval-plan.js";
 
 const execFileAsync = promisify(execFile);
 const JUSTEAT_CLI = fileURLToPath(new URL("./cli.js", import.meta.url));
@@ -42,10 +44,12 @@ Usage:
   orderscout search error <search-id> <provider> --message text
   orderscout search candidates <search-id> [--offset 0] [--limit 50] [--provider glovo] [--merchant-id id]
   orderscout search select <search-id> --json '[{"offerId":"...","quantity":1,"forItem":"...","reason":"..."}]'
+  orderscout search review <search-id> <provider> --disposition inspected_no_suitable_match|unavailable --reason text
   orderscout search results <search-id>
   orderscout eligibility confirm <search-id> <offer-id> --confirmed true
   orderscout quote record <search-id> <offer-id> --json '{"subtotal":10,"fees":{"delivery":2},"total":12}'
   orderscout basket prepare|create|checkout|open <search-id> <offer-id>
+  orderscout comparison quote <search-id> [--customizations JSON]
   orderscout order place <search-id> <offer-id> [--confirm fingerprint]
   orderscout offer open <search-id> <offer-id>
   orderscout justeat <existing justeat command...>
@@ -245,6 +249,198 @@ export function checkoutFulfilment(quoted, offer) {
   return quoted?.fulfilment ?? offer?.basket?.fulfilment ?? offer?.fulfilment ?? null;
 }
 
+function selectedComparisonOffers(search) {
+  const selected = search.offers.filter((offer) => offer.source?.llmSelected === true);
+  const reviews = search.providerReviews;
+  if (reviews !== undefined) {
+    return search.providers.flatMap((provider) => {
+      const review = reviews?.[provider];
+      if (review?.disposition !== "selected") return [];
+      const offer = selected.find((entry) => entry.id === review.offerId && entry.provider === provider);
+      return offer ? [offer] : [];
+    });
+  }
+  const latest = new Map();
+  for (const offer of selected) latest.set(offer.provider, offer);
+  return search.providers.map((provider) => latest.get(provider)).filter(Boolean);
+}
+
+async function createBasketForOffer(search, offer, options = {}) {
+  if (offer.provider === "glovo") {
+    const result = await createGlovoBasket(offer, { customizations: options.customizations });
+    const id = result.basket?.basketId ?? result.basket?.id;
+    if (!id) throw new CliError("Glovo created a basket without returning its ID", "BASKET_PROTOCOL_ERROR");
+    return { provider: "glovo", id: String(id), creation: result };
+  }
+  if (offer.provider === "ubereats") {
+    const result = await createUberEatsBasket(offer, {
+      customizations: options.customizations,
+      scheduledAt: search.fulfilment?.requestedAt,
+      timeZone: search.fulfilment?.timeZone,
+    });
+    const draft = result.draftOrder;
+    const id = draft?.uuid ?? draft?.draftOrderUUID ?? draft?.draftOrderUuid;
+    if (!id) throw new CliError("Uber Eats created a draft without returning its ID", "BASKET_PROTOCOL_ERROR");
+    return { provider: "ubereats", id: String(id), creation: result };
+  }
+  const source = offer.source;
+  if (!source?.planId || !Number.isInteger(source.candidateIndex)) {
+    throw new CliError("Just Eat offer is missing its source plan", "SOURCE_PLAN_MISSING");
+  }
+  const args = ["order", "prepare", source.planId, "--candidate", String(source.candidateIndex), "--agent"];
+  if (offer.lines?.length) {
+    args.push("--lines", JSON.stringify(offer.lines.map((line) => ({
+      candidateIndex: line.source?.candidateIndex,
+      quantity: line.quantity ?? 1,
+    }))));
+  } else args.push("--quantity", String(offer.quantity ?? 1));
+  args.push("--create");
+  const result = await runLegacyJustEat(args);
+  const id = result?.basketId;
+  if (!id) throw new CliError("Just Eat created a basket without returning its ID", "BASKET_PROTOCOL_ERROR");
+  const configuration = await runLegacyJustEat([
+    "order", "configure", source.planId,
+    "--address-index", String(source.addressIndex ?? 0),
+    ...(search.fulfilment?.requestedAt ? ["--scheduled", search.fulfilment.requestedAt] : []),
+    "--apply", "--agent",
+  ], { allowFailure: true });
+  if (configuration?.error) {
+    throw new CliError(configuration.error.message ?? "Just Eat checkout configuration failed", configuration.error.code ?? "CHECKOUT_CONFIGURATION_FAILED", configuration.error.details);
+  }
+  const fulfilment = configuration?.selectedWindow ? {
+    requestedAt: search.fulfilment.requestedAt,
+    timeZone: search.fulfilment.timeZone,
+    status: "verified",
+    selectedWindow: configuration.selectedWindow,
+    source: "justeat-availabletimes",
+  } : null;
+  return { provider: "justeat", id: String(id), fulfilment, creation: { result, configuration } };
+}
+
+function quoteReview(provider, quoted, pricing) {
+  let fulfillable = null;
+  let issues = [];
+  if (provider === "justeat") {
+    const value = quoted.quote?.quote ?? quoted.quote ?? quoted;
+    fulfillable = value?.isFulfillable ?? null;
+    issues = value?.issues ?? [];
+  } else if (provider === "glovo") {
+    fulfillable = quoted.quote?.isFulfillable ?? quoted.quote?.fulfillable ?? null;
+    issues = quoted.quote?.issues ?? quoted.quote?.validationErrors ?? [];
+  } else {
+    fulfillable = quoted.quote?.isFulfillable ?? null;
+    issues = quoted.quote?.validationErrors ?? quoted.quote?.issues ?? [];
+  }
+  const blocked = fulfillable === false || issues.length > 0;
+  return {
+    fulfillable,
+    issues,
+    pricing: blocked && pricing?.exact ? { ...pricing, exact: false, missing: ["blocking checkout validation"] } : pricing,
+  };
+}
+
+async function quoteBasketForOffer(search, offer, basket) {
+  if (!basket?.id) throw new CliError("Create this basket before requesting checkout", "BASKET_REQUIRED");
+  if (offer.provider === "glovo") {
+    const quoted = await quoteGlovoBasket(basket.id, {
+      scheduledAt: search.fulfilment?.requestedAt,
+      timeZone: search.fulfilment?.timeZone,
+    });
+    const fulfilment = checkoutFulfilment(quoted, { ...offer, basket });
+    return { quoted: { ...quoted, fulfilment }, ...quoteReview("glovo", quoted, quoted.pricing), fulfilment };
+  }
+  if (offer.provider === "ubereats") {
+    const quoted = await quoteUberEatsBasket(basket.id, {
+      scheduledAt: search.fulfilment?.requestedAt,
+      timeZone: search.fulfilment?.timeZone,
+    });
+    const fulfilment = checkoutFulfilment(quoted, { ...offer, basket });
+    return { quoted: { ...quoted, fulfilment }, ...quoteReview("ubereats", quoted, quoted.pricing), fulfilment };
+  }
+  const response = await runLegacyJustEat(["order", "quote", offer.source.planId, "--agent"]);
+  if (response?.basketId && String(response.basketId) !== String(basket.id)) {
+    throw new CliError("Just Eat returned a quote for a different basket", "BASKET_MISMATCH", {
+      expectedBasketId: String(basket.id), returnedBasketId: String(response.basketId),
+    });
+  }
+  const quoted = { provider: "justeat", offerId: offer.id, quote: response, fulfilment: basket.fulfilment ?? offer.fulfilment, submitted: false };
+  const pricing = justEatPricing(quoted);
+  return { quoted, ...quoteReview("justeat", quoted, pricing), fulfilment: quoted.fulfilment };
+}
+
+export async function quoteSelectedProviderComparison(searchId, options = {}) {
+  const search = await loadSearch(searchId);
+  assertAllergenReview(search, { "allergen-reviewed": options.allergenReviewed === true ? "true" : undefined });
+  const readiness = resultsFor(search);
+  if (readiness?.coverage?.unresolvedProviders?.length) {
+    throw new CliError(
+      `Every provider must complete retrieval and review before quoting: ${readiness.coverage.unresolvedProviders.join(", ")}`,
+      "PROVIDER_REVIEW_REQUIRED",
+    );
+  }
+  if (readiness?.coverage?.deliveryLocation?.status === "mismatch") {
+    throw new CliError(
+      "Provider delivery locations do not match; fix the saved addresses before creating comparison baskets",
+      "DELIVERY_LOCATION_MISMATCH",
+      readiness.coverage.deliveryLocation,
+    );
+  }
+  const offers = selectedComparisonOffers(search);
+  if (!offers.length) throw new CliError("Select one provider bundle before requesting a comparison quote", "SELECTION_REQUIRED");
+  const byProvider = new Map(offers.map((offer) => [offer.provider, offer]));
+  const rawOutcomes = await runConcurrentProviderTasks([...byProvider.keys()], async (provider) => {
+    const offer = byProvider.get(provider);
+    const customizations = options.customizations?.[offer.id] ?? options.customizations?.[provider];
+    if (options.providerTask) {
+      return {
+        provider,
+        offerId: offer.id,
+        ...await options.providerTask({ provider, offer, search, customizations }),
+      };
+    }
+    const basket = offer.basket?.id
+      ? { ...offer.basket, provider }
+      : await createBasketForOffer(search, offer, { customizations });
+    const review = await quoteBasketForOffer(search, offer, basket);
+    const exact = Boolean(review.pricing?.exact && Number.isFinite(Number(review.pricing?.total)));
+    return {
+      provider,
+      offerId: offer.id,
+      status: exact ? "quoted" : "provisional",
+      basketId: basket.id,
+      basketCreatedAt: offer.basket?.createdAt ?? new Date().toISOString(),
+      created: !offer.basket?.id,
+      pricing: review.pricing,
+      fulfilment: review.fulfilment,
+      fulfillable: review.fulfillable,
+      issues: review.issues,
+    };
+  });
+  const providerOutcomes = rawOutcomes.map((outcome) => {
+    if (!outcome.error) return outcome.value;
+    return {
+      provider: outcome.provider,
+      offerId: byProvider.get(outcome.provider)?.id ?? null,
+      status: "error",
+      error: {
+        code: outcome.error.code ?? "QUOTE_FAILED",
+        message: outcome.error.message,
+        ...(outcome.error.details ? { details: outcome.error.details } : {}),
+      },
+    };
+  });
+  const results = await recordComparisonOutcomes(searchId, providerOutcomes);
+  return {
+    searchId,
+    providerOutcomes,
+    comparison: results.comparison,
+    coverage: results.coverage,
+    candidatePool: results.candidatePool,
+    warnings: results.warnings,
+    submitted: false,
+  };
+}
+
 export function providerDiverseOffers(offers, limit) {
   const anchors = [];
   for (const provider of Object.keys(PROVIDERS)) {
@@ -274,17 +470,38 @@ async function collectJustEat(intent, flags) {
   const args = ["recommend", intent, "--agent"];
   const parsed = parseIntent(intent);
   if (flags.semanticMode === "llm") {
-    args.push("--candidate-mode", "llm", "--limit", String(flags.limit ?? 2_000));
+    args.push("--candidate-mode", "llm", "--limit", String(flags.limit ?? 5_000));
+    if (flags.stores === undefined) args.push("--stores", "200");
     if (flags.shoppingItems?.length) args.push("--shopping-items", JSON.stringify(flags.shoppingItems));
   }
   if (parsed.deliveryTime === "scheduled") args.push("--include-closed");
-  if (parsed.occasion === "breakfast" && flags.stores === undefined) args.push("--stores", "40");
+  if (flags.semanticMode !== "llm" && parsed.occasion === "breakfast" && flags.stores === undefined) args.push("--stores", "40");
   for (const [flag, value] of [["at", flags.at], ["stores", flags.stores], ["limit", flags.semanticMode === "llm" ? undefined : flags.limit], ["vertical", flags.vertical]]) {
     if (value !== undefined) args.push(`--${flag}`, String(value));
   }
   const result = await runLegacyJustEat(args, { allowFailure: true });
   if (result.error) throw new CliError(result.error.message ?? result.error.code ?? "Just Eat search failed", result.error.code ?? "JUSTEAT_SEARCH_FAILED");
-  return justEatOffers(result);
+  return {
+    offers: justEatOffers(result),
+    providerMeta: {
+      strategy: "complete-area-menu-scan",
+      discoveredStores: result.scope?.discoveredStores ?? null,
+      eligibleStores: result.scope?.eligibleStores ?? null,
+      candidateStores: result.scope?.candidateStores ?? null,
+      searchedStores: result.scope?.scannedStores ?? null,
+      failedMenus: result.scope?.failedMenus ?? 0,
+      deliveryLocation: result.location ? {
+        latitude: result.location.latitude,
+        longitude: result.location.longitude,
+        postcode: result.location.postcode ?? null,
+        city: result.location.city ?? null,
+        source: "justeat-saved-address",
+      } : null,
+      partial: Number(result.scope?.failedMenus ?? 0) > 0
+        || (Number.isFinite(Number(result.scope?.candidateStores))
+          && Number(result.scope.candidateStores) > Number(result.scope?.scannedStores ?? 0)),
+    },
+  };
 }
 
 async function collectGlovo(intent, flags) {
@@ -296,48 +513,47 @@ async function collectGlovo(intent, flags) {
     if (!location) throw new CliError("Glovo has no usable saved delivery address; pass --at once", "LOCATION_REQUIRED");
   }
   const parsed = parseIntent(intent);
-  const itemFallbackQueries = (flags.shoppingItems ?? []).flatMap((item) => providerSearchQueries(parseIntent(item.intent)));
-  const fallbackQueries = mergedQueries(itemFallbackQueries, providerSearchQueries(parsed));
-  const discoveryQueries = mergedQueries(flags.discoveryQueries, fallbackQueries);
-  const catalogQueries = mergedQueries(flags.catalogQueries, fallbackQueries);
-  const results = await settleConcurrent(discoveryQueries, 2, (query) => searchGlovo(query, location, { limit: flags.limit }));
+  const fallbackQueries = providerSearchQueries(parsed);
+  const discoveryQueries = flags.retrievalPlan?.discovery?.queries?.length
+    ? flags.retrievalPlan.discovery.queries : mergedQueries(flags.discoveryQueries, fallbackQueries, 24);
+  const catalogQueries = flags.retrievalPlan?.catalog?.queries?.length
+    ? flags.retrievalPlan.catalog.queries : mergedQueries(flags.catalogQueries, fallbackQueries, 24);
+  const results = await settleConcurrent(discoveryQueries, 3, (query) => searchGlovo(query, location, { limit: flags.limit, storeLimit: 60 }));
   const fulfilled = results.filter((result) => result.status === "fulfilled");
   if (!fulfilled.length) throw results[0].reason;
   const discoveryFailures = results.filter((result) => result.status === "rejected");
   const allStores = [...new Map(fulfilled.flatMap((result) => result.value.stores ?? [])
     .map((store) => [`${store.id}:${store.addressId}`, store])).values()];
-  const merchantTerms = discoveryQueries.flatMap((query) => query.normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase().split(/[^a-z0-9]+/)).filter((term) => term.length >= 4);
-  const relevantStores = allStores.filter((store) => {
-    const text = `${store.name} ${(store.categories ?? []).join(" ")}`.normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "").toLowerCase();
-    return merchantTerms.some((term) => text.includes(term));
-  });
-  const maxStores = Math.max(1, Math.min(8, Number(flags.stores ?? (parsed.kind === "meal" ? 4 : 3))));
-  // When several merchant cards clearly match the LLM's discovery plan, stay
-  // inside that set. Appending unrelated stores wastes Glovo's catalog-search
-  // budget and can turn a precise request into a rate-limited partial scan.
-  const prioritizedStores = relevantStores.length >= 2 ? relevantStores : allStores;
-  const stores = [...new Map(prioritizedStores
-    .map((store) => [`${store.id}:${store.addressId}`, store])).values()].slice(0, maxStores);
+  const maxStores = Math.max(1, Math.min(60, Number(flags.stores ?? 60)));
+  const stores = allStores.slice(0, maxStores);
   const requireEligibility = [parsed, ...(flags.shoppingItems ?? []).map((item) => parseIntent(item.intent))]
     .some((itemIntent) => productIntentSpec(itemIntent).concept?.id === "vape");
   const catalogs = [];
+  const fullMenus = [];
   const catalogErrors = [];
   let failedCatalogs = 0;
-  for (const store of stores) {
-    try {
-      catalogs.push(await glovoStoreCatalog(store, catalogQueries, location, {
+  const menuOutcomes = await settleConcurrent(stores, 4, async (store) => {
+    const menu = await glovoMenu(store.url);
+    let catalog = null;
+    if (requireEligibility || menu.restrictionsDetected) {
+      catalog = await glovoStoreCatalog(store, catalogQueries, location, {
         requireEligibility,
-        queryLimit: 6,
+        queryLimit: Math.max(1, catalogQueries.length),
         concurrency: 1,
-      }));
-    } catch (error) {
-      failedCatalogs += 1;
-      catalogErrors.push(error);
+      });
     }
+    return { store, menu, catalog };
+  });
+  for (const outcome of menuOutcomes) {
+    if (outcome.status === "rejected") {
+      failedCatalogs += 1;
+      catalogErrors.push(outcome.reason);
+      continue;
+    }
+    fullMenus.push(outcome.value);
+    if (outcome.value.catalog) catalogs.push(outcome.value.catalog);
   }
-  if (stores.length && !catalogs.length) {
+  if (stores.length && !fullMenus.length) {
     if (catalogErrors.some((error) => error?.code === "RATE_LIMITED")) {
       throw new CliError("Glovo temporarily rate-limited catalog search; wait before retrying", "RATE_LIMITED", {
         discoveredStores: stores.length,
@@ -350,7 +566,8 @@ async function collectGlovo(intent, flags) {
     });
   }
   const directOffers = fulfilled.flatMap((result) => result.value.offers ?? []);
-  const allOffers = [...directOffers, ...catalogs.flatMap((catalog) => catalog.offers)];
+  const menuOffers = fullMenus.flatMap(({ store, menu }) => glovoMenuOffers(store, menu, { requireEligibility }));
+  const allOffers = [...directOffers, ...menuOffers, ...catalogs.flatMap((catalog) => catalog.offers)];
   const discovered = [...new Map(allOffers.map((offer) => [
     `${offer.merchant?.id}:${offer.source?.storeProductId ?? offer.source?.productExternalId ?? offer.item?.id}`,
     {
@@ -361,22 +578,30 @@ async function collectGlovo(intent, flags) {
       ...(parsed.deliveryTime === "scheduled" ? { fulfilment: { requestedAt: parsed.scheduledAt, timeZone: parsed.timeZone, status: "unverified", source: "glovo-scheduled-search" } } : {}),
     },
   ])).values()];
-  const enriched = await enrichGlovoOffers(discovered);
   return {
-    offers: enriched,
+    offers: discovered,
     providerMeta: {
-      strategy: "merchant-discovery-then-catalog-search",
+      strategy: "merchant-discovery-then-complete-menu-scan",
       discoveryQueries,
       failedDiscoveryQueries: discoveryFailures.length,
       rateLimitedDiscoveryQueries: discoveryFailures.filter((result) => result.reason?.code === "RATE_LIMITED").length,
       catalogQueries,
-      discoveredStores: stores.length,
-      searchedStores: catalogs.length,
-      catalogProducts: catalogs.reduce((sum, catalog) => sum + catalog.products.length, 0),
+      discoveredStores: allStores.length,
+      searchedStores: fullMenus.length,
+      catalogProducts: menuOffers.length,
       failedCatalogs,
       rateLimitedCatalogs: catalogErrors.filter((error) => error?.code === "RATE_LIMITED").length,
       failedCatalogQueries: catalogs.reduce((sum, catalog) => sum + catalog.failedQueries, 0),
-      partial: discoveryFailures.length > 0 || failedCatalogs > 0 || catalogs.some((catalog) => catalog.failedQueries > 0),
+      retrievalPlan: flags.retrievalPlan ?? null,
+      deliveryLocation: {
+        latitude: location.latitude,
+        longitude: location.longitude,
+        postcode: location.postcode ?? null,
+        city: location.city ?? null,
+        source: "glovo-saved-address",
+      },
+      partial: discoveryFailures.length > 0 || failedCatalogs > 0 || stores.length < allStores.length
+        || flags.retrievalPlan?.complete === false || catalogs.some((catalog) => catalog.failedQueries > 0),
       eligibilityRequired: catalogs.filter((catalog) => catalog.eligibility).map((catalog) => ({
         merchantId: catalog.store.id,
         merchantName: catalog.store.name,
@@ -389,37 +614,41 @@ async function collectGlovo(intent, flags) {
 
 async function collectUberEats(intent, flags) {
   const parsed = parseIntent(intent);
-  const itemFallbackQueries = (flags.shoppingItems ?? []).flatMap((item) => providerSearchQueries(parseIntent(item.intent)));
-  const queries = mergedQueries(
-    [...(flags.discoveryQueries ?? []), ...(flags.catalogQueries ?? [])],
-    [...itemFallbackQueries, ...providerSearchQueries(parsed)],
-  );
+  const discoveryQueries = flags.retrievalPlan?.discovery?.queries?.length
+    ? flags.retrievalPlan.discovery.queries
+    : mergedQueries(flags.discoveryQueries, providerSearchQueries(parsed), 24);
+  const catalogQueries = flags.retrievalPlan?.catalog?.queries?.length
+    ? flags.retrievalPlan.catalog.queries : mergedQueries(flags.catalogQueries, providerSearchQueries(parsed), 24);
+  const queries = mergedQueries(discoveryQueries, catalogQueries, 48);
   const menuCache = new Map();
   const storeCache = new Map();
   const results = await settleConcurrent(queries, 2, (query) => searchUberEats(query, {
     limit: flags.limit,
     scheduledAt: parsed.scheduledAt,
     timeZone: parsed.timeZone,
-    storeLimit: Math.max(1, Math.min(4, Number(flags.stores ?? 3))),
+    storeLimit: Math.max(1, Math.min(60, Number(flags.stores ?? 60))),
     concurrency: 2,
+    expandStores: false,
     menuCache,
     storeCache,
   }));
   const fulfilled = results.filter((result) => result.status === "fulfilled");
   if (!fulfilled.length) throw results[0].reason;
   const failures = results.filter((result) => result.status === "rejected");
-  const crossCatalogQueries = mergedQueries(
-    flags.catalogQueries,
-    (flags.shoppingItems ?? []).flatMap((item) => item.catalogQueries),
-  );
+  const crossCatalogQueries = catalogQueries;
   let crossCatalog = { offers: [], searchedStores: 0, failedStores: 0, rateLimitedStores: 0 };
   let crossCatalogError = null;
-  if ((flags.shoppingItems?.length ?? 0) > 1 && storeCache.size && crossCatalogQueries.length) {
+  if (storeCache.size) {
     try {
-      crossCatalog = await expandUberEatsCatalogs(storeCache.values(), crossCatalogQueries, {
+      const priorityStoreIds = fulfilled.flatMap((result) => result.value.offers ?? [])
+        .map((offer) => offer.merchant?.id).filter(Boolean);
+      crossCatalog = await expandUberEatsCatalogs(storeCache.values(), [""], {
         menuCache,
-        storeLimit: Math.max(1, Math.min(4, Number(flags.stores ?? 3))),
-        concurrency: 2,
+        storeLimit: Math.max(1, Math.min(60, Number(flags.stores ?? 60))),
+        concurrency: 4,
+        scheduledAt: parsed.scheduledAt,
+        timeZone: parsed.timeZone,
+        priorityStoreIds,
       });
     } catch (error) { crossCatalogError = error; }
   }
@@ -428,10 +657,13 @@ async function collectUberEats(intent, flags) {
       ...offer,
       ...(parsed.deliveryTime === "scheduled" ? { fulfilment: { requestedAt: parsed.scheduledAt, timeZone: parsed.timeZone, status: "candidate", source: "uber-scheduled-search" } } : {}),
     }])).values()];
+  let deliveryLocation = null;
+  try { deliveryLocation = uberEatsDraftDeliveryLocation(await uberEatsCarts()); }
+  catch { /* Search remains usable when there is no readable draft location. */ }
   return {
     offers,
     providerMeta: {
-      strategy: "bounded-query-and-shared-menu-expansion",
+      strategy: "complete-planned-search-and-prioritized-full-menu-expansion",
       queries,
       completedQueries: fulfilled.length,
       failedQueries: failures.length,
@@ -443,7 +675,13 @@ async function collectUberEats(intent, flags) {
       crossCatalogRateLimitedStores: crossCatalog.rateLimitedStores,
       crossCatalogOffers: crossCatalog.offers.length,
       crossCatalogError: crossCatalogError?.code ?? null,
-      partial: failures.length > 0 || crossCatalog.failedStores > 0 || Boolean(crossCatalogError),
+      discoveredStores: storeCache.size,
+      unexpandedStoreCards: Math.max(0, storeCache.size - crossCatalog.searchedStores),
+      catalogQueries: crossCatalogQueries,
+      retrievalPlan: flags.retrievalPlan ?? null,
+      deliveryLocation,
+      partial: failures.length > 0 || crossCatalog.failedStores > 0 || Boolean(crossCatalogError)
+        || flags.retrievalPlan?.complete === false,
     },
   };
 }
@@ -585,6 +823,12 @@ export async function runOrderScout(argv) {
     const accounts = publicAccountStatus(await loadAccounts());
     return writeOutput({
       name: "OrderScout",
+      version: packageJson.version,
+      workflowContract: "llm-comparison-v3",
+      requiredTools: [
+        "orderscout_search_begin", "orderscout_candidates", "orderscout_select_candidates",
+        "orderscout_review_provider", "orderscout_quote_comparison", "orderscout_results",
+      ],
       country: "ES",
       providers: Object.values(PROVIDERS),
       accounts,
@@ -676,8 +920,17 @@ export async function runOrderScout(argv) {
       const shoppingItems = shoppingItemsFlag(flags);
       const explicitDiscoveryQueries = stringArrayFlag(flags, "discovery-queries");
       const explicitCatalogQueries = stringArrayFlag(flags, "catalog-queries");
-      const discoveryQueries = mergedQueries(explicitDiscoveryQueries, shoppingItems.flatMap((item) => item.discoveryQueries));
-      const catalogQueries = mergedQueries(explicitCatalogQueries, shoppingItems.flatMap((item) => item.catalogQueries));
+      const parsedIntent = parseIntent(intent);
+      const fallback = providerSearchQueries(parsedIntent);
+      const retrievalPlan = planProviderRetrieval({
+        discoveryQueries: explicitDiscoveryQueries.length ? explicitDiscoveryQueries : fallback,
+        catalogQueries: explicitCatalogQueries.length ? explicitCatalogQueries : fallback,
+        shoppingItems,
+        discoveryBudget: 24,
+        catalogBudget: 24,
+      });
+      const discoveryQueries = retrievalPlan.discovery.queries;
+      const catalogQueries = retrievalPlan.catalog.queries;
       const semanticMode = flags["semantic-mode"] === "llm" || flags.agent ? "llm" : "deterministic";
       const started = await startSearch(intent, {
         objective: flags.objective,
@@ -689,12 +942,13 @@ export async function runOrderScout(argv) {
           semanticMode,
           discoveryQueries,
           catalogQueries,
+          retrievalPlan,
         },
       });
       let result = started;
       if (!flags["skip-api"]) {
         await collectAllProviders(started.search.id, started.apiProviders, intent, {
-          ...flags, discoveryQueries, catalogQueries, shoppingItems, semanticMode,
+          ...flags, discoveryQueries, catalogQueries, shoppingItems, semanticMode, retrievalPlan,
         });
         result = { ...started, results: compactSearchResult(await searchResults(started.search.id), flags) };
       }
@@ -724,8 +978,12 @@ export async function runOrderScout(argv) {
       const [searchId] = args;
       return writeOutput(await selectCandidates(searchId, jsonFlag(flags, "json")), flags);
     }
+    if (action === "review") {
+      const [searchId, provider] = args;
+      return writeOutput(await reviewProvider(searchId, provider, flags.disposition, flags.reason), flags);
+    }
     if (action === "results" || action === "show") return writeOutput(compactSearchResult(await searchResults(args[0]), flags), flags);
-    throw new CliError("Use `orderscout search begin|ingest|error|candidates|select|results`");
+    throw new CliError("Use `orderscout search begin|ingest|error|candidates|select|review|results`");
   }
 
   if (command === "quote" && rest[0] === "record") {
@@ -734,6 +992,13 @@ export async function runOrderScout(argv) {
 
   if (command === "eligibility" && rest[0] === "confirm") {
     return writeOutput(await confirmEligibility(rest[1], rest[2], booleanFlag(flags, "confirmed")), flags);
+  }
+
+  if (command === "comparison" && rest[0] === "quote") {
+    return writeOutput(await quoteSelectedProviderComparison(rest[1], {
+      customizations: jsonFlag(flags, "customizations", {}),
+      allergenReviewed: booleanFlag(flags, "allergen-reviewed") === true,
+    }), flags);
   }
 
   if (command === "basket") {
@@ -755,20 +1020,27 @@ export async function runOrderScout(argv) {
       return writeOutput({ provider: offer.provider, opened: !flags["no-open"], url, submitted: false }, flags);
     }
     assertAllergenReview(search, flags);
-    if (offer.provider === "glovo") {
-      if (action === "checkout") {
-        let basketId = offer.basket?.id;
-        if (!basketId) {
-          const baskets = await glovoBaskets();
-          const basket = baskets.baskets.find((entry) => String(entry.storeId) === String(offer.source?.storeId));
-          basketId = basket?.basketId ?? basket?.id;
-        }
-        if (!basketId) throw new CliError("Create this Glovo basket before requesting checkout", "BASKET_REQUIRED");
-        const quoted = await quoteGlovoBasket(basketId, {
-          scheduledAt: search.fulfilment?.requestedAt, timeZone: search.fulfilment?.timeZone,
+    if (action === "checkout") {
+      const customizations = jsonFlag(flags, "customizations");
+      const basket = offer.basket?.id
+        ? offer.basket
+        : await createBasketForOffer(search, offer, { customizations });
+      if (!offer.basket?.id) {
+        await recordBasket(searchId, offerId, {
+          provider: offer.provider,
+          id: String(basket.id),
+          ...(basket.fulfilment ? { fulfilment: basket.fulfilment } : {}),
         });
-        return writeOutput(await saveCheckoutResult(searchId, offerId, { ...quoted, fulfilment: checkoutFulfilment(quoted, offer) }, quoted.pricing), flags);
       }
+      const reviewed = await quoteBasketForOffer(search, offer, basket);
+      return writeOutput(await saveCheckoutResult(
+        searchId,
+        offerId,
+        reviewed.quoted,
+        reviewed.pricing,
+      ), flags);
+    }
+    if (offer.provider === "glovo") {
       const result = await createGlovoBasket(offer, { prepareOnly: action === "prepare", customizations: jsonFlag(flags, "customizations") });
       if (action === "create") {
         const id = result.basket?.basketId ?? result.basket?.id;
@@ -777,19 +1049,6 @@ export async function runOrderScout(argv) {
       return writeOutput(result, flags);
     }
     if (offer.provider === "ubereats") {
-      if (action === "checkout") {
-        let id = offer.basket?.id;
-        if (!id) {
-          const carts = await uberEatsCarts();
-          const draft = carts.draftOrders.find((entry) => String(entry.storeUuid ?? entry.storeUUID) === String(offer.source?.storeUuid));
-          id = draft?.uuid ?? draft?.draftOrderUUID ?? draft?.draftOrderUuid;
-        }
-        if (!id) throw new CliError("Create this Uber Eats basket before requesting checkout", "BASKET_REQUIRED");
-        const quoted = await quoteUberEatsBasket(id, {
-          scheduledAt: search.fulfilment?.requestedAt, timeZone: search.fulfilment?.timeZone,
-        });
-        return writeOutput(await saveCheckoutResult(searchId, offerId, { ...quoted, fulfilment: checkoutFulfilment(quoted, offer) }, quoted.pricing), flags);
-      }
       const result = await createUberEatsBasket(offer, {
         prepareOnly: action === "prepare", customizations: jsonFlag(flags, "customizations"),
         scheduledAt: search.fulfilment?.requestedAt, timeZone: search.fulfilment?.timeZone,
@@ -804,11 +1063,6 @@ export async function runOrderScout(argv) {
     const source = offer.source;
     if (!source?.planId || !Number.isInteger(source.candidateIndex)) {
       throw new CliError("Just Eat offer is missing its source plan", "SOURCE_PLAN_MISSING");
-    }
-    if (action === "checkout") {
-      const quote = await runLegacyJustEat(["order", "quote", source.planId, "--agent"]);
-      const result = { provider: "justeat", offerId, quote, fulfilment: offer.basket?.fulfilment ?? offer.fulfilment, submitted: false };
-      return writeOutput(await saveCheckoutResult(searchId, offerId, result, justEatPricing(result)), flags);
     }
     const args = ["order", "prepare", source.planId, "--candidate", String(source.candidateIndex), "--agent"];
     if (offer.lines?.length) {
@@ -897,7 +1151,7 @@ export async function runOrderScout(argv) {
   if (command === "ubereats") {
     const [action, ...args] = rest;
     if (action === "me") return writeOutput(await uberEatsMe(), flags);
-    if (action === "carts") return writeOutput(await uberEatsCarts(), flags);
+    if (action === "carts") return writeOutput(summarizeUberEatsCarts(await uberEatsCarts()), flags);
     if (action === "search") return writeOutput(await searchUberEats(args.join(" "), { raw: Boolean(flags.raw), limit: flags.limit }), flags);
     if (action === "menu") return writeOutput(await uberEatsMenu(args[0], { raw: Boolean(flags.raw) }), flags);
     throw new CliError("Use `orderscout ubereats me|search|menu|carts`");

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { collectUberStores, createUberEatsBasket, expandUberEatsCatalogs, normalizeUberSearch, quoteUberEatsBasket, searchUberEats, uberEatsInternals, uberEatsMe, uberEatsOrderConfirmation } from "../src/ubereats.js";
+import { collectUberStores, createUberEatsBasket, expandUberEatsCatalogs, normalizeUberSearch, quoteUberEatsBasket, searchUberEats, summarizeUberEatsCarts, uberEatsDraftDeliveryLocation, uberEatsInternals, uberEatsMe, uberEatsOrderConfirmation } from "../src/ubereats.js";
 
 test("Uber Eats login uses the current getUserV1 account contract", async () => {
   const account = await uberEatsMe({
@@ -166,6 +166,41 @@ test("Uber Eats basket prepare uses createDraftOrderV2 shape without mutation", 
   assert.equal(prepared.payload.isMulticart, true);
   assert.equal(prepared.payload.shoppingCartItems[0].quantity, 2);
   assert.equal(prepared.payload.shoppingCartItems[0].price, 445);
+});
+
+test("Uber Eats cart summaries expose useful basket data without address, account, or payment PII", () => {
+  const carts = { draftOrders: [{
+    uuid: "draft-1",
+    consumerUuid: "consumer-secret",
+    paymentProfileUUID: "payment-secret",
+    store: { storeUuid: "store-1", title: "Test Market" },
+    shoppingCartItems: [{ title: "Mineral water", quantity: 2 }],
+    deliveryAddress: {
+      address1: "Secret street 123",
+      latitude: 36.51,
+      longitude: -4.84,
+      city: "Marbella",
+      postalCode: "29603",
+    },
+  }] };
+  const summary = summarizeUberEatsCarts(carts);
+  assert.deepEqual(summary.draftOrders[0], {
+    id: "draft-1",
+    store: { id: "store-1", name: "Test Market" },
+    items: [{ name: "Mineral water", quantity: 2 }],
+    itemCount: 2,
+    state: null,
+    createdAt: null,
+    deliveryLocationSelected: true,
+  });
+  assert.doesNotMatch(JSON.stringify(summary), /Secret street|consumer-secret|payment-secret|36\.51|-4\.84|29603/);
+  assert.deepEqual(uberEatsDraftDeliveryLocation(carts), {
+    latitude: 36.51,
+    longitude: -4.84,
+    city: "Marbella",
+    postcode: "29603",
+    source: "ubereats-draft-delivery-location",
+  });
 });
 
 test("Uber Eats basket prepare preserves distinct meal lines", async () => {

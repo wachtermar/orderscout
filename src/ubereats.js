@@ -322,8 +322,10 @@ async function mapConcurrent(values, concurrency, mapper) {
 }
 
 export async function expandUberEatsCatalogs(stores, queries, options = {}) {
+  const priorityStoreIds = new Set((options.priorityStoreIds ?? []).map(String));
   const selected = [...stores]
-    .sort((left, right) => Number(right.queryHits ?? 0) - Number(left.queryHits ?? 0)
+    .sort((left, right) => Number(priorityStoreIds.has(String(right.id))) - Number(priorityStoreIds.has(String(left.id)))
+      || Number(right.queryHits ?? 0) - Number(left.queryHits ?? 0)
       || Number(right.rating ?? 0) - Number(left.rating ?? 0))
     .slice(0, Math.max(1, Number(options.storeLimit ?? 3)));
   const outcomes = await mapConcurrentOutcomes(selected, Number(options.concurrency ?? 2), async (store) => {
@@ -485,6 +487,80 @@ export async function uberEatsMe(options = {}) {
 export async function uberEatsCarts(options = {}) {
   const payload = await request("getDraftOrdersByEaterUuidV1", {}, { ...options, auth: true });
   return { draftOrders: payload.draftOrders ?? payload.orders ?? [] };
+}
+
+function draftItems(draft) {
+  const candidates = [
+    draft?.shoppingCartItems,
+    draft?.shoppingCart?.shoppingCartItems,
+    draft?.cart?.shoppingCartItems,
+    draft?.cart?.items,
+    draft?.items,
+  ];
+  const items = candidates.find(Array.isArray) ?? [];
+  return items.map((entry) => ({
+    name: entry?.title ?? entry?.name ?? entry?.item?.title ?? entry?.item?.name ?? "Item",
+    quantity: Number(entry?.quantity ?? entry?.count ?? 1),
+  })).filter((entry) => entry.name && Number.isFinite(entry.quantity) && entry.quantity > 0);
+}
+
+function draftStore(draft) {
+  const store = draft?.store ?? draft?.shoppingCart?.store ?? draft?.cart?.store ?? {};
+  return {
+    id: draft?.storeUuid ?? draft?.storeUUID ?? store?.storeUuid ?? store?.uuid ?? store?.id ?? null,
+    name: store?.title ?? store?.name ?? draft?.storeName ?? null,
+  };
+}
+
+function finiteCoordinate(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function findDeliveryLocation(value, depth = 0, deliveryBranch = false) {
+  if (!value || typeof value !== "object" || depth > 8) return null;
+  const latitude = deliveryBranch ? finiteCoordinate(value.latitude ?? value.lat) : null;
+  const longitude = deliveryBranch ? finiteCoordinate(value.longitude ?? value.lng ?? value.lon) : null;
+  if (latitude !== null && longitude !== null && Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180) {
+    return {
+      latitude,
+      longitude,
+      city: value.city ?? value.cityName ?? null,
+      postcode: value.postalCode ?? value.postcode ?? value.zipCode ?? null,
+      source: "ubereats-draft-delivery-location",
+    };
+  }
+  for (const [key, child] of Object.entries(value)) {
+    const match = findDeliveryLocation(child, depth + 1, deliveryBranch || /(delivery|dropoff|address|location|destination)/i.test(key));
+    if (match) return match;
+  }
+  return null;
+}
+
+export function uberEatsDraftDeliveryLocation(carts) {
+  for (const draft of carts?.draftOrders ?? []) {
+    const location = findDeliveryLocation(draft);
+    if (location) return location;
+  }
+  return null;
+}
+
+export function summarizeUberEatsCarts(carts) {
+  return {
+    draftOrders: (carts?.draftOrders ?? []).map((draft) => {
+      const items = draftItems(draft);
+      return {
+        id: draft?.uuid ?? draft?.draftOrderUUID ?? draft?.draftOrderUuid ?? null,
+        store: draftStore(draft),
+        items,
+        itemCount: items.reduce((sum, item) => sum + item.quantity, 0),
+        state: draft?.state ?? draft?.status ?? null,
+        createdAt: draft?.createdAt ?? draft?.createdTime ?? null,
+        deliveryLocationSelected: Boolean(findDeliveryLocation(draft)),
+      };
+    }),
+  };
 }
 
 export async function createUberEatsBasket(offer, options = {}) {
@@ -673,4 +749,4 @@ export async function placeUberEatsOrder(draftOrderUuid, quote, options = {}) {
   }
 }
 
-export const uberEatsInternals = { apiHeaders, checkoutPayloadTypes: CHECKOUT_PAYLOAD_TYPES, collectCatalog, itemPromotion, menuOffers: uberEatsMenuOffers, mergePromotions, price, request, storeValue, storeWidePromotion, uberEatsScheduleAvailability };
+export const uberEatsInternals = { apiHeaders, checkoutPayloadTypes: CHECKOUT_PAYLOAD_TYPES, collectCatalog, draftItems, findDeliveryLocation, itemPromotion, menuOffers: uberEatsMenuOffers, mergePromotions, price, request, storeValue, storeWidePromotion, uberEatsScheduleAvailability };

@@ -14,6 +14,8 @@ The repeatable matrix in `test/query-matrix.test.js` exercises both sides of tha
 - one through twelve independent shopping lines, candidate paging over hundreds of records, same-store selection, quantities, deals, memberships, exact totals, hard budgets, scheduled fulfilment, and fail-closed invalid bundles;
 - the invariant that an uninspected LLM candidate pool can never become a false “no match.”
 
+`test/agent-scenario-corpus.test.js` adds 456 realistic whole-request scenarios spanning meals for one to twelve people, groceries, pharmacies and personal care, drinks, household goods, restricted catalogs, multiple independent items, hard budgets, deals, and scheduled delivery. Every scenario is exercised through a three-provider selection-and-exact-quote pipeline (1,368 provider paths), with human-labelled semantic and safety oracles instead of production keyword filters.
+
 Run it with:
 
 ```bash
