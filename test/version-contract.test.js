@@ -11,6 +11,7 @@ test("package, MCP, and plugin pins stay on one public release", async () => {
   const lock = readJson("../package-lock.json");
   const plugin = readJson("../plugins/orderscout/.codex-plugin/plugin.json");
   const mcp = readJson("../plugins/orderscout/.mcp.json");
+  const skill = readFileSync(new URL("../plugins/orderscout/skills/order-with-orderscout/SKILL.md", import.meta.url), "utf8");
   const initialized = await handleOrderScoutMcpMessage({ jsonrpc: "2.0", id: 1, method: "initialize" });
 
   assert.equal(lock.version, packageJson.version);
@@ -18,4 +19,5 @@ test("package, MCP, and plugin pins stay on one public release", async () => {
   assert.equal(plugin.version.split("+")[0], packageJson.version);
   assert.ok(mcp.mcpServers.orderscout.args.includes(`github:wachtermar/orderscout#v${packageJson.version}`));
   assert.equal(initialized.result.serverInfo.version, packageJson.version);
+  assert.ok(skill.includes(`requires \`orderscout_context.version: ${packageJson.version}\``));
 });

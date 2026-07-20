@@ -127,9 +127,11 @@ cd orderscout
 npm install
 npm link
 npm run check
+npm run test:live
 ```
 
 The plugin is in [`plugins/orderscout`](plugins/orderscout), and its marketplace is [`.agents/plugins/marketplace.json`](.agents/plugins/marketplace.json).
+The normal suite is provider-independent; the privacy-safe production canary and its opt-in draft mode are documented in [`docs/live-testing.md`](docs/live-testing.md).
 
 ## CLI
 

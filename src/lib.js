@@ -40,6 +40,44 @@ function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function providerErrorDetails(body) {
+  if (!body || typeof body !== "object") return {};
+  const entries = Object.entries(body);
+  const value = (...names) => {
+    const expected = new Set(names.map((name) => name.toLowerCase()));
+    const match = entries.find(([key]) => expected.has(key.toLowerCase()));
+    return match?.[1];
+  };
+  const shortString = (input) => typeof input === "string" && input.trim()
+    ? input.trim().slice(0, 300)
+    : undefined;
+  const providerErrorType = shortString(value("errorType", "type"));
+  const providerSubErrorType = shortString(value("subErrorType", "subType"));
+  const providerMessage = shortString(value("message", "errorMessage", "title"));
+  const providerCode = shortString(value("code", "errorCode"));
+  const isOrderableValue = value("isOrderable");
+  const serviceType = shortString(value("serviceType"));
+  return {
+    ...(providerErrorType ? { providerErrorType } : {}),
+    ...(providerSubErrorType ? { providerSubErrorType } : {}),
+    ...(providerMessage ? { providerMessage } : {}),
+    ...(providerCode ? { providerCode } : {}),
+    ...(typeof isOrderableValue === "boolean" ? { isOrderable: isOrderableValue } : {}),
+    ...(serviceType ? { serviceType } : {}),
+  };
+}
+
+function httpErrorCode(status, details) {
+  if (status === 429) return "RATE_LIMITED";
+  if (details.isOrderable === false || details.providerSubErrorType === "PartnerThrottled") {
+    return "MERCHANT_UNAVAILABLE";
+  }
+  if (details.providerErrorType === "RestaurantDoesNotDeliverToLocation") {
+    return "DELIVERY_UNAVAILABLE";
+  }
+  return "HTTP_ERROR";
+}
+
 export async function requestJson(url, options = {}, fetchImpl = fetch) {
   const {
     headers: optionHeaders,
@@ -66,7 +104,13 @@ export async function requestJson(url, options = {}, fetchImpl = fetch) {
         signal: AbortSignal.timeout(timeout),
       });
       if (response.ok) return await response.json();
-      await response.arrayBuffer();
+      const responseText = await response.text();
+      let responseBody;
+      try {
+        responseBody = responseText ? JSON.parse(responseText) : null;
+      } catch {
+        responseBody = null;
+      }
       if ((response.status === 429 || response.status >= 500) && attempt < maxAttempts - 1) {
         const retryAfter = Number(response.headers.get("retry-after"));
         const delay = Number.isFinite(retryAfter)
@@ -75,12 +119,15 @@ export async function requestJson(url, options = {}, fetchImpl = fetch) {
         await sleep(delay);
         continue;
       }
+      const providerDetails = providerErrorDetails(responseBody);
+      const code = httpErrorCode(response.status, providerDetails);
       throw new CliError(
         response.status === 429 ? "Just Eat rate limit exceeded" : `Just Eat returned HTTP ${response.status}`,
-        response.status === 429 ? "RATE_LIMITED" : "HTTP_ERROR",
+        code,
         {
-        status: response.status,
-        url: String(url),
+          status: response.status,
+          url: String(url),
+          ...providerDetails,
         },
       );
     } catch (error) {
@@ -383,6 +430,14 @@ export function normalizeSavedAddresses(payload) {
   });
 }
 
+export function hasUsableCoordinates(value) {
+  const latitude = value?.latitude;
+  const longitude = value?.longitude;
+  return latitude !== null && latitude !== undefined && latitude !== ""
+    && longitude !== null && longitude !== undefined && longitude !== ""
+    && Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude));
+}
+
 export async function resolveSavedLocation(token, index = 0, fetchImpl = fetch) {
   const payload = await accountGet("addresses", token, fetchImpl);
   const addresses = normalizeSavedAddresses(payload);
@@ -390,9 +445,7 @@ export async function resolveSavedLocation(token, index = 0, fetchImpl = fetch) 
   if (!address) throw new CliError(`Saved address ${index} does not exist`, "ADDRESS_NOT_FOUND", {
     available: addresses.length,
   });
-  if (address.latitude !== null && address.latitude !== undefined
-    && address.longitude !== null && address.longitude !== undefined
-    && Number.isFinite(Number(address.latitude)) && Number.isFinite(Number(address.longitude))) {
+  if (hasUsableCoordinates(address)) {
     return {
       source: "saved-address",
       addressIndex: index,

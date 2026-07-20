@@ -303,7 +303,8 @@ function storeFromCard(card, location) {
     .find((event) => event?.name === "shop_impressions.loaded")?.data ?? {};
   const availabilityStatus = String(query.shop_availability_status ?? impression.shopAvailabilityStatus ?? "").toUpperCase();
   const open = availabilityStatus === "OPEN" || availabilityStatus === "ASAP" || impression.shopIsOpen === "true";
-  const schedulable = availabilityStatus === "SCHEDULABLE" || Boolean(query.opening_or_schedulable_time ?? impression.openingOrSchedulableTime);
+  const schedulable = availabilityStatus === "SCHEDULABLE"
+    || query.shop_is_schedulable === "true" || impression.shopIsSchedulable === "true";
   const promotionTypes = [...new Set(String(query.shop_promotion_types ?? impression.shopPromotionTypes ?? "")
     .split(",").map((value) => value.trim().toUpperCase()).filter(Boolean))];
   const promotionIds = [...new Set(String(query.shop_promotion_id ?? impression.shopPromotionId ?? "")
@@ -384,7 +385,7 @@ function offersFromSearch(payload, location) {
           item: { id, externalId: query.product_external_id ?? null, storeProductId: query.store_product_id ?? null, name: value.data?.name?.text ?? value.data?.name, unitPrice: finalPrice },
           quantity: 1,
           etaMinutes: store.etaMinutes?.min ?? null,
-          available: true,
+          available: store.open === true,
           pricing: {
             currency: "EUR",
             originalSubtotal: deal.originalPrice,
@@ -848,7 +849,10 @@ function glovoBasketLineMismatch(basket, lines) {
 
 function assertGlovoBasketLines(basket, lines) {
   const mismatch = glovoBasketLineMismatch(basket, lines);
-  if (!mismatch) return;
+  if (!mismatch) return {
+    verified: true,
+    itemCount: (basket?.products ?? []).reduce((sum, product) => sum + productQuantity(product), 0),
+  };
   throw new CliError(
     "Glovo did not accept every configured basket item; checkout pricing for this partial basket is invalid",
     "BASKET_CONTENT_MISMATCH",
@@ -956,7 +960,9 @@ export async function quoteGlovoBasket(basketId, options = {}) {
   const basket = await request(`/v1/authenticated/customers/${me.id}/baskets/${encodeURIComponent(basketId)}`, {
     auth: true, location, fetchImpl: options.fetchImpl,
   });
-  if (options.expectedLines?.length) assertGlovoBasketLines(basket, options.expectedLines);
+  const remoteBasketVerification = options.expectedLines?.length
+    ? assertGlovoBasketLines(basket, options.expectedLines)
+    : null;
   const products = (basket.products ?? []).map((product) => ({
     id: product.ids?.id ?? "", storeProductId: product.ids?.storeProductId ?? "", externalId: product.ids?.externalId ?? "",
     quantity: product.quantity?.increments ?? 0, name: product.name ?? "", displayedPrice: product.price?.final?.major ?? 0,
@@ -1015,7 +1021,10 @@ export async function quoteGlovoBasket(basketId, options = {}) {
       selectedWindow: { value: selected.value, label: selected.label }, source: "glovo-checkout-template",
     };
   }
-  return { provider: "glovo", basketId, quote, fulfilment, pricing: normalizeGlovoQuote(quote), submitted: false };
+  return {
+    provider: "glovo", basketId, quote, fulfilment, pricing: normalizeGlovoQuote(quote),
+    remoteBasketVerification, submitted: false,
+  };
 }
 
 export function glovoCheckoutUrl(offer) {

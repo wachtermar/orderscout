@@ -11,6 +11,46 @@ function queryList(value) {
   return Array.isArray(value) ? value : [];
 }
 
+const PROVIDER_DISCOVERY_ALIAS_GROUPS = {
+  glovo: [
+    ["farmacia", "parafarmacia", "pharmacy"],
+    ["supermercado", "supermarket", "grocery"],
+    ["tienda", "shop", "store"],
+    ["estanco", "vape", "vaper", "vape shop"],
+    ["desayuno", "breakfast", "brunch"],
+    ["tailandes", "tailandesa", "thai"],
+    ["saludable", "healthy"],
+    ["vegano", "vegana", "vegan"],
+    ["vegetariano", "vegetariana", "vegetarian"],
+  ],
+};
+
+/**
+ * Some provider search indexes use a different language than the visible
+ * storefront. Add independent provider-index aliases without changing the
+ * LLM's catalog terms or making any semantic relevance decision.
+ */
+export function expandProviderDiscoveryQueries(provider, queries, budget = 24) {
+  if (!Number.isInteger(budget) || budget < 0) throw new RangeError("Query budget must be a non-negative integer");
+  const result = [];
+  const seen = new Set();
+  const append = (query) => {
+    const value = String(query ?? "").trim().replace(/\s+/g, " ");
+    const key = queryKey(value);
+    if (!key || seen.has(key) || result.length >= budget) return;
+    seen.add(key);
+    result.push(value);
+  };
+  queryList(queries).forEach(append);
+  const normalizedInputs = new Set(result.map(queryKey));
+  for (const group of PROVIDER_DISCOVERY_ALIAS_GROUPS[provider] ?? []) {
+    const keys = group.map(queryKey);
+    if (!keys.some((alias) => normalizedInputs.has(alias))) continue;
+    group.forEach(append);
+  }
+  return result;
+}
+
 function itemId(item, index) {
   const value = String(item?.id ?? "").trim();
   return value || `item-${index + 1}`;

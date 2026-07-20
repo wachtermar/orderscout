@@ -6,6 +6,7 @@ import {
   discoverRestaurants,
   fetchMenu,
   filterMenu,
+  hasUsableCoordinates,
   normalizeMenu,
   normalizeRestaurants,
   normalizeSavedAddresses,
@@ -65,7 +66,7 @@ Usage:
   justeat menu <slug-or-url> [--search text] [--raw]
   justeat recommend <intent> [--at address] [--stores 12] [--limit 10] [--include-closed]
   justeat order show <plan-id>
-  justeat order prepare <plan-id> [--candidate 0|--optimized] [--lines JSON] [--modifiers JSON] [--create]
+  justeat order prepare <plan-id> [--candidate 0|--optimized] [--lines JSON] [--modifiers JSON] [--line-modifiers JSON] [--create]
   justeat order quote <plan-id>
   justeat order open <plan-id>
   justeat order compare <plan-id> [--top 3] [--create]
@@ -269,10 +270,19 @@ async function run(argv) {
         catch { throw new CliError("--lines must be a JSON array", "INVALID_LINES"); }
         if (!Array.isArray(explicitLines) || !explicitLines.length) throw new CliError("--lines must be a non-empty JSON array", "INVALID_LINES");
       }
+      let lineModifiers;
+      if (flags["line-modifiers"] !== undefined) {
+        try { lineModifiers = JSON.parse(String(flags["line-modifiers"])); }
+        catch { throw new CliError("--line-modifiers must be a JSON object keyed by candidate index", "INVALID_MODIFIERS"); }
+        if (!lineModifiers || typeof lineModifiers !== "object" || Array.isArray(lineModifiers)) {
+          throw new CliError("--line-modifiers must be a JSON object keyed by candidate index", "INVALID_MODIFIERS");
+        }
+      }
       const options = {
         quantity: flags.quantity,
         note: flags.note,
         modifiers: flags.modifiers,
+        lineModifiers,
         lines: explicitLines ?? optimizedLines,
         allergenReviewed: Boolean(flags["allergen-reviewed"]),
       };
@@ -308,6 +318,7 @@ async function run(argv) {
         planId,
         basketId: result.plan.remote.basketId,
         quote: flags.raw ? result.quote : normalizeCheckout(result.quote),
+        remoteBasketVerification: result.remoteBasketVerification,
       }, flags);
       return;
     }
@@ -362,7 +373,7 @@ async function run(argv) {
       const addressIndex = Number(flags["address-index"] ?? 0);
       const savedAddress = normalizeSavedAddresses(addressPayload)[addressIndex];
       if (!savedAddress) throw new CliError(`Saved address ${addressIndex} does not exist`, "ADDRESS_NOT_FOUND");
-      const hasCoordinates = Number.isFinite(Number(savedAddress.latitude)) && Number.isFinite(Number(savedAddress.longitude));
+      const hasCoordinates = hasUsableCoordinates(savedAddress);
       const resolved = hasCoordinates ? null : await resolveSavedLocation(token, addressIndex);
       const address = resolved ? {
         ...savedAddress,

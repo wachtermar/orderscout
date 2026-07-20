@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { collectUberStores, createUberEatsBasket, expandUberEatsCatalogs, normalizeUberSearch, quoteUberEatsBasket, searchUberEats, summarizeUberEatsCarts, uberEatsDraftDeliveryLocation, uberEatsInternals, uberEatsMe, uberEatsOrderConfirmation } from "../src/ubereats.js";
+import {
+  collectUberStores, createUberEatsBasket, expandUberEatsCatalogs, normalizeUberSearch, quoteUberEatsBasket,
+  searchUberEats, summarizeUberEatsCarts, uberEatsDraftDeliveryLocation, uberEatsInternals, uberEatsMe, uberEatsMenu,
+  uberEatsDeliveryAddressFromCookies, uberEatsOrderConfirmation, verifyUberEatsDraftLines,
+  verifyUberEatsDraftSchedule,
+} from "../src/ubereats.js";
 
 test("Uber Eats login uses the current getUserV1 account contract", async () => {
   const account = await uberEatsMe({
@@ -113,6 +118,52 @@ test("Uber Eats reuses one store menu across independent agent catalog queries",
   assert.equal(menuRequests, 1);
 });
 
+test("Uber Eats menu validates a scheduled local slot with the official time shape", async () => {
+  let requestBody;
+  const menu = await uberEatsMenu("store-1", {
+    scheduledAt: "2026-07-21T08:00:00.000Z",
+    timeZone: "Europe/Madrid",
+    cookieHeader: "sid=test",
+    fetchImpl: async (_url, options) => {
+      requestBody = JSON.parse(options.body);
+      return Response.json({ data: {
+        title: "Breakfast Store",
+        isOpen: true,
+        isWithinDeliveryRange: true,
+        closedMessage: "",
+        adaptedDeliveryHoursInfos: { timeRanges: { "2026-07-21": [{ startTime: 600, endTime: 630 }] } },
+        sections: [{ items: [{ uuid: "toast", title: "Toast", price: 800 }] }],
+      } });
+    },
+  });
+  assert.equal(requestBody.diningMode, "DELIVERY");
+  assert.deepEqual(requestBody.time, {
+    scheduled: true,
+    date: "2026-07-21",
+    startTime: 600,
+    startTimeMs: new Date("2026-07-21T08:00:00.000Z").getTime(),
+    endTime: 630,
+    deliveryType: "ASAP",
+  });
+  assert.equal(requestBody.cbType, "EATER_ENDORSED");
+  assert.equal(menu.isOpen, true);
+  assert.equal(menu.scheduledSlotAvailable, true);
+
+  const unavailable = await uberEatsMenu("store-2", {
+    scheduledAt: "2026-07-21T08:00:00.000Z",
+    timeZone: "Europe/Madrid",
+    cookieHeader: "sid=test",
+    fetchImpl: async () => Response.json({ data: {
+      title: "Unavailable Store",
+      isOpen: true,
+      isWithinDeliveryRange: true,
+      closedMessage: "Delivery unavailable",
+      adaptedDeliveryHoursInfos: { timeRanges: { "2026-07-21": [{ startTime: 600, endTime: 630 }] } },
+    } }),
+  });
+  assert.equal(unavailable.isOpen, false);
+});
+
 test("Uber Eats scans each candidate store once for independent multi-item needs", async () => {
   const menuCache = new Map([
     ["complete-store", Promise.resolve({ isOpen: true, items: [
@@ -160,12 +211,72 @@ test("Uber Eats distinguishes a 403 rate limit from an expired login", async () 
   }), { code: "RATE_LIMITED" });
 });
 
+test("Uber Eats does not misreport a rejected API payload as an expired login", async () => {
+  await assert.rejects(() => uberEatsInternals.request("createDraftOrderV2", {}, {
+    cookieHeader: "sid=test",
+    fetchImpl: async () => Response.json({ status: "failure", data: { code: "400", message: "status code error" } }),
+  }), (error) => {
+    assert.equal(error.code, "UBEREATS_API_ERROR");
+    assert.equal(error.details.upstreamCode, 400);
+    return true;
+  });
+  await assert.rejects(() => uberEatsInternals.request("getUserV1", {}, {
+    cookieHeader: "sid=test",
+    fetchImpl: async () => Response.json({ status: "failure", code: 3, message: "status code error" }),
+  }), { code: "AUTH_EXPIRED" });
+});
+
 test("Uber Eats basket prepare uses createDraftOrderV2 shape without mutation", async () => {
   const prepared = await createUberEatsBasket({ item: { name: "Water", unitPrice: 4.45 }, quantity: 2, source: { storeUuid: "store-1", itemUuid: "water-1", sectionUuid: "s", subsectionUuid: "ss", rawPrice: 445 } }, { prepareOnly: true });
   assert.equal(prepared.mutated, false);
   assert.equal(prepared.payload.isMulticart, true);
   assert.equal(prepared.payload.shoppingCartItems[0].quantity, 2);
   assert.equal(prepared.payload.shoppingCartItems[0].price, 445);
+  assert.equal(prepared.payload.shoppingCartItems[0].imageURL, null);
+  assert.equal(prepared.payload.shoppingCartItems[0].specialInstructions, "");
+  assert.equal(prepared.payload.shoppingCartItems[0].itemId, null);
+  assert.equal(prepared.payload.useCredits, true);
+  assert.deepEqual(prepared.payload.deliveryTime, { asap: true });
+  assert.equal(prepared.payload.deliveryType, "ASAP");
+  assert.equal(prepared.payload.currencyCode, "EUR");
+  assert.equal(prepared.payload.interactionType, "door_to_door");
+  assert.equal(prepared.payload.checkMultipleDraftOrdersCap, true);
+});
+
+test("Uber Eats schedules a created draft through updateDraftOrderV2", async () => {
+  const location = { latitude: 36.5, longitude: -4.8, address: { title: "Test" }, reference: "place-1", type: "uber_places" };
+  const cookieHeader = `sid=test; uev2.loc=${encodeURIComponent(JSON.stringify(location))}`;
+  const operations = [];
+  const bodies = [];
+  const result = await createUberEatsBasket({
+    item: { name: "Breakfast", unitPrice: 12.9 }, quantity: 1,
+    source: { storeUuid: "store-1", itemUuid: "breakfast-1", rawPrice: 1290 },
+  }, {
+    scheduledAt: "2026-07-21T08:00:00.000Z",
+    timeZone: "Europe/Madrid",
+    cookieHeader,
+    fetchImpl: async (url, options) => {
+      const operation = String(url).split("/").at(-1);
+      operations.push(operation);
+      bodies.push(JSON.parse(options.body));
+      if (operation === "createDraftOrderV2") return Response.json({ data: { draftOrder: { uuid: "draft-scheduled" } } });
+      return Response.json({ data: { draftOrder: { uuid: "draft-scheduled", targetDeliveryTimeRange: bodies.at(-1).targetDeliveryTimeRange } } });
+    },
+  });
+  assert.deepEqual(operations, ["createDraftOrderV2", "updateDraftOrderV2"]);
+  assert.deepEqual(bodies[0].deliveryTime, { asap: true });
+  assert.equal(bodies[0].targetDeliveryTimeRange, undefined);
+  assert.deepEqual(bodies[1].targetDeliveryTimeRange, {
+    scheduled: true,
+    date: "2026-07-21",
+    startTime: 600,
+    startTimeMs: new Date("2026-07-21T08:00:00.000Z").getTime(),
+    endTime: 630,
+    deliveryType: "ASAP",
+  });
+  assert.deepEqual(bodies[1].deliveryAddress, location);
+  assert.equal(result.scheduling.targetDeliveryTimeRange.startTime, 600);
+  assert.deepEqual(uberEatsDeliveryAddressFromCookies(cookieHeader), location);
 });
 
 test("Uber Eats cart summaries expose useful basket data without address, account, or payment PII", () => {
@@ -201,6 +312,56 @@ test("Uber Eats cart summaries expose useful basket data without address, accoun
     postcode: "29603",
     source: "ubereats-draft-delivery-location",
   });
+});
+
+test("Uber Eats remote basket verification requires every selected line and quantity", () => {
+  const carts = { draftOrders: [{
+    uuid: "draft-1",
+    shoppingCart: { items: [
+      { title: "Pad Thai Original", quantity: 1 },
+      { title: "Pad Thai Calle", quantity: 1 },
+      { title: "Water", quantity: 2 },
+    ] },
+  }] };
+  const expected = [
+    { item: { name: "Pad Thai Calle" }, quantity: 1 },
+    { item: { name: "Pad Thai Original" }, quantity: 1 },
+    { item: { name: "Water" }, quantity: 2 },
+  ];
+  assert.deepEqual(verifyUberEatsDraftLines(carts, "draft-1", expected), {
+    verified: true,
+    lines: [
+      { name: "pad thai calle", quantity: 1 },
+      { name: "pad thai original", quantity: 1 },
+      { name: "water", quantity: 2 },
+    ],
+    itemCount: 4,
+  });
+  assert.throws(() => verifyUberEatsDraftLines(carts, "draft-1", [
+    ...expected,
+    { item: { name: "Coca-Cola" }, quantity: 1 },
+  ]), { code: "REMOTE_BASKET_MISMATCH" });
+  assert.throws(() => verifyUberEatsDraftLines(carts, "missing", expected), { code: "REMOTE_BASKET_MISMATCH" });
+});
+
+test("Uber Eats scheduled draft verification requires the exact persisted local window", () => {
+  const carts = { draftOrders: [{
+    uuid: "draft-1",
+    targetDeliveryTimeRange: { scheduled: true, date: "2026-07-21", startTime: 600, endTime: 630 },
+  }] };
+  const verified = verifyUberEatsDraftSchedule(carts, "draft-1", "2026-07-21T08:00:00.000Z", "Europe/Madrid");
+  assert.equal(verified.verified, true);
+  assert.equal(verified.selectedWindow.startMinute, 600);
+  assert.throws(
+    () => verifyUberEatsDraftSchedule(carts, "draft-1", "2026-07-21T09:00:00.000Z", "Europe/Madrid"),
+    { code: "SCHEDULE_UNVERIFIED" },
+  );
+  assert.throws(() => verifyUberEatsDraftSchedule({ draftOrders: [{
+    uuid: "draft-1", targetDeliveryTimeRange: { scheduled: true, startTime: 600, endTime: 630 },
+  }] }, "draft-1", "2026-07-21T08:00:00.000Z", "Europe/Madrid"), { code: "SCHEDULE_UNVERIFIED" });
+  assert.throws(() => verifyUberEatsDraftSchedule({ draftOrders: [{
+    uuid: "draft-1", targetDeliveryTimeRange: { scheduled: true, date: "2026-07-21", startTime: 600, endTime: 645 },
+  }] }, "draft-1", "2026-07-21T08:00:00.000Z", "Europe/Madrid"), { code: "SCHEDULE_UNVERIFIED" });
 });
 
 test("Uber Eats basket prepare preserves distinct meal lines", async () => {
@@ -282,6 +443,33 @@ test("Uber Eats quote uses the current official checkout payload and normalizes 
   assert.equal(result.pricing.subtotal, 25.5);
   assert.equal(result.pricing.fees.delivery, 1.99);
   assert.equal(result.pricing.total, 28.74);
+  assert.equal(result.pricing.exact, true);
+});
+
+test("Uber Eats scheduled checkout is exact only after line and remote schedule verification", async () => {
+  const expectedLines = [{ item: { name: "Breakfast" }, quantity: 1 }];
+  const result = await quoteUberEatsBasket("draft-scheduled", {
+    scheduledAt: "2026-07-21T08:00:00.000Z",
+    timeZone: "Europe/Madrid",
+    expectedLines,
+    cookieHeader: "sid=synthetic",
+    fetchImpl: async (url) => {
+      const operation = String(url).split("/").at(-1);
+      if (operation === "getDraftOrdersByEaterUuidV1") return Response.json({ data: { draftOrders: [{
+        uuid: "draft-scheduled",
+        shoppingCart: { items: [{ title: "Breakfast", quantity: 1 }] },
+        targetDeliveryTimeRange: { scheduled: true, date: "2026-07-21", startTime: 600, endTime: 630 },
+      }] } });
+      return Response.json({ data: { checkoutPayloads: {
+        subtotal: { subtotal: { value: { amountE5: 1_290_000, currencyCode: "EUR" } } },
+        total: { total: { value: { amountE5: 1_699_000, currencyCode: "EUR" } } },
+      }, validationErrors: [] } });
+    },
+  });
+  assert.equal(result.remoteBasketVerification.verified, true);
+  assert.equal(result.scheduleVerification.verified, true);
+  assert.equal(result.fulfilment.status, "verified");
+  assert.equal(result.pricing.total, 16.99);
   assert.equal(result.pricing.exact, true);
 });
 

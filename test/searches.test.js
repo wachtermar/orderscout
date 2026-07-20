@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertAllergenReview, checkoutFulfilment, providerDiverseOffers, runConcurrentProviderTasks } from "../src/orderscout.js";
+import {
+  assertAllergenReview, checkoutFulfilment, completedSearchResponse, justEatLineModifierSelections,
+  providerDiverseOffers, runConcurrentProviderTasks,
+} from "../src/orderscout.js";
 import {
   applyIntent, buildLlmSelection, candidatePageForSearch, normalizeExternalEvidence, normalizeExternalResearchPlan,
-  providerRoutes, resultsFor, semanticInputsForSearch,
+  offerWithRecordedQuote, providerRoutes, resultsFor, semanticInputsForSearch,
 } from "../src/searches.js";
 import { defaultAccounts, publicAccountStatus } from "../src/providers.js";
 import { normalizeOffer, parseObjective, rankOffers } from "../src/ranking.js";
@@ -49,6 +52,52 @@ test("compact agent results retain the best offer from every matched provider", 
   const compact = providerDiverseOffers(offers, 20);
   assert.equal(compact.length, 20);
   assert.deepEqual([...new Set(compact.map((offer) => offer.provider))].sort(), ["glovo", "justeat", "ubereats"]);
+});
+
+test("completed search responses replace the initial pending snapshot", () => {
+  const started = {
+    search: { id: "a".repeat(24), providerStatus: { glovo: { state: "pending" } } },
+    apiProviders: ["glovo"],
+  };
+  const finalResults = {
+    search: { id: "a".repeat(24), providerStatus: { glovo: { state: "complete", offerCount: 42 } } },
+    coverage: { allConfiguredCompleted: true },
+  };
+  const response = completedSearchResponse(started, finalResults);
+  assert.equal(response.search.providerStatus.glovo.state, "complete");
+  assert.equal(response.search.providerStatus.glovo.offerCount, 42);
+  assert.deepEqual(response.search, response.results.search);
+});
+
+test("recording an exact quote retains its verified remote basket association", () => {
+  const offer = normalizeOffer("ubereats", {
+    merchant: { id: "store", name: "Store" },
+    item: { id: "item", name: "Dinner", unitPrice: 10 },
+    pricing: { subtotal: 10, total: null, exact: false },
+    basket: { provider: "ubereats", id: "draft-1", createdAt: "now" },
+  });
+  offer.basket = { provider: "ubereats", id: "draft-1", createdAt: "now" };
+  const quoted = offerWithRecordedQuote(offer, { subtotal: 10, total: 13, exact: true });
+  assert.deepEqual(quoted.basket, offer.basket);
+  assert.equal(quoted.pricing.total, 13);
+  assert.equal(quoted.pricing.exact, true);
+});
+
+test("Just Eat customizations remain scoped to each selected basket line", () => {
+  const offer = { lines: [
+    { item: { id: "first" }, source: { candidateIndex: 12 } },
+    { item: { id: "second" }, source: { candidateIndex: 34 } },
+  ] };
+  assert.deepEqual(justEatLineModifierSelections(offer, {
+    12: { protein: ["spicy-chicken"] },
+    second: { size: ["large"] },
+  }), {
+    12: { protein: ["spicy-chicken"] },
+    34: { size: ["large"] },
+  });
+  assert.deepEqual(justEatLineModifierSelections({
+    item: { id: "single" }, source: { candidateIndex: 5 },
+  }, { protein: ["tofu"] }), { 5: { protein: ["tofu"] } });
 });
 
 test("search results prove coverage and never silently omit a failed provider", () => {

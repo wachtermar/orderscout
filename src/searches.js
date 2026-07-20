@@ -418,15 +418,22 @@ export async function recordProviderError(id, provider, error, timing = {}) {
   return resultsFor(search);
 }
 
+export function offerWithRecordedQuote(offer, pricing) {
+  const basket = offer.basket;
+  const normalized = normalizeOffer(offer.provider, {
+    ...offer,
+    pricing: { ...offer.pricing, ...pricing, exact: true },
+    ...(pricing.fulfilment ? { fulfilment: pricing.fulfilment } : {}),
+  });
+  if (basket) normalized.basket = basket;
+  return normalized;
+}
+
 export async function recordQuote(id, offerId, pricing) {
   const search = await loadSearch(id);
   const index = search.offers.findIndex((offer) => offer.id === offerId);
   if (index < 0) throw new CliError("Offer not found in this search", "OFFER_NOT_FOUND");
-  search.offers[index] = normalizeOffer(search.offers[index].provider, {
-    ...search.offers[index],
-    pricing: { ...search.offers[index].pricing, ...pricing, exact: true },
-    ...(pricing.fulfilment ? { fulfilment: pricing.fulfilment } : {}),
-  });
+  search.offers[index] = offerWithRecordedQuote(search.offers[index], pricing);
   await writeSearch(search);
   return resultsFor(search);
 }
