@@ -229,6 +229,29 @@ test("recommend finds arbitrary non-food products across all verticals", async (
   assert.deepEqual(result.candidates.map((candidate) => candidate.item.id), ["batteries"]);
 });
 
+test("LLM candidate mode returns normalized menu items without semantic rejection", async () => {
+  const fetchImpl = async () => Response.json({ restaurants: [restaurant({
+    name: "Croco Vapes", cuisines: [{ name: "Tiendas" }],
+  })], metaData: {} });
+  const result = await recommend(
+    { latitude: 36.5, longitude: -4.8, postcode: "29603" },
+    "Lost Mary Tappo pods and bottled ice liquid",
+    {
+      candidateMode: "llm",
+      shoppingIntents: ["Lost Mary Tappo pods", "bottled vape liquid with ice, not too sweet"],
+      fetchImpl,
+      fetchMenuImpl: async () => menuData([
+        { Id: "pod", Name: "Lost Mary Tappo Pineapple Ice 20mg", Variations: [{ Id: "pod", BasePrice: 4.95 }] },
+        { Id: "liquid", Name: "Babel Boreal liquid 10ml", Description: "Mint ice", Variations: [{ Id: "liquid", BasePrice: 4.95 }] },
+        { Id: "unrelated", Name: "USB charging cable", Variations: [{ Id: "unrelated", BasePrice: 3 }] },
+      ]),
+    },
+  );
+  assert.equal(result.scope.semanticMode, "llm");
+  assert.deepEqual(result.candidates.map((candidate) => candidate.item.id).sort(), ["liquid", "pod", "unrelated"]);
+  assert.ok(result.candidates.every((candidate) => candidate.ranking.reasons.includes("Unfiltered normalized menu candidate for LLM review")));
+});
+
 test("product discovery prioritizes a directly matching merchant even when it is closed and beyond the scan limit", async () => {
   const ordinary = Array.from({ length: 35 }, (_, index) => restaurant({
     id: `ordinary-${index}`,

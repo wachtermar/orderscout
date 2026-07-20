@@ -561,6 +561,7 @@ function glovoCatalogOffer(store, product, options = {}) {
         storeProductId,
         attributeGroups: product.attributeGroups ?? [],
       },
+      catalogQueriesMatched: product.matchedQueries ?? [],
       ...(eligibility ? { eligibility } : {}),
     },
   };
@@ -621,9 +622,19 @@ export async function glovoStoreCatalog(store, queries, location, options = {}) 
     throw lastError;
   });
   if (searched.length && searched.every((entry) => entry?.error)) throw searched[0].error;
-  const products = [...new Map(searched.flatMap((entry) => entry?.products ?? []).map((product) => [
-    String(product.storeProductId ?? product.externalId ?? product.id), product,
-  ])).values()];
+  const productsById = new Map();
+  for (const entry of searched) {
+    if (entry?.error) continue;
+    for (const product of entry?.products ?? []) {
+      const key = String(product.storeProductId ?? product.externalId ?? product.id);
+      const existing = productsById.get(key);
+      productsById.set(key, {
+        ...(existing ?? product),
+        matchedQueries: [...new Set([...(existing?.matchedQueries ?? []), entry.query])],
+      });
+    }
+  }
+  const products = [...productsById.values()];
   return {
     store,
     queries: catalogQueries,

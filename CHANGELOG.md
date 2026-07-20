@@ -2,6 +2,15 @@
 
 This project follows Semantic Versioning. It is currently pre-1.0; command and normalized response changes may occur between minor releases and will be listed here.
 
+## 0.1.7 - 2026-07-20
+
+- Remove semantic product and meal rejection from the ChatGPT/MCP ingest path so provider candidates reach model reasoning intact.
+- Split multi-item requests into independent shopping-line intents and retrieval queries instead of requiring one product to satisfy every line simultaneously.
+- Add paginated `search candidates` / `orderscout_candidates` interfaces with provider, merchant, and LLM-authored lexical narrowing.
+- Add local `search select` / `orderscout_select_candidates` interfaces so the model maps candidates to requested lines with grounded reasons; deterministic code validates IDs, quantities, and same-basket compatibility only.
+- Rank only model-selected bundles in agent mode and expose candidate-pool and selection-required state to prevent premature no-match claims.
+- Return unfiltered normalized Just Eat menu candidates in agent mode and retain the Glovo catalog queries that returned each product.
+
 ## 0.1.6 - 2026-07-20
 
 - Expand Glovo store-only search results into a bounded two-stage merchant-to-catalog search using the current store-menu, in-store search, and restriction contracts.

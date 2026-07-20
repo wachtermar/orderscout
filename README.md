@@ -64,7 +64,7 @@ Scheduled requests use the local Spain timezone and preserve the requested insta
 
 Provider-listed deals are retained: struck-through item prices and savings, percentage discounts, 2-for-1 listings, free delivery, merchant offers, and membership eligibility. Listed deals influence provisional value ranking, while only savings actually shown by checkout affect an exact comparison.
 
-Product and meal discovery is a hybrid LLM + CLI workflow. The LLM turns the request into broad merchant terms and separate in-catalog terms, including useful Spanish synonyms. OrderScout then performs provider-native retrieval: Glovo discovers relevant shops before querying each shop's full catalog search index, while Just Eat and Uber Eats expand merchants through their direct menu adapters. The CLI normalizes untrusted catalog data, separates required product form from optional preferences, and applies a strict whole-token/concept relevance gate; the LLM reasons over the resulting shortlist to judge combinations, quality, taste, deals, and trade-offs. This avoids both brittle single-keyword searches and dumping thousands of raw catalog fields into a model context.
+Product and meal discovery is a hybrid LLM + CLI workflow with a deliberate boundary. The CLI retrieves provider-native catalogs, normalizes untrusted data, deduplicates it, paginates it, and preserves prices, deals, availability, ratings, and source IDs. In agent mode it does not decide what a product or meal means. ChatGPT splits distinct needs into separate shopping lines, chooses broad merchant and catalog queries, inspects normalized candidate pages, and explicitly selects the same-store bundle that best satisfies each line. Deterministic code then validates quantities, basket compatibility, eligibility, exact totals, and purchase approval.
 
 A preference cannot qualify an unrelated product—`ice` does not match `rice`, and a disposable vape is not e-liquid just because its description mentions liquid. Quantity-aware helpers add extra understanding where useful—for example bottle sizes, multipacks, total litres, still versus sparkling, and price per litre for water. Multi-person meal results contain explicit distinct dish lines, or one item explicitly sold for sharing; OrderScout does not multiply one ordinary dish by the party size. Breakfast searches require prepared breakfast dishes rather than raw egg packs or a keyword found in an unrelated product. “Healthy” and “tasty” remain transparent ranking signals, not medical or nutritional claims.
 
@@ -155,10 +155,21 @@ orderscout ubereats menu <store-uuid>
 orderscout recommend "best-rated healthy dinner for two under €30" \
   --at "29603 Marbella"
 
-# Agent-guided two-stage discovery: shop first, then product catalog
-orderscout search begin "vape liquid, preferably ice" --agent --top 50 \
+# Agent-guided retrieval: shop first, then product catalog, with separate needs
+orderscout search begin "Lost Mary Tappo pods and bottled ice liquid" --agent \
   --discovery-queries '["vape","vaper","estanco"]' \
-  --catalog-queries '["liquid","líquido","recarga","ice","hielo","mentol"]'
+  --catalog-queries '["Lost Mary","Tappo","cartucho","líquido","ice","mentol"]' \
+  --shopping-items '[{"id":"pods","intent":"Lost Mary Tappo prefilled pods"},{"id":"liquid","intent":"bottled vape liquid with ice that is not too sweet"}]'
+
+# The LLM pages and reasons over normalized candidates; this is lexical retrieval, not semantic filtering
+orderscout search candidates <search-id> --provider glovo --query "lost mary tappo" --limit 50
+orderscout search candidates <search-id> --provider glovo --query "liquido ice" --limit 50
+
+# Save one LLM-chosen, same-store bundle locally; this does not create a provider basket
+orderscout search select <search-id> --json '[
+  {"offerId":"<pod-offer>","quantity":1,"forItem":"Tappo pods","reason":"Explicit Tappo cartridge"},
+  {"offerId":"<liquid-offer>","quantity":1,"forItem":"ice liquid","reason":"Bottled mint-ice liquid rather than a disposable"}
+]'
 
 # Only after the user explicitly completes the provider's legal-age control
 orderscout eligibility confirm <search-id> <offer-id> --confirmed true

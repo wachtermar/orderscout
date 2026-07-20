@@ -190,6 +190,8 @@ test("Glovo searches a discovered store catalog and surfaces its legal-age gate"
   assert.equal(catalog.offers[0].item.name, "Desechable Vuse Mango Ice 20mg");
   assert.equal(catalog.offers[0].source.storeProductId, "1784");
   assert.equal(catalog.offers[0].source.eligibility.status, "confirmation_required");
+  assert.deepEqual(catalog.products[0].matchedQueries, ["ice"]);
+  assert.deepEqual(catalog.offers[0].source.catalogQueriesMatched, ["ice"]);
   assert.equal(catalog.offers[0].source.eligibility.restrictions[0].id, "TBC");
   assert.ok(calls.some((value) => value.includes("query=ice")));
 });

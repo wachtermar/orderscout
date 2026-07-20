@@ -591,6 +591,34 @@ function productCandidates(restaurant, menuData, menu, intent) {
   return candidates;
 }
 
+function llmMenuCandidates(restaurant, menuData, menu) {
+  const candidates = [];
+  for (const category of menu.categories) {
+    for (const item of category.items) {
+      for (const variation of item.variations) {
+        const price = Number(variation.price);
+        if (!Number.isFinite(price)) continue;
+        candidates.push({
+          ...baseCandidate(restaurant, menuData, menu, category, item, variation),
+          quantity: 1,
+          itemTotal: price,
+          estimatedDeliveredTotal: null,
+          ranking: {
+            score: tasteScore(restaurant),
+            tasteScore: tasteScore(restaurant),
+            reasons: [
+              "Unfiltered normalized menu candidate for LLM review",
+              restaurant.rating?.starRating ? `merchant rating ${restaurant.rating.starRating}/5` : "merchant is unrated",
+              `item price €${price.toFixed(2)} before delivery and service fees`,
+            ],
+          },
+        });
+      }
+    }
+  }
+  return candidates;
+}
+
 async function mapConcurrent(values, concurrency, mapper) {
   const result = new Array(values.length);
   let nextIndex = 0;
@@ -611,9 +639,11 @@ async function mapConcurrent(values, concurrency, mapper) {
 
 export async function recommend(location, text, options = {}) {
   const intent = parseIntent(text);
-  const resultLimit = Number(options.limit ?? 10);
-  if (!Number.isInteger(resultLimit) || resultLimit < 1 || resultLimit > 100) {
-    throw new CliError("--limit must be an integer between 1 and 100");
+  const llmMode = options.candidateMode === "llm";
+  const resultLimit = Number(options.limit ?? (llmMode ? 2_000 : 10));
+  const maximumLimit = llmMode ? 5_000 : 100;
+  if (!Number.isInteger(resultLimit) || resultLimit < 1 || resultLimit > maximumLimit) {
+    throw new CliError(`--limit must be an integer between 1 and ${maximumLimit}`);
   }
   const vertical = options.vertical ?? (intent.kind === "meal" ? "restaurants" : "all");
   const discovery = await discoverRestaurants(location, {
@@ -630,13 +660,17 @@ export async function recommend(location, text, options = {}) {
   const openRestaurants = eligibleRestaurants.filter((restaurant) => restaurant.isOpenNowForDelivery);
   const shouldRequireOpen = options.open || (intent.deliveryTime === "now" && !options.includeClosed);
   let restaurants = shouldRequireOpen && openRestaurants.length ? openRestaurants : eligibleRestaurants;
-  if (intent.kind === "product") {
-    const spec = productIntentSpec(intent);
-    const merchantSpec = spec.concept ? { ...spec, coreTerms: [], preferenceTerms: [], preferenceConcepts: [] } : spec;
-    const merchantFit = (restaurant) => productRelevance(merchantSpec, {
+  if (intent.kind === "product" || llmMode) {
+    const shoppingIntents = (options.shoppingIntents?.length ? options.shoppingIntents : [text])
+      .map((shoppingIntent) => parseIntent(shoppingIntent));
+    const merchantSpecs = shoppingIntents.filter((parsed) => parsed.kind === "product").map((parsed) => {
+      const spec = productIntentSpec(parsed);
+      return spec.concept ? { ...spec, coreTerms: [], preferenceTerms: [], preferenceConcepts: [] } : spec;
+    });
+    const merchantFit = (restaurant) => merchantSpecs.some((spec) => productRelevance(spec, {
       item: { name: restaurant.name, category: restaurant.cuisines?.map((entry) => entry.name) },
       merchant: { name: restaurant.name, cuisines: restaurant.cuisines?.map((entry) => entry.name) },
-    }).relevant;
+    }).relevant);
     const retail = (restaurant) => /\b(tienda|store|shop|supermerc|alimentacion|convenience|farmacia|pharmacy|retail|otros tipos)\b/
       .test(normalizedText(`${restaurant.name} ${restaurant.cuisines?.map((entry) => entry.name).join(" ")}`));
     const directlyRelevant = eligibleRestaurants.filter((restaurant) => merchantFit(restaurant)
@@ -653,7 +687,9 @@ export async function recommend(location, text, options = {}) {
     const menu = normalizeMenu(menuData);
     return {
       restaurant,
-      candidates: intent.kind === "water"
+      candidates: llmMode
+        ? llmMenuCandidates(restaurant, menuData, menu)
+        : intent.kind === "water"
         ? waterCandidates(restaurant, menuData, menu, intent)
         : intent.kind === "meal"
           ? mealCandidates(restaurant, menuData, menu, intent)
@@ -666,7 +702,7 @@ export async function recommend(location, text, options = {}) {
     if (!uniqueCandidates.has(key)) uniqueCandidates.set(key, candidate);
   }
   const sortedCandidates = [...uniqueCandidates.values()].sort((left, right) => {
-      if (intent.kind === "water") {
+      if (!llmMode && intent.kind === "water") {
         return left.itemTotal - right.itemTotal
           || left.pricePerLiter - right.pricePerLiter
           || right.ranking.score - left.ranking.score;
@@ -701,6 +737,7 @@ export async function recommend(location, text, options = {}) {
     },
     scope: {
       vertical,
+      semanticMode: llmMode ? "llm" : "deterministic",
       discoveredStores: discovery.restaurants?.length ?? 0,
       scannedStores: restaurants.length,
       failedMenus: scanned.filter((entry) => entry?.error).length,
