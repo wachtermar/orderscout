@@ -44,6 +44,7 @@ export async function startSearch(intent, options = {}) {
     orchestration: "concurrent",
     offers: [],
     selections: [],
+    providerReviews: {},
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
@@ -394,6 +395,59 @@ export async function recordQuote(id, offerId, pricing) {
   return resultsFor(search);
 }
 
+export async function recordComparisonOutcomes(id, outcomes) {
+  const search = await loadSearch(id);
+  const recordedAt = new Date().toISOString();
+  const values = Array.isArray(outcomes) ? outcomes : [];
+  search.comparisonQuotes = { ...(search.comparisonQuotes ?? {}) };
+  for (const outcome of values) {
+    if (!outcome?.provider) continue;
+    search.comparisonQuotes[outcome.provider] = {
+      provider: outcome.provider,
+      offerId: outcome.offerId ?? null,
+      status: outcome.status ?? "error",
+      basketId: outcome.basketId ?? null,
+      pricing: outcome.pricing ?? null,
+      fulfilment: outcome.fulfilment ?? null,
+      issues: outcome.issues ?? [],
+      error: outcome.error ?? null,
+      recordedAt,
+    };
+    if (!outcome.offerId) continue;
+    const index = search.offers.findIndex((offer) => offer.id === outcome.offerId);
+    if (index < 0) continue;
+    let offer = search.offers[index];
+    if (outcome.basketId) {
+      offer = {
+        ...offer,
+        basket: {
+          provider: outcome.provider,
+          id: String(outcome.basketId),
+          ...(outcome.fulfilment ? { fulfilment: outcome.fulfilment } : {}),
+          createdAt: outcome.basketCreatedAt ?? offer.basket?.createdAt ?? recordedAt,
+        },
+      };
+    }
+    if (outcome.pricing) {
+      const basket = offer.basket;
+      offer = normalizeOffer(offer.provider, {
+        ...offer,
+        pricing: { ...offer.pricing, ...outcome.pricing },
+        ...(outcome.fulfilment ? { fulfilment: outcome.fulfilment } : {}),
+      });
+      if (basket) offer.basket = basket;
+    }
+    search.offers[index] = offer;
+  }
+  search.comparisonQuoteRun = {
+    recordedAt,
+    providers: values.map((outcome) => outcome.provider).filter(Boolean),
+    complete: values.length > 0 && values.every((outcome) => ["quoted", "provisional", "error"].includes(outcome.status)),
+  };
+  await writeSearch(search);
+  return resultsFor(search);
+}
+
 export async function recordBasket(id, offerId, basket) {
   const search = await loadSearch(id);
   const index = search.offers.findIndex((offer) => offer.id === offerId);
@@ -522,6 +576,18 @@ export function buildLlmSelection(search, requestedSelections) {
     const reason = String(requested.reason ?? "").trim();
     if (!forItem || !reason) throw new CliError(`Selection ${index + 1} requires forItem and reason`, "INVALID_SELECTION");
     if (forItem.length > 200 || reason.length > 500) throw new CliError(`Selection ${index + 1} labels are too long`, "INVALID_SELECTION");
+    const requestFit = requested.requestFit === undefined ? null : Number(requested.requestFit);
+    if (requestFit !== null && (!Number.isFinite(requestFit) || requestFit < 0 || requestFit > 100)) {
+      throw new CliError(`Selection ${index + 1} requestFit must be from 0 to 100`, "INVALID_SELECTION");
+    }
+    const confidence = requested.confidence === undefined ? null : String(requested.confidence);
+    if (confidence !== null && !["low", "medium", "high"].includes(confidence)) {
+      throw new CliError(`Selection ${index + 1} confidence must be low, medium, or high`, "INVALID_SELECTION");
+    }
+    const evidence = requested.evidence === undefined ? [] : requested.evidence;
+    if (!Array.isArray(evidence) || evidence.length > 8 || evidence.some((entry) => typeof entry !== "string" || !entry.trim() || entry.length > 300)) {
+      throw new CliError(`Selection ${index + 1} evidence must contain at most 8 short strings`, "INVALID_SELECTION");
+    }
     const unitPrice = Number(offer.item?.unitPrice);
     const subtotal = Number.isFinite(unitPrice) ? Math.round(unitPrice * quantity * 100) / 100 : null;
     const originalSubtotal = Number.isFinite(Number(offer.pricing?.originalSubtotal))
@@ -533,6 +599,7 @@ export function buildLlmSelection(search, requestedSelections) {
       quantity,
       forItem,
       reason,
+      semanticAssessment: requestFit === null ? null : { requestFit, confidence: confidence ?? "low", evidence: evidence.map((entry) => entry.trim()) },
       pricing: { ...offer.pricing, originalSubtotal, subtotal, itemSavings, discount: 0, total: null, exact: false },
       promotion: offer.promotion,
       source: offer.source,
@@ -547,6 +614,47 @@ export function buildLlmSelection(search, requestedSelections) {
   if (selectedOffers[0].provider === "justeat"
     && new Set(selectedOffers.map((offer) => offer.source?.planId).filter(Boolean)).size !== 1) {
     throw new CliError("Selected Just Eat candidates must come from the same source plan", "SELECTION_BASKET_CONFLICT");
+  }
+  const shoppingItems = Array.isArray(search.shoppingItems) ? search.shoppingItems : [];
+  const parsed = search.parsedIntent ?? parseIntent(search.intent ?? "");
+  if (shoppingItems.length) {
+    const required = new Map(shoppingItems.map((item, index) => {
+      const id = String(item?.id ?? `item-${index + 1}`).trim();
+      return [id, Math.max(1, Number(item?.quantity ?? 1))];
+    }));
+    const covered = new Map();
+    for (const line of lines) {
+      if (!required.has(line.forItem)) {
+        throw new CliError(`Selection line references unknown shopping item ${line.forItem}`, "INVALID_SELECTION");
+      }
+      const current = covered.get(line.forItem) ?? { quantity: 0, lines: [] };
+      current.quantity += line.quantity;
+      current.lines.push(line);
+      covered.set(line.forItem, current);
+    }
+    const missing = [...required].filter(([id, quantity]) => {
+      const itemLines = covered.get(id);
+      if (!itemLines) return true;
+      if (parsed.kind !== "meal") return itemLines.quantity < quantity;
+      const selectedForItem = itemLines.lines.map((line) => candidates.get(line.candidateId));
+      const explicitCapacity = Math.max(...selectedForItem.map((offer) => Number(offer.servesPeople ?? 0)), 0);
+      const distinctItems = new Set(itemLines.lines.map((line) => line.item.id ?? line.item.name)).size;
+      return Math.max(explicitCapacity, distinctItems) < quantity;
+    }).map(([id]) => id);
+    if (missing.length) {
+      throw new CliError(`Selection does not cover every requested shopping item: ${missing.join(", ")}`, "INCOMPLETE_SELECTION");
+    }
+  }
+  if (shoppingItems.length && parsed.kind === "meal" && Number(parsed.people ?? 1) > 1) {
+    const people = Number(parsed.people);
+    const explicitCapacity = Math.max(...selectedOffers.map((offer) => Number(offer.servesPeople ?? 0)), 0);
+    const distinctItems = new Set(lines.map((line) => line.item.id ?? line.item.name)).size;
+    if (explicitCapacity < people && distinctItems < people) {
+      throw new CliError(
+        `A meal for ${people} requires ${people} distinct dishes or an item explicitly serving the party`,
+        "INCOMPLETE_MEAL",
+      );
+    }
   }
   const first = selectedOffers[0];
   const subtotalValues = lines.map((line) => line.pricing.subtotal);
@@ -568,7 +676,7 @@ export function buildLlmSelection(search, requestedSelections) {
     composition: {
       kind: lines.length > 1 ? "llm-shopping-list" : "llm-selection",
       complete: true,
-      requestedItems: lines.length,
+      requestedItems: shoppingItems.length || lines.length,
       distinctItems: new Set(lines.map((line) => line.item.id ?? line.item.name)).size,
     },
     lines,
@@ -591,6 +699,12 @@ export function buildLlmSelection(search, requestedSelections) {
       llmSelected: true,
       selectedCandidateIds: lines.map((line) => line.candidateId),
     },
+    semanticAssessment: lines.some((line) => line.semanticAssessment) ? {
+      requestFit: Math.round(lines.reduce((sum, line) => sum + Number(line.semanticAssessment?.requestFit ?? 0), 0) / lines.length),
+      confidence: lines.every((line) => line.semanticAssessment?.confidence === "high") ? "high"
+        : lines.some((line) => line.semanticAssessment?.confidence === "low" || !line.semanticAssessment) ? "low" : "medium",
+      evidence: [...new Set(lines.flatMap((line) => line.semanticAssessment?.evidence ?? []))].slice(0, 8),
+    } : null,
     signals: { ...first.signals },
   };
 }
@@ -604,17 +718,61 @@ export async function selectCandidates(id, selections) {
     candidateIds: selection.source.selectedCandidateIds,
     createdAt: new Date().toISOString(),
   }];
+  search.providerReviews = {
+    ...(search.providerReviews ?? {}),
+    [selection.provider]: {
+      disposition: "selected",
+      offerId: selection.id,
+      reason: selection.lines.map((line) => line.reason).join(" ").slice(0, 500),
+      reviewedAt: new Date().toISOString(),
+    },
+  };
   await writeSearch(search);
   return { selection, results: resultsFor(search), mutatedProviderState: false };
+}
+
+export async function reviewProvider(id, provider, disposition, reason) {
+  const search = await loadSearch(id);
+  if (!search.providers.includes(provider)) throw new CliError(`${provider} is not enabled for this search`, "PROVIDER_NOT_ENABLED");
+  if (!["inspected_no_suitable_match", "unavailable"].includes(disposition)) {
+    throw new CliError("Provider review disposition must be inspected_no_suitable_match or unavailable", "INVALID_PROVIDER_REVIEW");
+  }
+  const explanation = String(reason ?? "").trim();
+  if (!explanation) throw new CliError("Provider review requires a grounded reason", "INVALID_PROVIDER_REVIEW");
+  if (explanation.length > 500) throw new CliError("Provider review reason is too long", "INVALID_PROVIDER_REVIEW");
+  if (search.providerStatus?.[provider]?.state !== "complete") {
+    throw new CliError("Provider retrieval must be complete before recording its review", "PROVIDER_REVIEW_INCOMPLETE", {
+      provider,
+      state: search.providerStatus?.[provider]?.state ?? "pending",
+    });
+  }
+  search.providerReviews = {
+    ...(search.providerReviews ?? {}),
+    [provider]: {
+      disposition,
+      reason: explanation,
+      reviewedAt: new Date().toISOString(),
+    },
+  };
+  await writeSearch(search);
+  return resultsFor(search);
 }
 
 export function resultsFor(search) {
   const llmMode = search.semanticMode === "llm";
   const candidates = search.offers.filter((offer) => !isLlmSelection(offer));
-  const selectedOffers = search.offers.filter(isLlmSelection);
+  const allSelectedOffers = search.offers.filter(isLlmSelection);
+  const legacySelectedReviews = Object.fromEntries(allSelectedOffers.map((offer) => [offer.provider, {
+    disposition: "selected", offerId: offer.id, reason: "Legacy model selection",
+  }]));
+  const providerReviews = search.providerReviews ?? legacySelectedReviews;
+  const selectedOffers = llmMode && Object.keys(providerReviews).length
+    ? allSelectedOffers.filter((offer) => providerReviews[offer.provider]?.disposition === "selected"
+      && providerReviews[offer.provider]?.offerId === offer.id)
+    : allSelectedOffers;
   const rankingInputs = llmMode ? selectedOffers : search.offers;
   const rankingProviders = llmMode ? [...new Set(selectedOffers.map((offer) => offer.provider))] : search.providers;
-  const ranking = rankOffers(rankingInputs, search.intent, search.objective, { providers: rankingProviders });
+  const baseRanking = rankOffers(rankingInputs, search.intent, search.objective, { providers: rankingProviders });
   const statuses = Object.entries(search.providerStatus);
   const attemptedProviders = statuses.filter(([, status]) => status.state !== "pending").map(([provider]) => provider);
   const completedProviders = statuses.filter(([, status]) => status.state === "complete" || status.state === "partial").map(([provider]) => provider);
@@ -623,6 +781,20 @@ export function resultsFor(search) {
   const partialProviders = statuses.filter(([, status]) => status.state === "partial").map(([provider]) => provider);
   const matchedProviders = [...new Set(rankingInputs.map((offer) => offer.provider))];
   const candidateProviders = [...new Set(candidates.map((offer) => offer.provider))];
+  const completedCandidateProviders = candidateProviders.filter((provider) => search.providers.includes(provider)
+    && search.providerStatus?.[provider]?.state === "complete");
+  const reviewedProviders = search.providers.filter((provider) => Boolean(providerReviews[provider]));
+  const unreviewedCandidateProviders = llmMode
+    ? completedCandidateProviders.filter((provider) => !reviewedProviders.includes(provider)) : [];
+  const unresolvedProviders = search.providers.filter((provider) => {
+    if (search.providerStatus?.[provider]?.state !== "complete") return true;
+    return llmMode && candidateProviders.includes(provider) && !reviewedProviders.includes(provider);
+  });
+  const deliveryLocation = deliveryLocationCoverage(search);
+  const ranking = {
+    ...baseRanking,
+    winnerReady: baseRanking.winnerReady && unresolvedProviders.length === 0 && deliveryLocation.status !== "mismatch",
+  };
   const availableProviders = [...new Set(rankingInputs.filter((offer) => offer.available).map((offer) => offer.provider))];
   const unavailableOnlyProviders = matchedProviders.filter((provider) => !availableProviders.includes(provider));
   const pendingEligibility = rankingInputs.filter((offer) => offer.source?.eligibility?.status === "confirmation_required"
@@ -632,8 +804,20 @@ export function resultsFor(search) {
     providers: Object.fromEntries(search.providers.map((provider) => [provider, candidates.filter((offer) => offer.provider === provider).length])),
     merchants: new Set(candidates.map(merchantKey)).size,
     selectedBundles: selectedOffers.length,
-    selectionRequired: selectedOffers.length === 0,
+    selectionRequired: unreviewedCandidateProviders.length > 0,
+    reviewedProviders,
+    unreviewedCandidateProviders,
   } : null;
+  const providerReview = Object.fromEntries(search.providers.map((provider) => {
+    const state = search.providerStatus?.[provider]?.state;
+    if (state === "error") return [provider, { disposition: "failed", reason: search.providerStatus[provider].error ?? "Provider retrieval failed" }];
+    if (state === "pending") return [provider, { disposition: "pending", reason: null }];
+    if (state === "partial") return [provider, { disposition: "partial", reason: "Provider retrieval did not complete" }];
+    const explicit = providerReviews[provider];
+    if (explicit) return [provider, explicit];
+    if (!candidateProviders.includes(provider) && state === "complete") return [provider, { disposition: "no_candidates", reason: "Provider retrieval returned no candidates" }];
+    return [provider, { disposition: "unreviewed", reason: null }];
+  }));
   const coverage = {
     mode: search.orchestration ?? "legacy",
     configuredProviders: search.providers,
@@ -645,8 +829,12 @@ export function resultsFor(search) {
     candidateProviders,
     availableProviders,
     unavailableOnlyProviders,
+    providerReview,
+    unreviewedCandidateProviders,
+    unresolvedProviders,
     allConfiguredAttempted: attemptedProviders.length === search.providers.length,
-    allConfiguredCompleted: completedProviders.length === search.providers.length,
+    allConfiguredCompleted: search.providers.every((provider) => search.providerStatus?.[provider]?.state === "complete"),
+    deliveryLocation,
   };
   return {
     search: summarizeSearch(search),
@@ -664,6 +852,14 @@ export function resultsFor(search) {
       ...(pendingEligibility.length ? ["Some Glovo matches require the user to confirm legal age on Glovo before basket creation."] : []),
       ...(llmMode && selectedOffers.length === 0
         ? ["Candidate retrieval is complete enough to inspect, but semantic selection is still required. Page through candidates and let the LLM choose; do not report no match yet."] : []),
+      ...(unreviewedCandidateProviders.length
+        ? [`Provider review is still required for: ${unreviewedCandidateProviders.join(", ")}. No winner can be confirmed yet.`] : []),
+      ...(unresolvedProviders.length
+        ? [`Comparison is unresolved for: ${unresolvedProviders.join(", ")}. Every configured provider must complete retrieval and candidate review before a winner can be confirmed.`] : []),
+      ...(deliveryLocation.status === "mismatch"
+        ? [`Provider delivery locations do not match (${deliveryLocation.maximumDistanceKm} km apart). Fix the saved address before comparing or quoting.`] : []),
+      ...(deliveryLocation.status === "unverified"
+        ? [`Delivery-location parity could not be verified for: ${deliveryLocation.missingProviders.join(", ")}. Exact checkout still determines the final address.`] : []),
       ...(Object.values(search.providerStatus).some((status) => status.state === "pending") ? ["Some enabled providers are still pending."] : []),
       ...(search.fulfilment?.mode === "scheduled" && !ranking.winnerReady
         ? [`No winner is confirmed until the requested time (${search.fulfilment.requestedAt ?? "unspecified"}) and exact delivered total are verified for every matching provider.`] : []),
@@ -686,7 +882,18 @@ function summarizeSearch(search) {
     semanticMode: search.semanticMode ?? "deterministic",
     shoppingItems: search.shoppingItems ?? [],
     providers: search.providers,
-    providerStatus: search.providerStatus,
+    providerStatus: Object.fromEntries(Object.entries(search.providerStatus ?? {}).map(([provider, status]) => [provider, {
+      ...status,
+      ...(status.discovery ? { discovery: {
+        ...status.discovery,
+        ...(status.discovery.deliveryLocation ? { deliveryLocation: {
+          selected: true,
+          city: status.discovery.deliveryLocation.city ?? null,
+          postcode: status.discovery.deliveryLocation.postcode ?? null,
+          source: status.discovery.deliveryLocation.source ?? null,
+        } } : {}),
+      } } : {}),
+    }])),
     orchestration: search.orchestration ?? "legacy",
     offerCount: search.offers.length,
     candidateCount: search.offers.filter((offer) => !isLlmSelection(offer)).length,
@@ -694,4 +901,40 @@ function summarizeSearch(search) {
     createdAt: search.createdAt,
     updatedAt: search.updatedAt,
   };
+}
+
+function deliveryLocationCoverage(search) {
+  const locations = Object.fromEntries(search.providers.flatMap((provider) => {
+    const location = search.providerStatus?.[provider]?.discovery?.deliveryLocation;
+    const latitude = location?.latitude === null || location?.latitude === undefined ? NaN : Number(location.latitude);
+    const longitude = location?.longitude === null || location?.longitude === undefined ? NaN : Number(location.longitude);
+    return Number.isFinite(latitude) && Number.isFinite(longitude) ? [[provider, { latitude, longitude }]] : [];
+  }));
+  const providers = Object.keys(locations);
+  const missingProviders = search.providers.filter((provider) => !providers.includes(provider));
+  let maximumDistanceKm = 0;
+  for (let left = 0; left < providers.length; left += 1) {
+    for (let right = left + 1; right < providers.length; right += 1) {
+      maximumDistanceKm = Math.max(maximumDistanceKm, haversineKm(locations[providers[left]], locations[providers[right]]));
+    }
+  }
+  const rounded = Math.round(maximumDistanceKm * 10) / 10;
+  return {
+    status: rounded > 3 ? "mismatch" : (missingProviders.length ? "unverified" : "verified"),
+    verifiedProviders: providers,
+    missingProviders,
+    maximumDistanceKm: rounded,
+    thresholdKm: 3,
+  };
+}
+
+function haversineKm(left, right) {
+  const radians = (degrees) => degrees * Math.PI / 180;
+  const deltaLatitude = radians(right.latitude - left.latitude);
+  const deltaLongitude = radians(right.longitude - left.longitude);
+  const originLatitude = radians(left.latitude);
+  const targetLatitude = radians(right.latitude);
+  const value = Math.sin(deltaLatitude / 2) ** 2
+    + Math.cos(originLatitude) * Math.cos(targetLatitude) * Math.sin(deltaLongitude / 2) ** 2;
+  return 6_371 * 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
 }

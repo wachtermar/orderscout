@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createGlovoBasket, enrichGlovoOffers, glovoAddresses, glovoInternals, glovoMe, glovoMenu, glovoOrderConfirmation, glovoStoreCatalog, glovoSubmissionRequest, normalizeGlovoQuote, placeGlovoOrder } from "../src/glovo.js";
+import { createGlovoBasket, enrichGlovoOffers, glovoAddresses, glovoInternals, glovoMe, glovoMenu, glovoOrderConfirmation, glovoStoreCatalog, glovoSubmissionRequest, normalizeGlovoQuote, placeGlovoOrder, searchGlovo } from "../src/glovo.js";
 
 function jwt(expiresAtSeconds) {
   return `${Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url")}.${Buffer.from(JSON.stringify({ exp: expiresAtSeconds })).toString("base64url")}.${"s".repeat(40)}`;
@@ -175,6 +175,20 @@ test("Glovo search preserves store-only results for second-stage catalog discove
   assert.equal(stores[0].name, "Estanco");
   assert.equal(stores[0].open, true);
   assert.deepEqual(stores[0].categories, ["Vapeo"]);
+});
+
+test("Glovo reuses the saved city code and derives only the harmless URL slug", async () => {
+  const calls = [];
+  await searchGlovo("indio", { latitude: 36.5, longitude: -4.8, city: "Marbella", cityCode: "MBA" }, {
+    session: { source: "verification", cookieHeader: `glovo_auth_info=${encodeURIComponent(JSON.stringify({ accessToken: "a".repeat(40) }))}` },
+    fetchImpl: async (url) => {
+      calls.push(String(url));
+      return Response.json({ data: { elements: [] } });
+    },
+  });
+  assert.equal(calls.length, 1);
+  assert.match(calls[0], /store_wall\/search/);
+  assert.doesNotMatch(calls[0], /\/es\/es\/marbella$/);
 });
 
 test("Glovo searches a discovered store catalog and surfaces its legal-age gate", async () => {

@@ -58,13 +58,13 @@ Glovo renews and persists its own session automatically before its short-lived a
 | Best | Rating confidence plus request-specific quality signals |
 | Value | A balance of total price, ETA, ratings, quantity, and preferences |
 
-Search-card prices are estimates. OrderScout only calls a result the exact cheapest after obtaining a current checkout quote for the best suitable offer from every provider that returned a match. Checkout review records the normalized subtotal, every available fee, applied promotions or membership savings, and exact total back into the comparison; exact totals over a hard budget are disqualified.
+Search-card prices are estimates, never the final recommendation price. OrderScout obtains a current checkout quote for the best suitable offer from every provider that returned a match before recommending a winner. Checkout review records the normalized subtotal, every available fee, applied promotions or membership savings, and exact total back into the comparison; exact totals over a hard budget are disqualified.
 
 Scheduled requests use the local Spain timezone and preserve the requested instant through search, basket creation, and checkout. A provider cannot win until both its exact delivered total and the requested delivery window are verified. If a provider cannot configure that slot, OrderScout tries its next suitable result and otherwise reports the comparison as provisional—never as a confirmed winner.
 
 Provider-listed deals are retained: struck-through item prices and savings, percentage discounts, 2-for-1 listings, free delivery, merchant offers, and membership eligibility. Listed deals influence provisional value ranking, while only savings actually shown by checkout affect an exact comparison.
 
-Product and meal discovery is a hybrid LLM + CLI workflow with a deliberate boundary. The CLI retrieves provider-native catalogs, normalizes untrusted data, deduplicates it, paginates it, and preserves prices, deals, availability, ratings, and source IDs. In agent mode it does not decide what a product or meal means. ChatGPT splits distinct needs into separate shopping lines, chooses broad merchant and catalog queries, inspects normalized candidate pages, and explicitly selects the same-store bundle that best satisfies each line. Deterministic code then validates quantities, basket compatibility, eligibility, exact totals, and purchase approval.
+Product and meal discovery is a hybrid LLM + CLI workflow with a deliberate boundary. The CLI executes a fair query plan across every shopping line, retrieves provider-native catalogs, normalizes untrusted data, deduplicates it, paginates it, and preserves prices, deals, availability, ratings, and source IDs. Just Eat scans every currently eligible area menu, Glovo loads the complete menu of every discovered merchant, and Uber Eats executes every planned provider search before loading complete menus for the strongest returned merchant cards. Any omitted query, failed menu, or provider limit is reported as partial coverage and blocks a confirmed winner. In agent mode static keyword code does not decide what a product or meal means. ChatGPT splits distinct needs into separate shopping lines, chooses broad merchant and catalog queries, inspects normalized candidate pages, assigns a grounded request-fit score on one cross-provider scale, and explicitly selects the same-store bundle that best satisfies each line. Deterministic code then validates quantities, basket compatibility, eligibility, exact totals, and purchase approval.
 
 This applies to every agent request, not only the examples in this README. Food, groceries, pharmacy and personal-care items, drinks, household goods, electronics, pet supplies, flowers, and provider-permitted restricted catalogs all use the same candidate workflow. The model may choose different retrieval terms for each shopping line; the CLI never requires one product to match unrelated needs simultaneously.
 
@@ -171,9 +171,13 @@ orderscout search candidates <search-id> --provider glovo --query "liquido ice" 
 
 # Save one LLM-chosen, same-store bundle locally; this does not create a provider basket
 orderscout search select <search-id> --json '[
-  {"offerId":"<pod-offer>","quantity":1,"forItem":"Tappo pods","reason":"Explicit Tappo cartridge"},
-  {"offerId":"<liquid-offer>","quantity":1,"forItem":"ice liquid","reason":"Bottled mint-ice liquid rather than a disposable"}
+  {"offerId":"<pod-offer>","quantity":1,"forItem":"pods","reason":"Explicit Tappo cartridge","requestFit":98,"confidence":"high","evidence":["Lost Mary Tappo pod"]},
+  {"offerId":"<liquid-offer>","quantity":1,"forItem":"liquid","reason":"Bottled mint-ice liquid rather than a disposable","requestFit":92,"confidence":"high","evidence":["bottled menthol ice e-liquid"]}
 ]'
+
+# Explicitly close providers with no suitable complete bundle, then quote every selected provider at once
+orderscout search review <search-id> ubereats --disposition inspected_no_suitable_match --reason "No matching bottled liquid after all candidate pages"
+orderscout comparison quote <search-id>
 
 # Only after the user explicitly completes the provider's legal-age control
 orderscout eligibility confirm <search-id> <offer-id> --confirmed true
@@ -219,7 +223,7 @@ npm run test:coverage
 npm run pack:check
 ```
 
-`test:matrix` runs the generated English/Spanish request matrix without provider traffic. It currently covers more than 1,800 natural-language combinations plus paging, bundle, pricing, promotion, schedule, eligibility, and failure invariants. See [the query-matrix documentation](docs/query-matrix.md) for scope and known limits. Live smoke checks deliberately use a small, paced set of read-only requests because provider rate limits are real production behavior, not something the test suite should bypass.
+`test:matrix` runs the generated English/Spanish request matrix without provider traffic. The full suite also runs 456 realistic food, grocery, pharmacy, drink, restricted, scheduled, and multi-line requests through all three selected-and-exact-quoted provider paths, alongside more than 1,800 language combinations plus paging, bundle, pricing, promotion, schedule, eligibility, and failure invariants. See [the query-matrix documentation](docs/query-matrix.md) for scope and known limits. Live smoke checks deliberately use a small, paced set of read-only requests because provider rate limits are real production behavior, not something the test suite should bypass.
 
 The design takes operational lessons from [`steipete/ordercli`](https://github.com/steipete/ordercli) and the [Domino's Printing Press CLI](https://github.com/mvanhorn/printing-press-library/tree/main/library/food-and-dining/dominos). The implementation is original; see [third-party notices](THIRD_PARTY_NOTICES.md).
 

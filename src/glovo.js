@@ -409,13 +409,18 @@ function offersFromSearch(payload, location) {
 }
 
 export async function searchGlovo(query, location, options = {}) {
-  const resolved = location.cityCode && location.citySlug ? location : await glovoLocation(location, options.fetchImpl);
+  const knownCitySlug = location.citySlug ?? slug(location.city ?? location.matched?.split(",").at(-1) ?? "");
+  const resolved = location.cityCode && knownCitySlug
+    ? { ...location, citySlug: knownCitySlug }
+    : await glovoLocation(location, options.fetchImpl);
   const payload = await request(`/v1/web/store_wall/search?searchQuery=${encodeURIComponent(query)}`, {
     method: "POST",
     body: { searchContext: { searchId: randomUUID() } },
     location: resolved,
     retryAuth: true,
     fetchImpl: options.fetchImpl,
+    cookieHeader: options.cookieHeader,
+    session: options.session,
   });
   const limit = Math.max(1, Number(options.limit ?? 60));
   return {
@@ -569,6 +574,17 @@ function glovoCatalogOffer(store, product, options = {}) {
       ...(eligibility ? { eligibility } : {}),
     },
   };
+}
+
+export function glovoMenuOffers(store, menu, options = {}) {
+  const eligibility = menu?.restrictionsDetected && options.requireEligibility ? {
+    kind: "legal_age",
+    status: "confirmation_required",
+    title: "Legal-age confirmation required",
+    restrictions: [],
+    providerActionUrl: store.url,
+  } : null;
+  return (menu?.products ?? []).map((product) => glovoCatalogOffer(store, product, { eligibility })).filter(Boolean);
 }
 
 async function mapConcurrent(values, concurrency, mapper) {

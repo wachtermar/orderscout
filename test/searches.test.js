@@ -73,6 +73,32 @@ test("search results prove coverage and never silently omit a failed provider", 
   assert.match(result.warnings.join(" "), /instead of re-authenticating/);
 });
 
+test("cross-provider address mismatch blocks a winner without exposing exact coordinates", () => {
+  const offer = (provider, id) => normalizeOffer(provider, {
+    merchant: { id: `${provider}-store`, name: `${provider} store`, rating: 4.5 },
+    item: { id, name: "Dinner", unitPrice: 10 },
+    available: true,
+    pricing: { subtotal: 10, total: 12, exact: true },
+    source: { planId: `${provider}-plan`, storeId: `${provider}-store` },
+  });
+  const offers = [offer("justeat", "j"), offer("glovo", "g")];
+  const result = resultsFor({
+    id: "d".repeat(24), intent: "cheapest dinner", objective: "cheapest", orchestration: "concurrent",
+    providers: ["justeat", "glovo"], offers, createdAt: "now", updatedAt: "now",
+    providerStatus: {
+      justeat: { state: "complete", error: null, discovery: { deliveryLocation: { latitude: 40.4168, longitude: -3.7038, city: "Madrid" } } },
+      glovo: { state: "complete", error: null, discovery: { deliveryLocation: { latitude: 36.5101, longitude: -4.8824, city: "Marbella" } } },
+    },
+  });
+  assert.equal(result.coverage.deliveryLocation.status, "mismatch");
+  assert.equal(result.comparison.winnerReady, false);
+  assert.match(result.warnings.join(" "), /do not match/);
+  assert.doesNotMatch(JSON.stringify(result.search), /40\.4168|-3\.7038|36\.5101|-4\.8824/);
+  assert.deepEqual(result.search.providerStatus.justeat.discovery.deliveryLocation, {
+    selected: true, city: "Madrid", postcode: null, source: null,
+  });
+});
+
 test("coverage distinguishes currently available matches from unavailable catalog matches", () => {
   const base = {
     pricing: { exact: false, total: 10 }, merchant: { rating: 4, ratingCount: 20 },
