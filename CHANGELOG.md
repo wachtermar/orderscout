@@ -2,6 +2,12 @@
 
 This project follows Semantic Versioning. It is currently pre-1.0; command and normalized response changes may occur between minor releases and will be listed here.
 
+## 0.1.12 - 2026-07-20
+
+- Resolve Glovo's authoritative store and address IDs from the current store page before catalog selection and basket creation, instead of trusting stale search-card `shop_id` values.
+- Send numeric store, address, and category IDs exactly as required by Glovo's current cart contract.
+- Live-verify the reported Padthaiwok basket with two customized mains, two drinks, all required selections, and an exact €23.80 delivered total without submitting an order.
+
 ## 0.1.11 - 2026-07-20
 
 - Match Glovo's current customization payload so required choices such as protein, heat level, and drinks are accepted with configured products.
