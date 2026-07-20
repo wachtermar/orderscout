@@ -10,7 +10,7 @@ process.env.ORDERSCOUT_CONFIG_DIR = configDirectory;
 const { ORDERSCOUT_MCP_TOOLS } = await import("../src/orderscout-mcp.js");
 const { quoteSelectedProviderComparison } = await import("../src/orderscout.js");
 const { normalizeOffer } = await import("../src/ranking.js");
-const { buildLlmSelection, loadSearch, resultsFor, reviewProvider, writeSearch } = await import("../src/searches.js");
+const { buildLlmSelection, loadSearch, recordComparisonOutcomes, resultsFor, reviewProvider, writeSearch } = await import("../src/searches.js");
 
 const PROVIDERS = ["justeat", "glovo", "ubereats"];
 
@@ -207,6 +207,61 @@ test("comparison quotes providers concurrently, isolates failures, and commits a
   assert.equal(persisted.comparisonQuotes.justeat.status, "quoted");
   assert.equal(persisted.comparisonQuotes.glovo.error.code, "CHECKOUT_REJECTED");
   assert.equal(persisted.comparisonQuotes.ubereats.status, "quoted");
-  assert.equal(persisted.offers.find((offer) => offer.id === search.providerReviews.justeat.offerId).pricing.exact, true);
+  const quotedJustEat = persisted.offers.find((offer) => offer.id === search.providerReviews.justeat.offerId);
+  assert.equal(quotedJustEat.pricing.exact, true);
+  assert.equal(quotedJustEat.lines[0].candidateId, search.offers.find((offer) => offer.provider === "justeat" && !offer.source?.llmSelected).id);
   assert.equal(persisted.offers.find((offer) => offer.id === search.providerReviews.ubereats.offerId).pricing.exact, true);
+});
+
+test("a failed re-quote invalidates a previously exact provider total", async () => {
+  const search = searchWithCandidates("7".repeat(24));
+  const candidateOffer = search.offers.find((offer) => offer.provider === "glovo");
+  const selection = buildLlmSelection(search, [{
+    offerId: candidateOffer.id, quantity: 1, forItem: "dinner", reason: "Suitable dinner.",
+  }]);
+  selection.pricing = { ...selection.pricing, subtotal: 11, total: 14, exact: true, missing: [] };
+  search.offers.push(selection);
+  search.providerReviews = {
+    justeat: { disposition: "inspected_no_suitable_match", reason: "No suitable dinner." },
+    glovo: { disposition: "selected", offerId: selection.id, reason: "Suitable dinner." },
+    ubereats: { disposition: "inspected_no_suitable_match", reason: "No suitable dinner." },
+  };
+  await writeSearch(search);
+
+  const result = await recordComparisonOutcomes(search.id, [{
+    provider: "glovo", offerId: selection.id, status: "error",
+    error: { code: "BASKET_CONTENT_MISMATCH", message: "Partial basket" },
+  }]);
+  const persisted = await loadSearch(search.id);
+  const invalidated = persisted.offers.find((offer) => offer.id === selection.id);
+  assert.equal(invalidated.pricing.exact, false);
+  assert.deepEqual(invalidated.pricing.missing, ["final checkout validation"]);
+  assert.deepEqual(result.comparison.exactPriceCoverage.missingQuoteProviders, ["glovo"]);
+  assert.equal(result.comparison.winnerReady, false);
+});
+
+test("comparison quote preserves Glovo's configured choices for agent review", async () => {
+  const search = searchWithCandidates("8".repeat(24));
+  const candidateOffer = search.offers.find((offer) => offer.provider === "glovo");
+  const selection = buildLlmSelection(search, [{
+    offerId: candidateOffer.id, quantity: 1, forItem: "dinner", reason: "Suitable dinner.",
+  }]);
+  search.offers.push(selection);
+  search.providerReviews = {
+    justeat: { disposition: "inspected_no_suitable_match", reason: "No suitable dinner." },
+    glovo: { disposition: "selected", offerId: selection.id, reason: "Suitable dinner." },
+    ubereats: { disposition: "inspected_no_suitable_match", reason: "No suitable dinner." },
+  };
+  await writeSearch(search);
+
+  const result = await quoteSelectedProviderComparison(search.id, {
+    providerTask: async () => ({
+      status: "quoted", basketId: "glovo-basket", pricing: { subtotal: 11, total: 14, exact: true, missing: [] },
+      fulfilment: { status: "verified" }, fulfillable: true, issues: [],
+      customizationReview: [{ itemName: "Dinner", selections: [{ name: "Thai spicy" }] }],
+    }),
+  });
+  const persisted = await loadSearch(search.id);
+  assert.deepEqual(result.providerOutcomes[0].customizationReview, [{ itemName: "Dinner", selections: [{ name: "Thai spicy" }] }]);
+  assert.deepEqual(persisted.comparisonQuotes.glovo.customizationReview, [{ itemName: "Dinner", selections: [{ name: "Thai spicy" }] }]);
 });

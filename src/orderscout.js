@@ -347,6 +347,9 @@ async function quoteBasketForOffer(search, offer, basket) {
     const quoted = await quoteGlovoBasket(basket.id, {
       scheduledAt: search.fulfilment?.requestedAt,
       timeZone: search.fulfilment?.timeZone,
+      expectedLines: offer.lines?.length
+        ? offer.lines
+        : [{ item: offer.item, quantity: offer.quantity ?? 1, source: offer.source }],
     });
     const fulfilment = checkoutFulfilment(quoted, { ...offer, basket });
     return { quoted: { ...quoted, fulfilment }, ...quoteReview("glovo", quoted, quoted.pricing), fulfilment };
@@ -416,6 +419,7 @@ export async function quoteSelectedProviderComparison(searchId, options = {}) {
       fulfilment: review.fulfilment,
       fulfillable: review.fulfillable,
       issues: review.issues,
+      customizationReview: basket.creation?.customizationReview ?? null,
     };
   });
   const providerOutcomes = rawOutcomes.map((outcome) => {
