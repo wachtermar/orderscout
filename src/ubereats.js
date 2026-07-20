@@ -4,7 +4,7 @@ import { loadBrowserSession } from "./browser-session.js";
 
 const BASE = "https://www.ubereats.com";
 const CHECKOUT_PAYLOAD_TYPES = [
-  "subtotal", "paymentBarPayload", "total", "fareBreakdown", "upfrontTipping", "promotion",
+  "cartItems", "basketSize", "subtotal", "paymentBarPayload", "total", "fareBreakdown", "upfrontTipping", "promotion",
   "requestUtensilPayload", "promoAndMembershipSavingBannerPayloadCheckout", "deliveryOptInInfo",
   "eta", "restrictedItems", "orderConfirmations", "paymentProfilesEligibility",
 ];
@@ -812,6 +812,37 @@ export async function createUberEatsBasket(offer, options = {}) {
   return { mutated: true, draftOrder, scheduling, submitted: false };
 }
 
+function checkoutText(value) {
+  if (typeof value === "string") return value.trim() || null;
+  if (value && typeof value === "object") {
+    const text = value.text ?? value.accessibilityText ?? value.title ?? value.label;
+    return typeof text === "string" ? text.trim() || null : null;
+  }
+  return null;
+}
+
+function uberEatsCheckoutWarnings(quote) {
+  const cartItems = findPayload(quote, "cartItems");
+  const warnings = cartItems?.cartItemsWarnings ?? cartItems?.warnings ?? [];
+  if (!Array.isArray(warnings)) return [];
+  return warnings.map((warning) => ({
+    title: checkoutText(warning?.title),
+    subtitle: checkoutText(warning?.subtitle ?? warning?.description),
+  })).filter((warning) => warning.title || warning.subtitle);
+}
+
+function uberEatsCheckoutIssues(quote, options = {}) {
+  const cartItems = findPayload(quote, "cartItems");
+  const allowed = new Set(options.scheduledAt ? ["STORE_UNAVAILABLE_BUT_SCHEDULABLE"] : []);
+  const issues = (Array.isArray(quote?.validationErrors) ? quote.validationErrors : [])
+    .filter((error) => !allowed.has(error?.type))
+    .map((error) => ({
+      type: error?.type ?? "CHECKOUT_VALIDATION_ERROR",
+      title: checkoutText(error?.alert?.title),
+    }));
+  return { cartValidationPresent: Boolean(cartItems), issues, warnings: uberEatsCheckoutWarnings(quote) };
+}
+
 export async function quoteUberEatsBasket(draftOrderUuid, options = {}) {
   const carts = options.expectedLines || options.scheduledAt ? await uberEatsCarts(options) : null;
   const remoteBasketVerification = options.expectedLines
@@ -833,24 +864,56 @@ export async function quoteUberEatsBasket(draftOrderUuid, options = {}) {
   };
   const quote = await request("getCheckoutPresentationV1", requestBody, { ...options, auth: true });
   const pricing = normalizeUberEatsQuote(quote);
+  const checkoutBlockers = uberEatsCheckoutIssues(quote, options);
+  if (!checkoutBlockers.cartValidationPresent) {
+    throw new CliError("Uber Eats did not return verifiable cart validation", "CHECKOUT_UNVERIFIED", {
+      issues: [{ type: "CART_VALIDATION_MISSING", title: null }],
+      warnings: [],
+    });
+  }
+  if (checkoutBlockers.issues.length || checkoutBlockers.warnings.length) {
+    throw new CliError(
+      options.scheduledAt ? "Uber Eats rejected the scheduled checkout" : "Uber Eats checkout is not currently orderable",
+      options.scheduledAt ? "SCHEDULE_UNAVAILABLE" : "CHECKOUT_UNAVAILABLE",
+      {
+      issues: checkoutBlockers.issues,
+      warnings: checkoutBlockers.warnings,
+      },
+    );
+  }
   if (!options.scheduledAt) return {
     provider: "ubereats", draftOrderUuid, quote, pricing, remoteBasketVerification, submitted: false,
   };
-  const blockingErrors = (quote?.validationErrors ?? []).filter((error) => ![
-    "STORE_UNAVAILABLE_BUT_SCHEDULABLE",
-  ].includes(error.type));
-  if (blockingErrors.length) {
-    throw new CliError("Uber Eats rejected the scheduled checkout", "SCHEDULE_UNAVAILABLE", {
-      requestedAt: new Date(options.scheduledAt).toISOString(),
-      issues: blockingErrors.map((error) => ({ type: error.type, title: error.alert?.title?.text ?? null })),
-    });
-  }
   return {
     provider: "ubereats", draftOrderUuid, quote,
     fulfilment: { ...scheduleVerification, status: "verified" },
     remoteBasketVerification,
     scheduleVerification,
     pricing,
+    submitted: false,
+  };
+}
+
+export function uberEatsBasketHandoff(offer, options = {}) {
+  const draftOrderUuid = offer?.basket?.id;
+  if (!draftOrderUuid) throw new CliError("Create this Uber Eats basket first", "BASKET_REQUIRED");
+  const lines = (offer.lines?.length
+    ? offer.lines
+    : [{ item: offer.item, quantity: offer.quantity ?? 1 }])
+    .map((line) => ({ name: line.item?.name ?? line.name ?? "Item", quantity: Number(line.quantity ?? 1) }))
+    .filter((line) => line.name && Number.isFinite(line.quantity) && line.quantity > 0);
+  return {
+    provider: "ubereats",
+    opened: options.opened === true,
+    url: `${BASE}/feed`,
+    directCheckout: false,
+    handoff: {
+      mode: "select_existing_cart",
+      draftOrderUuid: String(draftOrderUuid),
+      merchantName: offer.merchant?.name ?? null,
+      expectedLines: lines,
+      successCriteria: "Open the matching Uber Eats cart and verify its merchant and every line before checkout.",
+    },
     submitted: false,
   };
 }

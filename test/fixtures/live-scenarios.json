@@ -1,5 +1,16 @@
 [
   {
+    "id": "cheap-water-snack",
+    "request": "im really thirsty and need also a small sweet snack. find me something cheap",
+    "objective": "cheapest",
+    "discoveryQueries": ["agua", "bebidas", "snacks", "dulces", "supermercado", "tienda"],
+    "catalogQueries": ["agua", "agua mineral", "chocolate", "galleta", "muffin", "dulce"],
+    "shoppingItems": [
+      { "id": "drink", "intent": "a refreshing non-alcoholic drink for one thirsty person, preferably water", "quantity": 1, "discoveryQueries": ["agua", "bebidas", "supermercado"], "catalogQueries": ["agua", "agua mineral", "bebida fría"] },
+      { "id": "snack", "intent": "one small sweet snack", "quantity": 1, "discoveryQueries": ["snacks", "dulces", "tienda"], "catalogQueries": ["chocolate", "galleta", "muffin", "dulce"] }
+    ]
+  },
+  {
     "id": "healthy-dinner-two",
     "request": "Find a healthy but very tasty dinner for two under €30 delivered",
     "objective": "best",

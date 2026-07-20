@@ -6,13 +6,14 @@ const script = readFileSync(new URL("../scripts/live-canary.mjs", import.meta.ur
 const scenarios = JSON.parse(readFileSync(new URL("./fixtures/live-scenarios.json", import.meta.url), "utf8"));
 
 test("live canary spans human delivery verticals without an order-submit path", () => {
-  assert.equal(scenarios.length, 12);
+  assert.equal(scenarios.length, 13);
   const text = scenarios.map(({ id, request }) => `${id} ${request}`).join(" ").toLowerCase();
-  for (const term of ["dinner", "water", "breakfast", "groceries", "pharmacy", "nappies", "charger", "cat", "bouquet", "six people"]) {
+  for (const term of ["dinner", "water", "snack", "breakfast", "groceries", "pharmacy", "nappies", "charger", "cat", "bouquet", "six people"]) {
     assert.match(text, new RegExp(term));
   }
   assert.doesNotMatch(script, /["']order["']\s*,\s*["']place["']/);
   assert.match(script, /ORDERSCOUT_LIVE_DRAFTS/);
+  assert.match(script, /ORDERSCOUT_LIVE_PAUSE_MS \?\? 65_000/);
   assert.match(script, /comparison["']\s*,\s*["']quote/);
   assert.match(script, /provider\.state === "complete" && !provider\.partial/);
 });

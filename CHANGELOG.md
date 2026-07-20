@@ -2,6 +2,12 @@
 
 This project follows Semantic Versioning. It is currently pre-1.0; command and normalized response changes may occur between minor releases and will be listed here.
 
+## 0.1.15 - 2026-07-21
+
+- Request Uber Eats' official cart-item checkout payload and reject `INVALID_BASKET`, disabled-cart warnings, and unmet merchant minimums instead of presenting a price-bearing but unorderable response as an exact total.
+- Replace Uber Eats' nondeterministic generic checkout URL with a structured multicart handoff that identifies the exact draft, merchant, and expected lines for ChatGPT Work browser review.
+- Require the Work skill to retry the next suitable provider bundle after checkout validation or remote-line failure, add the reported water-plus-snack conversation to the live three-provider canary suite, and pace the full live matrix to avoid manufacturing provider cooldown failures.
+
 ## 0.1.14 - 2026-07-21
 
 - Keep the ChatGPT Work plugin's suggested prompts within Codex's supported maximum of three entries and add a manifest contract test for the prompt count and length limits.

@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   collectUberStores, createUberEatsBasket, expandUberEatsCatalogs, normalizeUberSearch, quoteUberEatsBasket,
   searchUberEats, summarizeUberEatsCarts, uberEatsDraftDeliveryLocation, uberEatsInternals, uberEatsMe, uberEatsMenu,
-  uberEatsDeliveryAddressFromCookies, uberEatsOrderConfirmation, verifyUberEatsDraftLines,
+  uberEatsBasketHandoff, uberEatsDeliveryAddressFromCookies, uberEatsOrderConfirmation, verifyUberEatsDraftLines,
   verifyUberEatsDraftSchedule,
 } from "../src/ubereats.js";
 
@@ -376,6 +376,26 @@ test("Uber Eats basket prepare preserves distinct meal lines", async () => {
   ]);
 });
 
+test("Uber Eats browser handoff identifies the exact multicart instead of using generic checkout", () => {
+  const handoff = uberEatsBasketHandoff({
+    merchant: { name: "Test Bakery" },
+    basket: { id: "draft-water-snack" },
+    lines: [
+      { item: { name: "Water" }, quantity: 1 },
+      { item: { name: "Chocolate muffin" }, quantity: 1 },
+    ],
+  });
+  assert.equal(handoff.url, "https://www.ubereats.com/feed");
+  assert.equal(handoff.directCheckout, false);
+  assert.equal(handoff.handoff.mode, "select_existing_cart");
+  assert.equal(handoff.handoff.draftOrderUuid, "draft-water-snack");
+  assert.equal(handoff.handoff.merchantName, "Test Bakery");
+  assert.deepEqual(handoff.handoff.expectedLines, [
+    { name: "Water", quantity: 1 },
+    { name: "Chocolate muffin", quantity: 1 },
+  ]);
+});
+
 test("Uber Eats basket prepare ignores optional-only customization groups", async () => {
   const prepared = await createUberEatsBasket({
     item: { name: "Açaí smoothie", unitPrice: 8.4 }, quantity: 1,
@@ -428,6 +448,7 @@ test("Uber Eats quote uses the current official checkout payload and normalizes 
       assert.match(String(url), /getCheckoutPresentationV1$/);
       requestBody = JSON.parse(options.body);
       return Response.json({ data: { checkoutPayloads: {
+        cartItems: { cartItemsWarnings: [] },
         subtotal: { subtotal: { value: { amountE5: 2_550_000, currencyCode: "EUR" } } },
         fareBreakdown: { charges: [
           { fareBreakdownChargeMetadata: { analyticsInfo: [{ fareInfoID: "eats_fare.delivery_fee", currencyAmount: { amountE5: 199_000 } }] } },
@@ -446,6 +467,69 @@ test("Uber Eats quote uses the current official checkout payload and normalizes 
   assert.equal(result.pricing.exact, true);
 });
 
+test("Uber Eats checkout fails closed when the provider omits requested cart validation", async () => {
+  await assert.rejects(() => quoteUberEatsBasket("draft-without-cart-validation", {
+    cookieHeader: "sid=synthetic",
+    fetchImpl: async () => Response.json({ data: {
+      checkoutPayloads: {
+        total: { total: { value: { amountE5: 1_239_000, currencyCode: "EUR" } } },
+      },
+      validationErrors: null,
+    } }),
+  }), { code: "CHECKOUT_UNVERIFIED" });
+});
+
+test("Uber Eats checkout rejects an API-priced basket that the official cart marks invalid", async () => {
+  let requestBody;
+  await assert.rejects(() => quoteUberEatsBasket("draft-below-minimum", {
+    cookieHeader: "sid=synthetic",
+    fetchImpl: async (url, options) => {
+      assert.match(String(url), /getCheckoutPresentationV1$/);
+      requestBody = JSON.parse(options.body);
+      return Response.json({ data: {
+        checkoutPayloads: {
+          cartItems: {
+            cartItemsWarnings: [{
+              title: "Adjust cart to place order",
+              subtitle: "You are €16.00 away from the store minimum",
+            }],
+          },
+          subtotal: { subtotal: { value: { amountE5: 400_000, currencyCode: "EUR" } } },
+          total: { total: { value: { amountE5: 1_239_000, currencyCode: "EUR" } } },
+        },
+        validationErrors: [{ type: "INVALID_BASKET" }],
+      } });
+    },
+  }), (error) => {
+    assert.equal(error.code, "CHECKOUT_UNAVAILABLE");
+    assert.deepEqual(error.details.issues, [{ type: "INVALID_BASKET", title: null }]);
+    assert.deepEqual(error.details.warnings, [{
+      title: "Adjust cart to place order",
+      subtitle: "You are €16.00 away from the store minimum",
+    }]);
+    return true;
+  });
+  assert.ok(requestBody.payloadTypes.includes("cartItems"));
+});
+
+test("Uber Eats checkout rejects a store-minimum warning even without a validation error", async () => {
+  await assert.rejects(() => quoteUberEatsBasket("draft-warning-only", {
+    cookieHeader: "sid=synthetic",
+    fetchImpl: async () => Response.json({ data: {
+      checkoutPayloads: {
+        cartItems: {
+          cartItemsWarnings: [{
+            title: "Ajusta el carrito para realizar el pedido",
+            subtitle: "Te faltan 8,00 € para alcanzar el pedido mínimo",
+          }],
+        },
+        total: { total: { value: { amountE5: 900_000, currencyCode: "EUR" } } },
+      },
+      validationErrors: null,
+    } }),
+  }), { code: "CHECKOUT_UNAVAILABLE" });
+});
+
 test("Uber Eats scheduled checkout is exact only after line and remote schedule verification", async () => {
   const expectedLines = [{ item: { name: "Breakfast" }, quantity: 1 }];
   const result = await quoteUberEatsBasket("draft-scheduled", {
@@ -461,6 +545,7 @@ test("Uber Eats scheduled checkout is exact only after line and remote schedule 
         targetDeliveryTimeRange: { scheduled: true, date: "2026-07-21", startTime: 600, endTime: 630 },
       }] } });
       return Response.json({ data: { checkoutPayloads: {
+        cartItems: { cartItemsWarnings: [] },
         subtotal: { subtotal: { value: { amountE5: 1_290_000, currencyCode: "EUR" } } },
         total: { total: { value: { amountE5: 1_699_000, currencyCode: "EUR" } } },
       }, validationErrors: [] } });
@@ -477,6 +562,7 @@ test("Uber Eats checkout captures exact promotion savings", async () => {
   const result = await quoteUberEatsBasket("draft-deal", {
     cookieHeader: "sid=synthetic",
     fetchImpl: async () => Response.json({ data: { checkoutPayloads: {
+      cartItems: { cartItemsWarnings: [] },
       subtotal: { subtotal: { value: { amountE5: 2_000_000 } } },
       fareBreakdown: { charges: [{ fareBreakdownChargeMetadata: { analyticsInfo: [{ fareInfoID: "eats_fare.delivery_fee", currencyAmount: { amountE5: 200_000 } }] } }] },
       promotion: { promotionState: "APPLIED", savingsAmount: { amountE5: 500_000 } },
