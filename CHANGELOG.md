@@ -2,6 +2,12 @@
 
 This project follows Semantic Versioning. It is currently pre-1.0; command and normalized response changes may occur between minor releases and will be listed here.
 
+## 0.1.4 - 2026-07-20
+
+- Import Glovo's long-lived web refresh credential and stable device identity from the verified native Chrome profile.
+- Renew Glovo's 20-minute access token before expiry, persist rotated credentials atomically, serialize concurrent rotation across CLI processes, and retry one rejected authenticated read without ever retrying a mutation.
+- Report whether a verified Glovo login is persistent in CLI and Work account status.
+
 ## 0.1.3 - 2026-07-20
 
 - Enrich Glovo search cards with current menu descriptions before health and breakfast ranking.

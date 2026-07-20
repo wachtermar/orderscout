@@ -286,7 +286,7 @@ async function refreshChromeProviderSession(provider) {
     profile: "auto",
     timeout: 30_000,
     verify: (session) => provider === "glovo"
-      ? glovoMe({ cookieHeader: session.cookieHeader })
+      ? glovoMe({ session })
       : uberEatsMe({ cookieHeader: session.cookieHeader }),
   });
   const account = imported.verified;
@@ -304,12 +304,26 @@ async function providerAuthStatus(provider) {
   if (!stored) return { provider, authenticated: false, source: null, importedAt: null };
   try {
     const account = provider === "glovo" ? await glovoMe() : await uberEatsMe();
-    return { provider, ...account, source: stored.source, importedAt: stored.importedAt ?? null };
+    const current = provider === "glovo" ? await loadBrowserSession(provider) : stored;
+    return {
+      provider,
+      ...account,
+      source: current.source,
+      importedAt: current.importedAt ?? null,
+      ...(provider === "glovo" ? { persistent: Boolean(current.refreshToken), accessExpiresAt: current.accessExpiresAt ?? null } : {}),
+    };
   } catch (error) {
     if (["AUTH_EXPIRED", "AUTH_REQUIRED"].includes(error.code)) {
       try {
         const refreshed = await refreshChromeProviderSession(provider);
-        return { provider, ...refreshed.account, source: refreshed.imported.source, importedAt: refreshed.imported.importedAt ?? null, refreshed: true };
+        return {
+          provider,
+          ...refreshed.account,
+          source: refreshed.imported.source,
+          importedAt: refreshed.imported.importedAt ?? null,
+          ...(provider === "glovo" ? { persistent: refreshed.imported.persistent } : {}),
+          refreshed: true,
+        };
       } catch { /* return the original direct verification error below */ }
     }
     return { provider, authenticated: false, source: stored.source, importedAt: stored.importedAt ?? null, error: { code: error.code, message: error.message } };
@@ -335,6 +349,7 @@ async function liveAccountsStatus() {
       ...account,
       source: live?.source ?? null,
       ...(live?.refreshed ? { refreshed: true } : {}),
+      ...(live?.persistent !== undefined ? { persistent: live.persistent } : {}),
       ...(live?.error ? { error: live.error } : {}),
     };
   });
@@ -384,7 +399,7 @@ export async function runOrderScout(argv) {
           cookiePath: flags["cookie-path"],
           timeout: Number(flags.timeout ?? 30_000),
           verify: (session) => provider === "glovo"
-            ? glovoMe({ cookieHeader: session.cookieHeader })
+            ? glovoMe({ session })
             : uberEatsMe({ cookieHeader: session.cookieHeader }),
         }).then(async (imported) => {
           await recordProviderStatus(provider, { authenticated: true, membershipActive: imported.verified.membershipActive, transport: "api" });

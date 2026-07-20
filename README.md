@@ -36,7 +36,7 @@ The computer needs [Node.js 20 or newer](https://nodejs.org/) once. Restart Chat
 ### Signing in—no Terminal
 
 - Just Eat first reuses or refreshes its saved OAuth session. Only when a fresh login is required does it open the official OAuth page; the ChatGPT tool returns immediately, and you simply say when the page has finished.
-- Glovo and Uber Eats first check whether any supported Chrome profile already contains a working provider session. OrderScout tries the profiles automatically and saves only a session that passes the provider's live account API.
+- Glovo and Uber Eats first check whether any supported Chrome profile already contains a working provider session. OrderScout tries the profiles automatically and saves only a session that passes the provider's live account API. For Glovo it also imports the provider's refresh credential and device identity, so the 20-minute access token renews silently and the rotated login is saved owner-only.
 - If no working session exists, ChatGPT opens the official site in normal Chrome. Sign in there, return to ChatGPT, and say, “I finished signing in.” There is no Terminal prompt, cookie copy, or profile-selection question.
 - Enter passwords and verification codes only on the official website.
 - The same automatic flow is available from the standalone CLI.
@@ -47,9 +47,9 @@ The current plugin is local to ChatGPT Work/Codex on desktop. It is not an ordin
 
 ## What OrderScout compares
 
-Every provider enabled for your household is searched concurrently on every request. Provider selection lives in account settings, so an agent cannot quietly search a convenient subset. For example, if you enable Just Eat and Uber Eats with Uber One, both are always attempted and Glovo is excluded. Failed or expired sessions are shown in provider coverage instead of being silently omitted.
+Every provider enabled for your household is searched concurrently on every request. Provider selection lives in account settings, so an agent cannot quietly search a convenient subset. For example, if you enable Just Eat and Uber Eats with Uber One, both are always attempted and Glovo is excluded. Failed sessions are shown in provider coverage instead of being silently omitted.
 
-Glovo and Uber Eats read operations make one safe automatic attempt to refresh an expired imported session from a verified native Chrome profile. If that cannot be verified, the provider remains an explicit failure and the user is asked to sign in; OrderScout never falls back to browser search.
+Glovo renews and persists its own session automatically before its short-lived access token expires. Uber Eats, and a legacy Glovo session imported before this support existed, make one safe automatic attempt to refresh from a verified native Chrome profile. A new Glovo login is required only when the provider revokes or expires the long-lived refresh credential. If a provider still cannot be verified, it remains an explicit failure; OrderScout never falls back to browser search.
 
 | Goal | How it is ranked |
 | --- | --- |

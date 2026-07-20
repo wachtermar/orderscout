@@ -24,7 +24,7 @@ Restart ChatGPT desktop and start a new Work task.
 
 Just Eat uses its official authorization-code OAuth flow with PKCE. Glovo and Uber Eats do not expose an equivalent consumer OAuth callback, and the Work in-app browser has no supported API for exporting its authenticated session to a local CLI.
 
-For Glovo and Uber Eats, the plugin first automatically checks native Chrome profiles for an existing signed-in session. If none verifies, it opens the official page in Chrome for the user to sign in. The user only says “done”; the skill never asks for a terminal command or profile name. OrderScout imports only provider-domain cookies, stores them owner-only, and verifies them through the provider's direct account API. The in-app browser remains available after basket creation for optional visual checkout review, but it is never the search or basket backend.
+For Glovo and Uber Eats, the plugin first automatically checks native Chrome profiles for an existing signed-in session. If none verifies, it opens the official page in Chrome for the user to sign in. The user only says “done”; the skill never asks for a terminal command or profile name. OrderScout stores verified provider session material owner-only and verifies it through the provider's direct account API. Glovo's refresh credential is imported once and then rotated and persisted silently by the CLI, so its normal 20-minute access-token expiry does not send the user through login again. The in-app browser remains available after basket creation for optional visual checkout review, but it is never the search or basket backend.
 
 ## Safety contract
 

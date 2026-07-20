@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { CliError } from "./lib.js";
-import { loadBrowserSession } from "./browser-session.js";
+import { loadBrowserSession, persistBrowserSession, withBrowserSessionLock } from "./browser-session.js";
 
 const API = "https://api.glovoapp.com";
 const WEB = "https://glovoapp.com";
 const APP_VERSION = "v1.1782.0";
+const REFRESH_LEEWAY_MS = 90_000;
+const refreshes = new Map();
 
 function slug(value) {
   return String(value ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "")
@@ -40,7 +42,23 @@ function accessToken(session) {
   return null;
 }
 
-function headers(location = {}, token) {
+function jwtExpiresAt(token) {
+  try {
+    const payload = JSON.parse(Buffer.from(String(token).split(".")[1], "base64url").toString("utf8"));
+    return Number.isFinite(Number(payload.exp)) ? new Date(Number(payload.exp) * 1_000).toISOString() : null;
+  } catch { return null; }
+}
+
+function setCookieValue(header, name, value) {
+  const encoded = `${name}=${value}`;
+  const parts = String(header ?? "").split(/;\s*/).filter(Boolean);
+  const index = parts.findIndex((part) => part.startsWith(`${name}=`));
+  if (index >= 0) parts[index] = encoded;
+  else parts.push(encoded);
+  return parts.join("; ");
+}
+
+function headers(location = {}, token, sessionContext = {}) {
   const session = randomUUID();
   const now = String(Date.now());
   return {
@@ -57,7 +75,7 @@ function headers(location = {}, token) {
     "glovo-delivery-location-longitude": String(location.longitude ?? ""),
     "glovo-delivery-location-accuracy": "0",
     "glovo-delivery-location-timestamp": now,
-    "glovo-device-urn": `glv:device:${randomUUID()}`,
+    "glovo-device-urn": sessionContext.deviceUrn ?? `glv:device:${randomUUID()}`,
     "glovo-dynamic-session-id": session,
     "glovo-language-code": "es",
     "glovo-location-city-code": location.cityCode ?? "",
@@ -72,23 +90,94 @@ function headers(location = {}, token) {
   };
 }
 
-async function request(path, { method = "GET", body, location, auth = false, fetchImpl = fetch, cookieHeader } = {}) {
-  const session = cookieHeader ? { cookieHeader, source: "verification" } : await loadBrowserSession("glovo");
-  const token = accessToken(session);
-  if (auth && !token) throw new CliError("Sign in with `orderscout auth login glovo` first", "AUTH_REQUIRED");
-  const response = await fetchImpl(new URL(path, API), {
-    method,
-    headers: headers(location, token),
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    signal: AbortSignal.timeout(20_000),
-  });
+async function responsePayload(response) {
   if (response.status === 204) return null;
   const text = await response.text();
-  let payload;
-  try { payload = text ? JSON.parse(text) : null; }
-  catch { payload = { message: text }; }
-  if (!response.ok) throw new CliError(payload?.message ?? `Glovo returned HTTP ${response.status}`, response.status === 401 ? "AUTH_EXPIRED" : "GLOVO_HTTP_ERROR", { status: response.status, path });
-  return payload;
+  try { return text ? JSON.parse(text) : null; }
+  catch { return { message: text }; }
+}
+
+async function refreshGlovoSession(session, { fetchImpl = fetch, persist = true } = {}) {
+  if (!session?.refreshToken) throw new CliError("The saved Glovo login cannot be renewed; complete Glovo login once more", "AUTH_EXPIRED");
+  const refreshKey = createHash("sha256").update(session.refreshToken).digest("hex");
+  if (refreshes.has(refreshKey)) return refreshes.get(refreshKey);
+  const renew = async () => {
+    if (persist && session.source !== "environment" && session.source !== "verification") {
+      const current = await loadBrowserSession("glovo");
+      if (current?.refreshToken && current.refreshToken !== session.refreshToken) {
+        Object.assign(session, current);
+        if (!shouldRefresh(session, accessToken(session))) return session;
+      }
+    }
+    const response = await fetchImpl(new URL("/oauth/refresh", API), {
+      method: "POST",
+      headers: headers({}, null, session),
+      body: JSON.stringify({ refreshToken: session.refreshToken }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    const payload = await responsePayload(response);
+    if (!response.ok) {
+      const expired = [400, 401, 403].includes(response.status);
+      throw new CliError(
+        expired ? "The saved Glovo login can no longer be renewed; complete Glovo login once more" : (payload?.message ?? `Glovo returned HTTP ${response.status}`),
+        expired ? "AUTH_EXPIRED" : "GLOVO_HTTP_ERROR",
+        { status: response.status, path: "/oauth/refresh" },
+      );
+    }
+    if (typeof payload?.accessToken !== "string" || payload.accessToken.length < 48 || typeof payload?.refreshToken !== "string" || payload.refreshToken.length < 48) {
+      throw new CliError("Glovo returned incomplete renewed credentials", "INVALID_AUTH");
+    }
+    Object.assign(session, {
+      version: 2,
+      cookieHeader: setCookieValue(session.cookieHeader, "glovo_auth_info", encodeURIComponent(JSON.stringify({ accessToken: payload.accessToken }))),
+      refreshToken: payload.refreshToken,
+      refreshedAt: new Date().toISOString(),
+      accessExpiresAt: jwtExpiresAt(payload.accessToken),
+    });
+    if (persist && session.source !== "environment" && session.source !== "verification") await persistBrowserSession("glovo", session);
+    return session;
+  };
+  const pending = persist && session.source !== "environment" && session.source !== "verification"
+    ? withBrowserSessionLock("glovo", renew)
+    : renew();
+  refreshes.set(refreshKey, pending);
+  try { return await pending; }
+  finally { refreshes.delete(refreshKey); }
+}
+
+function shouldRefresh(session, token, now = Date.now()) {
+  if (!session?.refreshToken) return false;
+  if (!token) return true;
+  const expiresAt = jwtExpiresAt(token);
+  return expiresAt ? Date.parse(expiresAt) - now <= REFRESH_LEEWAY_MS : false;
+}
+
+async function request(path, { method = "GET", body, location, auth = false, retryAuth = method === "GET", fetchImpl = fetch, cookieHeader, session: providedSession } = {}) {
+  let session = providedSession ?? (cookieHeader ? { cookieHeader, source: "verification" } : await loadBrowserSession("glovo"));
+  const persistRefresh = !providedSession && !cookieHeader;
+  let token = accessToken(session);
+  if (shouldRefresh(session, token)) {
+    session = await refreshGlovoSession(session, { fetchImpl, persist: persistRefresh });
+    token = accessToken(session);
+  }
+  if (auth && !token) throw new CliError("Sign in with `orderscout auth login glovo` first", "AUTH_REQUIRED");
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await fetchImpl(new URL(path, API), {
+      method,
+      headers: headers(location, token, session),
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    const payload = await responsePayload(response);
+    if (response.ok) return payload;
+    if (response.status === 401 && attempt === 0 && retryAuth && session?.refreshToken) {
+      session = await refreshGlovoSession(session, { fetchImpl, persist: persistRefresh });
+      token = accessToken(session);
+      continue;
+    }
+    throw new CliError(payload?.message ?? `Glovo returned HTTP ${response.status}`, response.status === 401 ? "AUTH_EXPIRED" : "GLOVO_HTTP_ERROR", { status: response.status, path });
+  }
+  throw new CliError("Glovo authentication retry failed", "AUTH_EXPIRED");
 }
 
 export async function glovoLocation(location, fetchImpl = fetch) {
@@ -237,6 +326,7 @@ export async function searchGlovo(query, location, options = {}) {
     method: "POST",
     body: { searchContext: { searchId: randomUUID() } },
     location: resolved,
+    retryAuth: true,
     fetchImpl: options.fetchImpl,
   });
   const limit = Math.max(1, Number(options.limit ?? 60));
@@ -307,8 +397,8 @@ export async function enrichGlovoOffers(offers, options = {}) {
 }
 
 export async function glovoMe(options = {}) {
-  const profile = await request("/v3/me", { auth: true, fetchImpl: options.fetchImpl, cookieHeader: options.cookieHeader });
-  const membership = await request(`/customers/${profile.id}/subscription/status`, { auth: true, fetchImpl: options.fetchImpl, cookieHeader: options.cookieHeader }).catch(() => null);
+  const profile = await request("/v3/me", { auth: true, fetchImpl: options.fetchImpl, cookieHeader: options.cookieHeader, session: options.session });
+  const membership = await request(`/customers/${profile.id}/subscription/status`, { auth: true, fetchImpl: options.fetchImpl, cookieHeader: options.cookieHeader, session: options.session }).catch(() => null);
   return { authenticated: true, id: profile.id, name: profile.name, email: profile.email, preferredCityCode: profile.preferredCityCode, membershipActive: Boolean(membership?.isSubscribed), raw: options.raw ? profile : undefined };
 }
 
@@ -467,7 +557,7 @@ export async function quoteGlovoBasket(basketId, options = {}) {
   };
   const fillTemplate = async (previous, nextComponents) => {
     const response = await request("/v3/checkouts/order/1/template", {
-      method: "POST", auth: true, location, fetchImpl: options.fetchImpl,
+      method: "POST", auth: true, retryAuth: true, location, fetchImpl: options.fetchImpl,
       body: { checkout: {
         orderDetails: { ...(previous?.orderDetails ?? {}), ...orderDetails }, components: nextComponents,
         sourceScreen: "CART", analytics: { templateReceived: previous?.analytics?.templateReceived },
@@ -661,4 +751,4 @@ export async function placeGlovoOrder(offer, quote, options = {}) {
   }
 }
 
-export const glovoInternals = { accessToken, offersFromSearch, nextFlightText, objectsOfType, headers, findSubmitAction, promotionFromCard, trustedApiPath };
+export const glovoInternals = { accessToken, jwtExpiresAt, setCookieValue, shouldRefresh, refreshGlovoSession, request, offersFromSearch, nextFlightText, objectsOfType, headers, findSubmitAction, promotionFromCard, trustedApiPath };

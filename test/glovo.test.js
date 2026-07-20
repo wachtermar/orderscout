@@ -1,10 +1,107 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createGlovoBasket, enrichGlovoOffers, glovoAddresses, glovoInternals, glovoOrderConfirmation, glovoSubmissionRequest, normalizeGlovoQuote, placeGlovoOrder } from "../src/glovo.js";
+import { createGlovoBasket, enrichGlovoOffers, glovoAddresses, glovoInternals, glovoMe, glovoOrderConfirmation, glovoSubmissionRequest, normalizeGlovoQuote, placeGlovoOrder } from "../src/glovo.js";
+
+function jwt(expiresAtSeconds) {
+  return `${Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url")}.${Buffer.from(JSON.stringify({ exp: expiresAtSeconds })).toString("base64url")}.${"s".repeat(40)}`;
+}
 
 test("Glovo browser cookie token is parsed without exposing other cookies", () => {
   const encoded = encodeURIComponent(JSON.stringify({ access: { accessToken: "a".repeat(40) } }));
   assert.equal(glovoInternals.accessToken({ cookieHeader: `other=secret; glovo_auth_info=${encoded}` }), "a".repeat(40));
+});
+
+test("Glovo silently renews an expired access token with the saved refresh token", async () => {
+  const expired = jwt(Math.floor(Date.now() / 1_000) - 60);
+  const renewed = jwt(Math.floor(Date.now() / 1_000) + 1_200);
+  const session = {
+    version: 2,
+    source: "verification",
+    cookieHeader: `glovo_auth_info=${encodeURIComponent(JSON.stringify({ accessToken: expired }))}`,
+    refreshToken: "r".repeat(64),
+    deviceUrn: "glv:device:test",
+  };
+  const calls = [];
+  const account = await glovoMe({
+    session,
+    fetchImpl: async (url, options) => {
+      calls.push({ path: new URL(url).pathname, authorization: options.headers.authorization ?? null, deviceUrn: options.headers["glovo-device-urn"] });
+      if (new URL(url).pathname === "/oauth/refresh") {
+        assert.deepEqual(JSON.parse(options.body), { refreshToken: "r".repeat(64) });
+        return Response.json({ accessToken: renewed, refreshToken: "n".repeat(64), expiresIn: 1_200, tokenType: "bearer", scope: null });
+      }
+      if (new URL(url).pathname === "/v3/me") return Response.json({ id: 7, name: "Test", preferredCityCode: "MBA" });
+      return Response.json({ isSubscribed: true });
+    },
+  });
+
+  assert.equal(account.authenticated, true);
+  assert.equal(account.membershipActive, true);
+  assert.deepEqual(calls.map((call) => call.path), ["/oauth/refresh", "/v3/me", "/customers/7/subscription/status"]);
+  assert.equal(calls[1].authorization, `Bearer ${renewed}`);
+  assert.ok(calls.every((call) => call.deviceUrn === "glv:device:test"));
+  assert.equal(session.refreshToken, "n".repeat(64));
+  assert.equal(glovoInternals.accessToken(session), renewed);
+  assert.equal(session.accessExpiresAt, glovoInternals.jwtExpiresAt(renewed));
+});
+
+test("Glovo retries one rejected authenticated request after renewal", async () => {
+  const current = jwt(Math.floor(Date.now() / 1_000) + 1_200);
+  const renewed = jwt(Math.floor(Date.now() / 1_000) + 1_400);
+  const session = {
+    version: 2,
+    source: "verification",
+    cookieHeader: `glovo_auth_info=${encodeURIComponent(JSON.stringify({ accessToken: current }))}`,
+    refreshToken: "r".repeat(64),
+  };
+  let profileAttempts = 0;
+  const account = await glovoMe({
+    session,
+    fetchImpl: async (url) => {
+      const path = new URL(url).pathname;
+      if (path === "/oauth/refresh") return Response.json({ accessToken: renewed, refreshToken: "n".repeat(64) });
+      if (path === "/v3/me" && profileAttempts++ === 0) return Response.json({ message: "expired" }, { status: 401 });
+      if (path === "/v3/me") return Response.json({ id: 8, name: "Retry" });
+      return Response.json({ isSubscribed: false });
+    },
+  });
+  assert.equal(profileAttempts, 2);
+  assert.equal(account.id, 8);
+});
+
+test("Glovo never retries a rejected mutation after refreshing would be ambiguous", async () => {
+  const current = jwt(Math.floor(Date.now() / 1_000) + 1_200);
+  const session = {
+    version: 2,
+    source: "verification",
+    cookieHeader: `glovo_auth_info=${encodeURIComponent(JSON.stringify({ accessToken: current }))}`,
+    refreshToken: "r".repeat(64),
+  };
+  const paths = [];
+  await assert.rejects(() => glovoInternals.request("/v1/authenticated/customers/7/baskets", {
+    method: "POST",
+    auth: true,
+    session,
+    body: { synthetic: true },
+    fetchImpl: async (url) => {
+      paths.push(new URL(url).pathname);
+      return Response.json({ message: "expired" }, { status: 401 });
+    },
+  }), { code: "AUTH_EXPIRED" });
+  assert.deepEqual(paths, ["/v1/authenticated/customers/7/baskets"]);
+});
+
+test("Glovo treats an invalid refresh grant as an expired login", async () => {
+  const session = {
+    version: 2,
+    source: "verification",
+    cookieHeader: `glovo_auth_info=${encodeURIComponent(JSON.stringify({ accessToken: jwt(0) }))}`,
+    refreshToken: "r".repeat(64),
+  };
+  await assert.rejects(() => glovoInternals.refreshGlovoSession(session, {
+    persist: false,
+    fetchImpl: async () => Response.json({ message: "invalid_grant" }, { status: 400 }),
+  }), { code: "AUTH_EXPIRED" });
 });
 
 test("Glovo addresses normalize the current data.addresses envelope", async () => {

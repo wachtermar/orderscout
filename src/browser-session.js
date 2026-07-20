@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, unlink } from "node:fs/promises";
+import { chmod, copyFile, cp, mkdir, mkdtemp, open, readFile, readdir, rm, stat, unlink } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { CliError } from "./lib.js";
@@ -13,7 +13,7 @@ const CHROME_DEPENDENCIES_DIRECTORY = join(providerPaths.configDirectory, "chrom
 const CHROME_DEPENDENCY_MANIFEST = Object.freeze({
   private: true,
   type: "module",
-  dependencies: { "chrome-cookies-secure": "3.0.2" },
+  dependencies: { "chrome-cookies-secure": "3.0.2", "classic-level": "3.0.0" },
   overrides: { tar: "7.5.20", "@tootallnate/once": "2.0.1" },
 });
 const execFileAsync = promisify(execFile);
@@ -118,16 +118,15 @@ async function withTimeout(promise, timeout) {
   }
 }
 
-async function chromeCookieLibrary() {
+async function ensureChromeDependencies() {
   const manifestPath = join(CHROME_DEPENDENCIES_DIRECTORY, "package.json");
-  const modulePath = join(CHROME_DEPENDENCIES_DIRECTORY, "node_modules/chrome-cookies-secure/index.js");
-  const installedPath = join(CHROME_DEPENDENCIES_DIRECTORY, "node_modules/chrome-cookies-secure/package.json");
   const expected = JSON.stringify(CHROME_DEPENDENCY_MANIFEST);
   const current = await readFile(manifestPath, "utf8").catch(() => "");
-  const installed = await readFile(installedPath, "utf8").then(JSON.parse).catch(() => null);
+  const installedCookies = await readFile(join(CHROME_DEPENDENCIES_DIRECTORY, "node_modules/chrome-cookies-secure/package.json"), "utf8").then(JSON.parse).catch(() => null);
+  const installedLevel = await readFile(join(CHROME_DEPENDENCIES_DIRECTORY, "node_modules/classic-level/package.json"), "utf8").then(JSON.parse).catch(() => null);
   let currentManifest = null;
   try { currentManifest = JSON.parse(current); } catch { /* reinstall invalid or missing state */ }
-  if (JSON.stringify(currentManifest) !== expected || installed?.version !== "3.0.2") {
+  if (JSON.stringify(currentManifest) !== expected || installedCookies?.version !== "3.0.2" || installedLevel?.version !== "3.0.0") {
     await mkdir(CHROME_DEPENDENCIES_DIRECTORY, { recursive: true, mode: 0o700 });
     await chmod(CHROME_DEPENDENCIES_DIRECTORY, 0o700);
     await atomicPrivateWrite(manifestPath, CHROME_DEPENDENCY_MANIFEST);
@@ -139,11 +138,22 @@ async function chromeCookieLibrary() {
         maxBuffer: 2 * 1024 * 1024,
       });
     } catch (error) {
-      throw new CliError("Could not install the protected Chrome cookie reader", "COOKIE_READER_INSTALL_FAILED", { cause: error.message });
+      throw new CliError("Could not install the protected Chrome session reader", "COOKIE_READER_INSTALL_FAILED", { cause: error.message });
     }
   }
+}
+
+async function chromeCookieLibrary() {
+  await ensureChromeDependencies();
+  const modulePath = join(CHROME_DEPENDENCIES_DIRECTORY, "node_modules/chrome-cookies-secure/index.js");
   const imported = await import(pathToFileURL(modulePath).href);
   return imported.default ?? imported;
+}
+
+async function chromeStorageLibrary() {
+  await ensureChromeDependencies();
+  const modulePath = join(CHROME_DEPENDENCIES_DIRECTORY, "node_modules/classic-level/index.js");
+  return import(pathToFileURL(modulePath).href);
 }
 
 function cookieHeader(cookies) {
@@ -157,7 +167,55 @@ function cookieHeader(cookies) {
   }).join("; ");
 }
 
-async function readChromeSession(provider, { profile, cookiePath, timeout, cookieReader } = {}) {
+function chromeProfileDirectory(cookiePath) {
+  const parent = dirname(cookiePath);
+  return basename(parent) === "Network" ? dirname(parent) : parent;
+}
+
+function decodeChromeStorageValue(value) {
+  if (!Buffer.isBuffer(value) || value.length === 0) return null;
+  if (value[0] === 1) return value.subarray(1).toString("utf8");
+  if (value[0] === 0) return value.subarray(1).toString("utf16le");
+  return value.toString("utf8");
+}
+
+async function readChromeStorage(cookiePath, origin, keys, storageReader) {
+  const profileDirectory = chromeProfileDirectory(cookiePath);
+  if (storageReader) return storageReader({ origin, keys, profileDirectory });
+  const source = join(profileDirectory, "Local Storage", "leveldb");
+  if (!(await stat(source).catch(() => null))?.isDirectory()) return {};
+  const temporary = await mkdtemp(join(tmpdir(), "orderscout-local-storage-"));
+  try {
+    await cp(source, temporary, { recursive: true });
+    const { ClassicLevel } = await chromeStorageLibrary();
+    const database = new ClassicLevel(temporary, { keyEncoding: "buffer", valueEncoding: "buffer", createIfMissing: false });
+    try {
+      const values = {};
+      const prefix = `_${new URL(origin).origin}\0\x01`;
+      for (const key of keys) {
+        const value = await database.get(Buffer.from(`${prefix}${key}`, "utf8")).catch((error) => {
+          if (error.code === "LEVEL_NOT_FOUND") return null;
+          throw error;
+        });
+        if (value) values[key] = decodeChromeStorageValue(value);
+      }
+      return values;
+    } finally {
+      await database.close();
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+
+function glovoDeviceUrn(value) {
+  try {
+    const parsed = JSON.parse(value);
+    return typeof parsed?.urn === "string" ? parsed.urn : null;
+  } catch { return null; }
+}
+
+async function readChromeSession(provider, { profile, cookiePath, timeout, cookieReader, storageReader } = {}) {
   const source = await cookieFileFrom(cookiePath || profile);
   const temporary = await mkdtemp(join(tmpdir(), "orderscout-cookies-"));
   try {
@@ -169,20 +227,26 @@ async function readChromeSession(provider, { profile, cookiePath, timeout, cooki
     const cookies = await read(TARGET_URLS[provider], temporary);
     const header = cookieHeader(Array.isArray(cookies) ? cookies : []);
     if (!header) throw new CliError(`No ${provider} cookies were found in Chrome profile ${profile}`, "AUTH_COOKIES_NOT_FOUND");
+    const storage = provider === "glovo"
+      ? await readChromeStorage(source, TARGET_URLS.glovo, ["glovo_refresh_token", "glv_device"], storageReader)
+      : {};
     return {
-      version: 1,
+      version: 2,
       provider,
       cookieHeader: header,
       cookieNames: header.split("; ").map((pair) => pair.slice(0, pair.indexOf("="))),
+      ...(storage.glovo_refresh_token ? { refreshToken: storage.glovo_refresh_token } : {}),
+      ...(glovoDeviceUrn(storage.glv_device) ? { deviceUrn: glovoDeviceUrn(storage.glv_device) } : {}),
       importedAt: new Date().toISOString(),
       source: `chrome:${profile ?? basename(cookiePath)}`,
+      sourceProfile: profile ?? basename(chromeProfileDirectory(source)),
     };
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
 }
 
-async function saveChromeSession(provider, session, sessionsDirectory) {
+async function saveChromeSession(provider, session, sessionsDirectory = SESSIONS_DIRECTORY) {
   await mkdir(sessionsDirectory, { recursive: true, mode: 0o700 });
   await atomicPrivateWrite(sessionPath(provider, sessionsDirectory), session);
   await chmod(sessionPath(provider, sessionsDirectory), 0o600);
@@ -190,7 +254,7 @@ async function saveChromeSession(provider, session, sessionsDirectory) {
 
 export async function importChromeSession(provider, {
   profile = "auto", cookiePath, timeout = 30_000, cookieReader, sessionsDirectory = SESSIONS_DIRECTORY,
-  verify, profileRoots,
+  storageReader, verify, profileRoots,
 } = {}) {
   const candidates = profile === "auto" && !cookiePath
     ? await discoverChromeProfiles({ roots: profileRoots })
@@ -204,6 +268,7 @@ export async function importChromeSession(provider, {
         cookiePath: candidate.cookiePath,
         timeout,
         cookieReader,
+        storageReader,
       });
       const verified = verify ? await verify(session) : null;
       await saveChromeSession(provider, session, sessionsDirectory);
@@ -213,6 +278,7 @@ export async function importChromeSession(provider, {
         source: session.source,
         profile: candidate.profile,
         cookieCount: session.cookieNames.length,
+        persistent: provider !== "glovo" || Boolean(session.refreshToken),
         importedAt: session.importedAt,
         verified,
       };
@@ -222,6 +288,35 @@ export async function importChromeSession(provider, {
     }
   }
   throw new CliError(`No Chrome profile contains a verified ${provider} session`, "AUTH_SESSION_NOT_FOUND", { attempts: failures });
+}
+
+export async function persistBrowserSession(provider, session, { sessionsDirectory = SESSIONS_DIRECTORY } = {}) {
+  if (!session?.cookieHeader) throw new CliError(`Cannot save an empty ${provider} session`, "INVALID_AUTH");
+  await saveChromeSession(provider, session, sessionsDirectory);
+  return session;
+}
+
+export async function withBrowserSessionLock(provider, task, { sessionsDirectory = SESSIONS_DIRECTORY, timeout = 25_000 } = {}) {
+  await mkdir(sessionsDirectory, { recursive: true, mode: 0o700 });
+  const lockPath = `${sessionPath(provider, sessionsDirectory)}.refresh.lock`;
+  const startedAt = Date.now();
+  let handle;
+  while (!handle) {
+    try {
+      handle = await open(lockPath, "wx", 0o600);
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      const details = await stat(lockPath).catch(() => null);
+      if (details && Date.now() - details.mtimeMs > 60_000) await unlink(lockPath).catch(() => {});
+      if (Date.now() - startedAt >= timeout) throw new CliError(`Timed out renewing the ${provider} session`, "AUTH_REFRESH_TIMEOUT");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  try { return await task(); }
+  finally {
+    await handle.close();
+    await unlink(lockPath).catch(() => {});
+  }
 }
 
 export async function loadBrowserSession(provider) {
@@ -262,4 +357,4 @@ export async function logoutBrowserSession(provider) {
 }
 
 export const browserSessionPaths = { sessionsDirectory: SESSIONS_DIRECTORY, sessionPath };
-export const browserSessionInternals = { dependencyManifest: CHROME_DEPENDENCY_MANIFEST };
+export const browserSessionInternals = { dependencyManifest: CHROME_DEPENDENCY_MANIFEST, decodeChromeStorageValue, chromeProfileDirectory };

@@ -3,9 +3,10 @@ import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/p
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { browserSessionInternals, discoverChromeProfiles, importChromeSession } from "../src/browser-session.js";
+import { browserSessionInternals, discoverChromeProfiles, importChromeSession, withBrowserSessionLock } from "../src/browser-session.js";
 
 test("the lazy Chrome reader pins its vulnerable build-chain overrides", () => {
+  assert.equal(browserSessionInternals.dependencyManifest.dependencies["classic-level"], "3.0.0");
   assert.deepEqual(browserSessionInternals.dependencyManifest.overrides, {
     tar: "7.5.20",
     "@tootallnate/once": "2.0.1",
@@ -29,14 +30,51 @@ test("native Chrome login imports provider cookies into an owner-only session", 
         { name: "glovo_user_city", value: "MBA" },
       ];
     },
+    storageReader: async ({ origin, keys }) => {
+      assert.equal(origin, "https://glovoapp.com/");
+      assert.deepEqual(keys, ["glovo_refresh_token", "glv_device"]);
+      return { glovo_refresh_token: "refresh-token", glv_device: JSON.stringify({ urn: "glv:device:test" }) };
+    },
   });
 
   assert.equal(result.authenticated, true);
+  assert.equal(result.persistent, true);
   assert.equal(result.cookieCount, 2);
   const savedPath = join(sessionsDirectory, "glovo.json");
   const saved = JSON.parse(await readFile(savedPath, "utf8"));
   assert.deepEqual(saved.cookieNames, ["glovo_auth_info", "glovo_user_city"]);
+  assert.equal(saved.refreshToken, "refresh-token");
+  assert.equal(saved.deviceUrn, "glv:device:test");
   assert.equal((await stat(savedPath)).mode & 0o777, 0o600);
+});
+
+test("Chrome local-storage values decode the encodings used by Chromium", () => {
+  assert.equal(browserSessionInternals.decodeChromeStorageValue(Buffer.concat([Buffer.from([1]), Buffer.from("refresh-token")])), "refresh-token");
+  assert.equal(browserSessionInternals.decodeChromeStorageValue(Buffer.concat([Buffer.from([0]), Buffer.from("device", "utf16le")])), "device");
+});
+
+test("provider refresh locks serialize concurrent credential rotation", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "orderscout-lock-test-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const events = [];
+  let enteredFirst;
+  let releaseFirst;
+  const firstEntered = new Promise((resolve) => { enteredFirst = resolve; });
+  const firstReleased = new Promise((resolve) => { releaseFirst = resolve; });
+  const first = withBrowserSessionLock("glovo", async () => {
+    events.push("first-start");
+    enteredFirst();
+    await firstReleased;
+    events.push("first-end");
+  }, { sessionsDirectory: directory });
+  await firstEntered;
+  const second = withBrowserSessionLock("glovo", async () => {
+    events.push("second-start");
+    events.push("second-end");
+  }, { sessionsDirectory: directory });
+  releaseFirst();
+  await Promise.all([first, second]);
+  assert.deepEqual(events, ["first-start", "first-end", "second-start", "second-end"]);
 });
 
 test("login discovers Chrome profiles and saves only the live verified session", async (t) => {
