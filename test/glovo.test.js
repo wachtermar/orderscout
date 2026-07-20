@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createGlovoBasket, enrichGlovoOffers, glovoAddresses, glovoInternals, glovoMe, glovoOrderConfirmation, glovoSubmissionRequest, normalizeGlovoQuote, placeGlovoOrder } from "../src/glovo.js";
+import { createGlovoBasket, enrichGlovoOffers, glovoAddresses, glovoInternals, glovoMe, glovoMenu, glovoOrderConfirmation, glovoStoreCatalog, glovoSubmissionRequest, normalizeGlovoQuote, placeGlovoOrder } from "../src/glovo.js";
 
 function jwt(expiresAtSeconds) {
   return `${Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url")}.${Buffer.from(JSON.stringify({ exp: expiresAtSeconds })).toString("base64url")}.${"s".repeat(40)}`;
@@ -9,6 +9,13 @@ function jwt(expiresAtSeconds) {
 test("Glovo browser cookie token is parsed without exposing other cookies", () => {
   const encoded = encodeURIComponent(JSON.stringify({ access: { accessToken: "a".repeat(40) } }));
   assert.equal(glovoInternals.accessToken({ cookieHeader: `other=secret; glovo_auth_info=${encoded}` }), "a".repeat(40));
+});
+
+test("Glovo preserves product identifiers larger than JavaScript's safe integer range", () => {
+  const payload = glovoInternals.parseJsonLosslessIds('{"id":4611686018754460727,"price":4.95,"label":"4611686018754460727"}');
+  assert.equal(payload.id, "4611686018754460727");
+  assert.equal(payload.price, 4.95);
+  assert.equal(payload.label, "4611686018754460727");
 });
 
 test("Glovo silently renews an expired access token with the saved refresh token", async () => {
@@ -136,6 +143,77 @@ test("Glovo search response becomes a direct normalized offer", () => {
   assert.equal(offers[0].etaMinutes, 20);
   assert.equal(offers[0].source.storeAddressId, "34");
   assert.equal(offers[0].pricing.originalSubtotal, null);
+});
+
+test("Glovo search preserves store-only results for second-stage catalog discovery", () => {
+  const payload = { data: { elements: [{
+    type: "STORE_CARD_V2",
+    actions: [
+      { data: { events: [{ name: "shop_impressions.loaded", data: { cuisineTypeStoreTags: "Vapeo", numberOfRatedOrders: "12" } }] } },
+      { data: { path: "open?store_id=580573&shop_id=935347&category_id=22&shop_availability_status=OPEN&shop_delivery_fee=2.99" } },
+    ],
+    data: { slug: "estanco-marbella", title: { text: { text: "Estanco" } }, labels: [{ text: { text: "20-35 min" } }] },
+  }] } };
+  assert.equal(glovoInternals.offersFromSearch(payload, { citySlug: "marbella" }).length, 0);
+  const stores = glovoInternals.storesFromSearch(payload, { citySlug: "marbella" });
+  assert.equal(stores.length, 1);
+  assert.equal(stores[0].name, "Estanco");
+  assert.equal(stores[0].open, true);
+  assert.deepEqual(stores[0].categories, ["Vapeo"]);
+});
+
+test("Glovo searches a discovered store catalog and surfaces its legal-age gate", async () => {
+  const store = {
+    id: "580573", addressId: "935347", categoryId: "22", name: "Estanco", categories: ["Vapeo"],
+    rating: 4.6, ratingCount: 12, etaMinutes: { min: 20, max: 35 }, deliveryFee: 2.99,
+    open: true, schedulable: false, prime: false, url: "https://glovoapp.com/es/es/marbella/stores/estanco-marbella",
+  };
+  const calls = [];
+  const catalog = await glovoStoreCatalog(store, ["ice", "recarga"], { latitude: 36.5, longitude: -4.8, cityCode: "MBA" }, {
+    requireEligibility: true,
+    session: { source: "verification", cookieHeader: `glovo_auth_info=${encodeURIComponent(JSON.stringify({ accessToken: "a".repeat(40) }))}` },
+    fetchImpl: async (url) => {
+      const parsed = new URL(url);
+      calls.push(`${parsed.pathname}${parsed.search}`);
+      if (parsed.pathname.endsWith("/node/store_menu")) return Response.json({ type: "STORE_MENU", data: { elements: [{
+        name: "Recargas", slug: "recargas", action: { type: "POPUP", data: { id: "RESTRICTIONS", redirectPath: "/restricted" } }, elements: [],
+      }] } });
+      if (parsed.pathname.endsWith("/restrictions")) return Response.json({ title: "Confirma que eres mayor de edad", restrictions: [{ id: "TBC", text: "Confirmo que soy mayor de edad." }] });
+      if (parsed.pathname.endsWith("/search") && parsed.searchParams.get("query") === "ice") return Response.json({ totalProducts: 1, results: [{ products: [{
+        id: "product-1", externalId: "1784", storeProductId: "1784", name: "Desechable Vuse Mango Ice 20mg", price: 14.25,
+        priceInfo: { amount: 14.25, currencyCode: "EUR" }, attributeGroups: [],
+      }] }] });
+      return Response.json({ totalProducts: 0, results: [{ products: [] }] });
+    },
+  });
+  assert.equal(catalog.products.length, 1);
+  assert.equal(catalog.offers[0].item.name, "Desechable Vuse Mango Ice 20mg");
+  assert.equal(catalog.offers[0].source.storeProductId, "1784");
+  assert.equal(catalog.offers[0].source.eligibility.status, "confirmation_required");
+  assert.equal(catalog.offers[0].source.eligibility.restrictions[0].id, "TBC");
+  assert.ok(calls.some((value) => value.includes("query=ice")));
+});
+
+test("Glovo parses the current PRODUCT_TILE flight format and detects restricted collections", async () => {
+  const flight = [
+    { type: "PRODUCT_TILE", data: { id: "p1", externalId: "e1", storeProductId: "s1", name: "Chicken bowl", description: "Grilled chicken", price: 9.5, priceInfo: { amount: 9.5, currencyCode: "EUR" }, attributeGroups: [] } },
+    { type: "COLLECTION_TILE", data: { title: "Recargas", slug: "recargas", action: { type: "POPUP", data: { id: "RESTRICTIONS" } } } },
+  ].map((value) => JSON.stringify(value)).join("");
+  const html = `<script>self.__next_f.push([1,${JSON.stringify(flight)}])</script>`;
+  const menu = await glovoMenu("https://glovoapp.com/es/es/marbella/stores/test-store", async () => new Response(html));
+  assert.equal(menu.products.length, 1);
+  assert.equal(menu.products[0].name, "Chicken bowl");
+  assert.equal(menu.restrictionsDetected, true);
+});
+
+test("Glovo blocks age-restricted basket creation until explicit confirmation", async () => {
+  await assert.rejects(() => createGlovoBasket({
+    item: { name: "Vape" }, quantity: 1,
+    source: {
+      storeId: "12", storeAddressId: "34", storeCategoryId: "22", productId: "56", productExternalId: "P56", storeProductId: "sp56",
+      eligibility: { kind: "legal_age", status: "confirmation_required", providerActionUrl: "https://glovoapp.com/es/es/marbella/stores/test" },
+    },
+  }, { prepareOnly: true }), { code: "AGE_CONFIRMATION_REQUIRED" });
 });
 
 test("Glovo search retains provider-listed promotions and item savings", () => {

@@ -2,6 +2,15 @@
 
 This project follows Semantic Versioning. It is currently pre-1.0; command and normalized response changes may occur between minor releases and will be listed here.
 
+## 0.1.6 - 2026-07-20
+
+- Expand Glovo store-only search results into a bounded two-stage merchant-to-catalog search using the current store-menu, in-store search, and restriction contracts.
+- Let ChatGPT supply separate merchant-discovery and catalog query plans while retaining deterministic fallback, strict required-form filtering, and LLM final reasoning.
+- Parse current Glovo product tiles, preserve store availability and promotions, retry transient catalog throttling, and mark incomplete scans as partial instead of false no-match results.
+- Preserve Glovo's 64-bit product identifiers losslessly so catalog results remain valid for later basket creation.
+- Surface legal-age requirements as structured user actions, block restricted basket creation until explicit confirmation, and add a dedicated non-purchasing MCP/CLI confirmation step.
+- Fix vape-liquid relevance so disposables do not qualify merely because their descriptions mention liquid.
+
 ## 0.1.5 - 2026-07-20
 
 - Split arbitrary-product requests into required product concepts and optional preferences, then generate several bounded provider queries so decisive terms are not truncated.

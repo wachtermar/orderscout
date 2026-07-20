@@ -75,10 +75,10 @@ test("product search separates the requested product from preferences and genera
   const request = "I need some vape liquid, preferably something with ice";
   const spec = productIntentSpec(request);
   assert.equal(spec.concept.id, "vape");
-  assert.deepEqual(spec.coreTerms, []);
+  assert.deepEqual(spec.coreTerms, ["liquid"]);
   assert.deepEqual(spec.preferenceConcepts.map((entry) => entry.id), ["ice"]);
   assert.deepEqual(providerSearchQueries(request), [
-    "vape liquid ice", "vape ice", "vape hielo", "vape liquid", "vape", "vaper",
+    "vape liquid ice", "vape ice", "vape hielo", "vape liquid", "vaper liquid", "vape",
   ]);
 });
 
@@ -87,15 +87,16 @@ test("product relevance requires a whole product anchor and treats preferences a
   for (const name of ["Plain rice", "Lipton Ice Tea", "Leche liquida entera", "Vanilla ice cream"]) {
     assert.equal(productRelevance(request, { item: { name } }).relevant, false, name);
   }
-  const icy = productRelevance(request, { item: { name: "Vape Lost Mary Peach Ice (1000)" } });
-  const mango = productRelevance(request, { item: { name: "Vape Lost Mary Triple Mango (1000)" } });
+  assert.equal(productRelevance(request, { item: { name: "Vape Lost Mary Peach Ice (1000)", description: "Disposable with 2ml of líquido" } }).relevant, false);
+  const icy = productRelevance(request, { item: { name: "Líquido para vaper Peach Ice 10ml" } });
+  const mango = productRelevance(request, { item: { name: "Vape liquid Triple Mango 10ml" } });
   assert.equal(icy.relevant, true);
   assert.equal(icy.preference, 100);
   assert.equal(mango.relevant, true);
   assert.equal(mango.preference, 0);
   assert.equal(productRelevance(request, {
     item: { name: "AROMA KING MINI - 700 SANDÍA HELADA", category: "VAPES DESECHABLES" },
-  }).preference, 100);
+  }).relevant, false);
 });
 
 test("product relevance generalizes to exact product qualifiers", () => {
@@ -245,7 +246,7 @@ test("product discovery prioritizes a directly matching merchant even when it is
     {
       fetchImpl,
       fetchMenuImpl: async (slug) => slug === "croco-vapes" ? {
-        ...menuData([{ Id: "icy", Name: "AROMA KING MINI - 700 SANDÍA HELADA", Variations: [{ Id: "icy", BasePrice: 6.5 }] }], "Croco Vapes"),
+        ...menuData([{ Id: "icy", Name: "Líquido para vaper SANDÍA ICE 10ml", Variations: [{ Id: "icy", BasePrice: 6.5 }] }], "Croco Vapes"),
         manifest: {
           ...menuData([], "Croco Vapes").manifest,
           Menus: [{ MenuGroupId: "menu-group", ServiceTypes: ["delivery"], Categories: [{

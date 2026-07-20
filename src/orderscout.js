@@ -7,19 +7,19 @@ import { promisify } from "node:util";
 import { openSystemUrl } from "./auth.js";
 import { beginBrowserLogin, importChromeSession, loadBrowserSession, logoutBrowserSession } from "./browser-session.js";
 import {
-  createGlovoBasket, enrichGlovoOffers, glovoAddresses, glovoBaskets, glovoCheckoutUrl, glovoMe, glovoMenu, placeGlovoOrder, quoteGlovoBasket, searchGlovo,
+  createGlovoBasket, enrichGlovoOffers, glovoAddresses, glovoBaskets, glovoCheckoutUrl, glovoMe, glovoMenu, glovoStoreCatalog, placeGlovoOrder, quoteGlovoBasket, searchGlovo,
 } from "./glovo.js";
 import { CliError, parseArgs, resolveLocation } from "./lib.js";
 import { errorEnvelope, exitCodeFor, writeOutput } from "./output.js";
 import { PROVIDERS, configureAccounts, loadAccounts, parseProviderList, publicAccountStatus, recordProviderStatus } from "./providers.js";
 import {
-  ingestOffers, loadSearch, recordBasket, recordProviderError, recordQuote, searchResults, startSearch,
+  confirmEligibility, ingestOffers, loadSearch, recordBasket, recordProviderError, recordQuote, searchResults, startSearch,
 } from "./searches.js";
 import { runOrderScoutMcpServer } from "./orderscout-mcp.js";
 import {
   createUberEatsBasket, placeUberEatsOrder, quoteUberEatsBasket, searchUberEats, uberEatsCarts, uberEatsMe, uberEatsMenu,
 } from "./ubereats.js";
-import { parseIntent, providerSearchQueries } from "./recommend.js";
+import { parseIntent, productIntentSpec, providerSearchQueries } from "./recommend.js";
 
 const execFileAsync = promisify(execFile);
 const JUSTEAT_CLI = fileURLToPath(new URL("./cli.js", import.meta.url));
@@ -34,10 +34,12 @@ Usage:
   orderscout accounts set --providers justeat,glovo,ubereats [--accounts JSON] [--memberships JSON]
   orderscout accounts record <provider> --authenticated true [--membership true] [--transport api|browser] [--address-selected true]
   orderscout recommend <what you want> [--at location] [--objective cheapest|fastest|best|value]
+    [--discovery-queries JSON-array] [--catalog-queries JSON-array] [--top 1..100]
   orderscout search begin <what you want> [the same flags]
   orderscout search ingest <search-id> <provider> --json '[normalized offers]'
   orderscout search error <search-id> <provider> --message text
   orderscout search results <search-id>
+  orderscout eligibility confirm <search-id> <offer-id> --confirmed true
   orderscout quote record <search-id> <offer-id> --json '{"subtotal":10,"fees":{"delivery":2},"total":12}'
   orderscout basket prepare|create|checkout|open <search-id> <offer-id>
   orderscout order place <search-id> <offer-id> [--confirm fingerprint]
@@ -47,8 +49,9 @@ Usage:
 
 All three providers use direct HTTP adapters. Glovo and Uber Eats login opens the official site in native
 Chrome and automatically finds the signed-in profile, importing only that provider's domain cookies after sign-in;
-Playwright is not used. Search, menu,
-basket, and checkout operations run directly through each provider adapter. No search or quote places an order.
+Playwright is not used. Search, menu, basket, and checkout operations run directly through each provider adapter.
+Glovo search discovers merchants before querying relevant shop catalogs. Restricted baskets require explicit user
+eligibility confirmation. No search or quote places an order.
 `;
 
 function jsonFlag(flags, key, fallback = undefined) {
@@ -62,6 +65,19 @@ function booleanFlag(flags, key) {
   if (flags[key] === true || flags[key] === "true" || flags[key] === "1") return true;
   if (flags[key] === false || flags[key] === "false" || flags[key] === "0") return false;
   throw new CliError(`--${key} must be true or false`);
+}
+
+function stringArrayFlag(flags, key) {
+  const value = jsonFlag(flags, key, []);
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    throw new CliError(`--${key} must be a JSON array of strings`, "INVALID_QUERY_PLAN");
+  }
+  return [...new Set(value.map((entry) => entry.trim()).filter(Boolean))].slice(0, 8);
+}
+
+function mergedQueries(primary, fallback, limit = 8) {
+  return [...new Set([...(primary ?? []), ...(fallback ?? [])]
+    .map((entry) => String(entry ?? "").trim()).filter(Boolean))].slice(0, limit);
 }
 
 async function runLegacyJustEat(args, { allowFailure = false } = {}) {
@@ -225,21 +241,86 @@ async function collectGlovo(intent, flags) {
     if (!location) throw new CliError("Glovo has no usable saved delivery address; pass --at once", "LOCATION_REQUIRED");
   }
   const parsed = parseIntent(intent);
-  const queries = providerSearchQueries(parsed);
-  const results = await Promise.allSettled(queries.map((query) => searchGlovo(query, location, { limit: flags.limit })));
+  const fallbackQueries = providerSearchQueries(parsed);
+  const discoveryQueries = mergedQueries(flags.discoveryQueries, fallbackQueries);
+  const catalogQueries = mergedQueries(flags.catalogQueries, fallbackQueries);
+  const results = await Promise.allSettled(discoveryQueries.map((query) => searchGlovo(query, location, { limit: flags.limit })));
   const fulfilled = results.filter((result) => result.status === "fulfilled");
   if (!fulfilled.length) throw results[0].reason;
-  const discovered = [...new Map(fulfilled.flatMap((result) => result.value.offers)
-    .map((offer) => [`${offer.merchant?.id}:${offer.item?.id}`, {
+  const allStores = [...new Map(fulfilled.flatMap((result) => result.value.stores ?? [])
+    .map((store) => [`${store.id}:${store.addressId}`, store])).values()];
+  const merchantTerms = discoveryQueries.flatMap((query) => query.normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase().split(/[^a-z0-9]+/)).filter((term) => term.length >= 4);
+  const relevantStores = allStores.filter((store) => {
+    const text = `${store.name} ${(store.categories ?? []).join(" ")}`.normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    return merchantTerms.some((term) => text.includes(term));
+  });
+  const maxStores = Math.max(1, Math.min(8, Number(flags.stores ?? 6)));
+  // When several merchant cards clearly match the LLM's discovery plan, stay
+  // inside that set. Appending unrelated stores wastes Glovo's catalog-search
+  // budget and can turn a precise request into a rate-limited partial scan.
+  const prioritizedStores = relevantStores.length >= 2 ? relevantStores : allStores;
+  const stores = [...new Map(prioritizedStores
+    .map((store) => [`${store.id}:${store.addressId}`, store])).values()].slice(0, maxStores);
+  const requireEligibility = productIntentSpec(parsed).concept?.id === "vape";
+  const catalogs = [];
+  let failedCatalogs = 0;
+  for (let start = 0; start < stores.length; start += 2) {
+    const batch = await Promise.allSettled(stores.slice(start, start + 2).map((store) => glovoStoreCatalog(store, catalogQueries, location, {
+      requireEligibility,
+      queryLimit: 6,
+      concurrency: 2,
+    })));
+    for (const result of batch) {
+      if (result.status === "fulfilled") catalogs.push(result.value);
+      else failedCatalogs += 1;
+    }
+  }
+  if (stores.length && !catalogs.length) {
+    throw new CliError("Glovo discovered relevant merchants but every catalog request failed; retry instead of treating this as no match", "GLOVO_CATALOG_SEARCH_FAILED", {
+      discoveredStores: stores.length,
+      failedCatalogs,
+    });
+  }
+  const directOffers = fulfilled.flatMap((result) => result.value.offers ?? []);
+  const allOffers = [...directOffers, ...catalogs.flatMap((catalog) => catalog.offers)];
+  const discovered = [...new Map(allOffers.map((offer) => [
+    `${offer.merchant?.id}:${offer.source?.storeProductId ?? offer.source?.productExternalId ?? offer.item?.id}`,
+    {
       ...offer,
+      available: parsed.deliveryTime === "scheduled"
+        ? (stores.find((store) => String(store.id) === String(offer.merchant?.id))?.schedulable || offer.available)
+        : offer.available,
       ...(parsed.deliveryTime === "scheduled" ? { fulfilment: { requestedAt: parsed.scheduledAt, timeZone: parsed.timeZone, status: "unverified", source: "glovo-scheduled-search" } } : {}),
-    }])).values()];
-  return enrichGlovoOffers(discovered);
+    },
+  ])).values()];
+  const enriched = await enrichGlovoOffers(discovered);
+  return {
+    offers: enriched,
+    providerMeta: {
+      strategy: "merchant-discovery-then-catalog-search",
+      discoveryQueries,
+      catalogQueries,
+      discoveredStores: stores.length,
+      searchedStores: catalogs.length,
+      catalogProducts: catalogs.reduce((sum, catalog) => sum + catalog.products.length, 0),
+      failedCatalogs,
+      failedCatalogQueries: catalogs.reduce((sum, catalog) => sum + catalog.failedQueries, 0),
+      partial: failedCatalogs > 0 || catalogs.some((catalog) => catalog.failedQueries > 0),
+      eligibilityRequired: catalogs.filter((catalog) => catalog.eligibility).map((catalog) => ({
+        merchantId: catalog.store.id,
+        merchantName: catalog.store.name,
+        providerActionUrl: catalog.store.url,
+        kind: catalog.eligibility.kind,
+      })),
+    },
+  };
 }
 
 async function collectUberEats(intent, flags) {
   const parsed = parseIntent(intent);
-  const queries = providerSearchQueries(parsed);
+  const queries = mergedQueries([...(flags.discoveryQueries ?? []), ...(flags.catalogQueries ?? [])], providerSearchQueries(parsed));
   const results = await Promise.allSettled(queries.map((query) => searchUberEats(query, {
     limit: flags.limit, scheduledAt: parsed.scheduledAt, timeZone: parsed.timeZone,
   })));
@@ -282,7 +363,11 @@ async function collectAllProviders(searchId, providers, intent, flags) {
   for (const outcome of outcomes) {
     const timing = { startedAt: outcome.startedAt, completedAt: outcome.completedAt, durationMs: outcome.durationMs };
     if (outcome.error) await recordProviderError(searchId, outcome.provider, outcome.error.message ?? outcome.error.code, timing);
-    else await ingestOffers(searchId, outcome.provider, outcome.value, { timing });
+    else await ingestOffers(searchId, outcome.provider, Array.isArray(outcome.value) ? outcome.value : outcome.value.offers, {
+      timing,
+      providerMeta: Array.isArray(outcome.value) ? null : outcome.value.providerMeta,
+      complete: Array.isArray(outcome.value) || !outcome.value.providerMeta?.partial,
+    });
   }
 }
 
@@ -461,13 +546,20 @@ export async function runOrderScout(argv) {
     if (action === "begin") {
       const intent = args.join(" ");
       if (flags.providers) throw new CliError("Search always uses every enabled account. Change providers with `orderscout accounts set --providers ...`.", "PROVIDER_SELECTION_IS_ACCOUNT_SETTING");
+      const discoveryQueries = stringArrayFlag(flags, "discovery-queries");
+      const catalogQueries = stringArrayFlag(flags, "catalog-queries");
       const started = await startSearch(intent, {
         objective: flags.objective,
         locationHint: flags.at,
+        queryPlan: {
+          source: discoveryQueries.length || catalogQueries.length ? "agent+deterministic-fallback" : "deterministic",
+          discoveryQueries,
+          catalogQueries,
+        },
       });
       let result = started;
       if (!flags["skip-api"]) {
-        await collectAllProviders(started.search.id, started.apiProviders, intent, flags);
+        await collectAllProviders(started.search.id, started.apiProviders, intent, { ...flags, discoveryQueries, catalogQueries });
         result = { ...started, results: compactSearchResult(await searchResults(started.search.id), flags) };
       }
       return writeOutput(result, flags);
@@ -488,6 +580,10 @@ export async function runOrderScout(argv) {
 
   if (command === "quote" && rest[0] === "record") {
     return writeOutput(await recordQuote(rest[1], rest[2], jsonFlag(flags, "json")), flags);
+  }
+
+  if (command === "eligibility" && rest[0] === "confirm") {
+    return writeOutput(await confirmEligibility(rest[1], rest[2], booleanFlag(flags, "confirmed")), flags);
   }
 
   if (command === "basket") {

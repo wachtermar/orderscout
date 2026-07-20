@@ -72,13 +72,23 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_search_begin",
-    description: "Directly and concurrently search every provider enabled in OrderScout account settings—never a caller-selected subset—then rank any deliverable item. Product requests are expanded into bounded provider queries, filtered by whole product concepts instead of substrings, and ranked by optional preferences; noisy provider results never qualify on a preference alone. Natural-language dates such as tomorrow at 10am become a timezone-aware requestedAt timestamp and meal occasions such as breakfast constrain both provider queries and dishes. Deals and memberships are retained. Multi-person meals contain distinct dish lines or a genuine sharing item. It never creates a basket.",
+    description: "Directly and concurrently search every enabled provider. For Glovo it first discovers relevant merchants, then searches each merchant's full catalog index; it never mistakes store-only results for no match. Supply a small LLM-authored discovery plan: broad merchant terms such as vape, estanco, pharmacy, poke, or supermarket, plus catalog terms for the requested item and preferences. OrderScout merges these with deterministic fallback terms and applies strict whole-concept relevance after retrieval. Legal-age gates are returned as structured user action requirements, never bypassed. Deals and memberships are retained. It never creates a basket.",
     inputSchema: objectSchema({
       intent: string("Complete natural-language request including quantity, budget, dietary needs, and cheapest/fastest/best preference."),
       objective: { type: "string", enum: ["cheapest", "fastest", "best", "value"] },
       at: string("Optional non-sensitive location hint. Prefer each provider's already selected saved address."),
+      discoveryQueries: { type: "array", description: "Up to 8 broad merchant-discovery terms chosen from the user's intent, including useful Spanish/local synonyms.", maxItems: 8, items: { type: "string", minLength: 1, maxLength: 80 } },
+      catalogQueries: { type: "array", description: "Up to 8 item/preference terms used inside each discovered merchant's catalog, such as ice, mentol, recarga, ensalada, or grilled chicken.", maxItems: 8, items: { type: "string", minLength: 1, maxLength: 80 } },
+      maxCandidates: { type: "integer", minimum: 1, maximum: 100, description: "How many normalized matching candidates the LLM wants back for final reasoning. The CLI still scans beyond this display limit." },
     }, ["intent"]), annotations: localWrite,
-    command: (input) => ["search", "begin", input.intent, "--agent", ...(input.objective ? ["--objective", input.objective] : []), ...(input.at ? ["--at", input.at] : [])],
+    command: (input) => [
+      "search", "begin", input.intent, "--agent",
+      ...(input.objective ? ["--objective", input.objective] : []),
+      ...(input.at ? ["--at", input.at] : []),
+      ...(input.discoveryQueries?.length ? ["--discovery-queries", JSON.stringify(input.discoveryQueries)] : []),
+      ...(input.catalogQueries?.length ? ["--catalog-queries", JSON.stringify(input.catalogQueries)] : []),
+      ...(input.maxCandidates ? ["--top", String(input.maxCandidates)] : []),
+    ],
   },
   {
     name: "orderscout_ingest_offers",
@@ -99,9 +109,22 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_results",
-    description: "Rank all collected offers and return explicit status for every configured provider, promotion and membership signals, structured fulfilment, exact-price coverage, and winnerReady. For scheduled requests, winnerReady stays false until the requested slot and current exact delivered total are both verified for every provider that returned a suitable match. Never call an unready result the winner.",
-    inputSchema: objectSchema({ searchId: string("OrderScout search ID.") }, ["searchId"]), annotations: readOnly,
-    command: (input) => ["search", "results", input.searchId, "--agent"],
+    description: "Rank collected offers and return explicit status for every provider, catalog coverage, promotions, memberships, fulfilment, and exact-price coverage. Increase limit when the LLM needs a broader normalized shortlist; raw untrusted provider payloads are never dumped into context. Never call an unready result the winner.",
+    inputSchema: objectSchema({
+      searchId: string("OrderScout search ID."),
+      limit: { type: "integer", minimum: 1, maximum: 100, description: "Maximum normalized matching offers to inspect." },
+    }, ["searchId"]), annotations: readOnly,
+    command: (input) => ["search", "results", input.searchId, "--agent", ...(input.limit ? ["--top", String(input.limit)] : [])],
+  },
+  {
+    name: "orderscout_confirm_eligibility",
+    description: "Record the user's explicit Glovo legal-age confirmation for one store in this search. Call only after the user personally checks Glovo's official age box or explicitly confirms legal age in the current conversation. Never infer age from account data, identity, prior chats, or silence. This is local consent state; it does not place an order or add to a basket.",
+    inputSchema: objectSchema({
+      searchId: string("OrderScout search ID."),
+      offerId: string("A Glovo offer ID carrying source.eligibility."),
+      confirmed: { type: "boolean", const: true, description: "Must be true and must reflect the user's explicit current confirmation." },
+    }, ["searchId", "offerId", "confirmed"]), annotations: localWrite,
+    command: (input) => ["eligibility", "confirm", input.searchId, input.offerId, "--confirmed", String(input.confirmed), "--agent"],
   },
   {
     name: "orderscout_record_checkout_quote",
@@ -174,7 +197,7 @@ export function placementEnvironment(name, input = {}, base = {}) {
 
 export async function handleOrderScoutMcpMessage(message) {
   const id = message.id ?? null;
-  if (message.method === "initialize") return { jsonrpc: "2.0", id, result: { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "orderscout", version: "0.1.5" } } };
+  if (message.method === "initialize") return { jsonrpc: "2.0", id, result: { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "orderscout", version: "0.1.6" } } };
   if (message.method === "notifications/initialized") return null;
   if (message.method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: ORDERSCOUT_MCP_TOOLS.map(({ command, ...tool }) => tool) } };
   if (message.method === "tools/call") {
