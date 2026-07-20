@@ -413,6 +413,10 @@ test("MCP and Work-skill contracts expose provider disposition and all-provider 
   assert.match(SKILL_TEXT, /externalEvidence\.complete/);
   assert.match(SKILL_TEXT, /distinct suitable dishes/i);
   assert.match(SKILL_TEXT, /every provider/i);
+  assert.match(SKILL_TEXT, /CHECKOUT_UNAVAILABLE/);
+  assert.match(SKILL_TEXT, /next suitable same-merchant bundle/i);
+  assert.match(SKILL_TEXT, /select_existing_cart/);
+  assert.match(SKILL_TEXT, /nondeterministic generic checkout URL/i);
 });
 
 test("corpus hard constraints survive parsing while qualitative meaning remains owned by the model", () => {

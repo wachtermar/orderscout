@@ -20,7 +20,7 @@ import {
 import { runOrderScoutMcpServer } from "./orderscout-mcp.js";
 import {
   createUberEatsBasket, expandUberEatsCatalogs, placeUberEatsOrder, quoteUberEatsBasket, searchUberEats, summarizeUberEatsCarts,
-  uberEatsCarts, uberEatsDraftDeliveryLocation, uberEatsMe, uberEatsMenu,
+  uberEatsBasketHandoff, uberEatsCarts, uberEatsDraftDeliveryLocation, uberEatsMe, uberEatsMenu,
 } from "./ubereats.js";
 import { parseIntent, productIntentSpec, providerSearchQueries } from "./recommend.js";
 import { expandProviderDiscoveryQueries, planProviderRetrieval } from "./retrieval-plan.js";
@@ -881,7 +881,7 @@ export async function runOrderScout(argv) {
     return writeOutput({
       name: "OrderScout",
       version: packageJson.version,
-      workflowContract: "llm-comparison-v4",
+      workflowContract: "llm-comparison-v5",
       requiredTools: [
         "orderscout_search_begin", "orderscout_candidates", "orderscout_record_external_evidence", "orderscout_select_candidates",
         "orderscout_review_provider", "orderscout_quote_comparison", "orderscout_results",
@@ -1076,9 +1076,12 @@ export async function runOrderScout(argv) {
         if (!offer.source?.planId) throw new CliError("Just Eat offer is missing its source plan", "SOURCE_PLAN_MISSING");
         return writeOutput(await runLegacyJustEat(["order", "open", offer.source.planId, ...(flags["no-open"] ? ["--no-open"] : []), "--agent"]), flags);
       }
-      const url = offer.provider === "glovo" ? glovoCheckoutUrl(offer)
-        : offer.provider === "ubereats" ? "https://www.ubereats.com/checkout?mod=checkout"
-          : null;
+      if (offer.provider === "ubereats") {
+        const handoff = uberEatsBasketHandoff(offer, { opened: !flags["no-open"] });
+        if (!flags["no-open"]) await openSystemUrl(handoff.url);
+        return writeOutput(handoff, flags);
+      }
+      const url = offer.provider === "glovo" ? glovoCheckoutUrl(offer) : null;
       if (!url) throw new CliError("This provider has no basket handoff", "BASKET_HANDOFF_REQUIRED");
       if (!flags["no-open"]) await openSystemUrl(url);
       return writeOutput({ provider: offer.provider, opened: !flags["no-open"], url, submitted: false }, flags);

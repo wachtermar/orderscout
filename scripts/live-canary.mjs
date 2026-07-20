@@ -11,7 +11,11 @@ const requested = process.argv.find((value) => value.startsWith("--scenario="))?
 const selected = requested
   ? scenarios.filter(({ id }) => id === requested)
   : all ? scenarios : scenarios.slice(0, 3);
-const pauseMilliseconds = Math.max(0, Number(process.env.ORDERSCOUT_LIVE_PAUSE_MS ?? 2_500));
+// A full three-provider search expands many merchant catalogs. Keep the live
+// matrix human-paced by default so one test run does not turn its own traffic
+// into provider cooldown failures. Developers may override this for a single
+// targeted scenario.
+const pauseMilliseconds = Math.max(0, Number(process.env.ORDERSCOUT_LIVE_PAUSE_MS ?? 65_000));
 
 if (!selected.length) {
   process.stderr.write(`${JSON.stringify({ ok: false, error: "Unknown live scenario", requested })}\n`);
