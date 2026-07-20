@@ -461,6 +461,7 @@ export async function glovoMenu(url, fetchImpl = fetch) {
   const response = await fetchImpl(parsed, { headers: { "accept-language": "es-ES" } });
   if (!response.ok) throw new CliError(`Glovo store page returned HTTP ${response.status}`, "GLOVO_HTTP_ERROR");
   const flight = nextFlightText(await response.text());
+  const storeRoute = flight.match(/\/v\d+\/stores\/([^/"?]+)\/addresses\/([^/"?]+)\//);
   const products = ["PRODUCT_ROW", "PRODUCT_TILE"].flatMap((type) => objectsOfType(flight, type)).map(({ data }) => ({
     id: data.id, externalId: data.externalId, storeProductId: data.storeProductId, name: data.name,
     description: data.description ?? null, price: data.promotion?.priceInfo?.amount ?? data.promotion?.price ?? data.priceInfo?.amount ?? data.price,
@@ -475,6 +476,7 @@ export async function glovoMenu(url, fetchImpl = fetch) {
   }));
   return {
     url: parsed.toString(),
+    store: storeRoute ? { id: storeRoute[1], addressId: storeRoute[2] } : null,
     products: [...new Map(products.filter((item) => item.id && item.name).map((item) => [`${item.storeProductId ?? item.externalId ?? item.id}`, item])).values()],
     restrictionsDetected: restricted.length > 0 || collections.some((collection) => collection.restricted),
     collections,
@@ -584,7 +586,12 @@ export function glovoMenuOffers(store, menu, options = {}) {
     restrictions: [],
     providerActionUrl: store.url,
   } : null;
-  return (menu?.products ?? []).map((product) => glovoCatalogOffer(store, product, { eligibility })).filter(Boolean);
+  const currentStore = {
+    ...store,
+    ...(menu?.store?.id ? { id: menu.store.id } : {}),
+    ...(menu?.store?.addressId ? { addressId: menu.store.addressId } : {}),
+  };
+  return (menu?.products ?? []).map((product) => glovoCatalogOffer(currentStore, product, { eligibility })).filter(Boolean);
 }
 
 async function mapConcurrent(values, concurrency, mapper) {
@@ -881,6 +888,10 @@ export async function createGlovoBasket(offer, options = {}) {
   }
   const source = lines[0].source;
   const menu = offer.url ? await glovoMenu(offer.url, options.fetchImpl) : { products: [] };
+  const currentStore = {
+    id: menu.store?.id ?? source.storeId,
+    addressId: menu.store?.addressId ?? source.storeAddressId,
+  };
   const configured = lines.map((line, index) => {
     const product = menu.products.find((entry) => String(entry.id) === String(line.source.productId)) ?? line.source.product;
     const selections = options.customizations?.[String(line.source.productId)] ?? options.customizations?.[index]
@@ -888,7 +899,13 @@ export async function createGlovoBasket(offer, options = {}) {
     return glovoProduct(line.source, line.quantity ?? 1, product, selections);
   });
   const products = configured.map((entry) => entry.product);
-  const payload = { products, storeId: source.storeId, storeAddressId: Number(source.storeAddressId), storeCategoryId: source.storeCategoryId ?? "1", handlingStrategy: "DELIVERY" };
+  const payload = {
+    products,
+    storeId: Number(currentStore.id),
+    storeAddressId: Number(currentStore.addressId),
+    storeCategoryId: Number(source.storeCategoryId ?? 1),
+    handlingStrategy: "DELIVERY",
+  };
   const customizationReview = configured.map((entry, index) => ({
     itemId: String(lines[index].source.productId), itemName: lines[index].item?.name ?? null,
     selectionMode: options.customizations ? "explicit" : "minimum-price-defaults",
@@ -897,14 +914,14 @@ export async function createGlovoBasket(offer, options = {}) {
   if (options.prepareOnly) return { mutated: false, payload, customizationReview, submitted: false };
   const location = await defaultGlovoLocation(options);
   const me = await glovoMe(options);
-  const existing = await request(`/v1/authenticated/customers/${me.id}/baskets/stores/${source.storeId}`, { auth: true, location, fetchImpl: options.fetchImpl });
+  const existing = await request(`/v1/authenticated/customers/${me.id}/baskets/stores/${currentStore.id}`, { auth: true, location, fetchImpl: options.fetchImpl });
   let basket;
   if (!existing) {
     basket = await request(`/v1/authenticated/customers/${me.id}/baskets`, { method: "POST", auth: true, location, fetchImpl: options.fetchImpl, body: payload });
   } else {
     if ((existing.products ?? []).length) {
       throw new CliError("This Glovo store already has a non-empty basket; review it before adding comparison items", "CART_CONFLICT", {
-        storeId: source.storeId,
+        storeId: currentStore.id,
         existingItemCount: existing.products.length,
       });
     }

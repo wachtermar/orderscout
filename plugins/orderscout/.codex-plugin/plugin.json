@@ -1,6 +1,6 @@
 {
   "name": "orderscout",
-  "version": "0.1.11+codex.20260720223301",
+  "version": "0.1.12+codex.20260720224537",
   "description": "Find and compare anything deliverable through Just Eat, Glovo, and Uber Eats in Spain, then prepare or safely place the selected order.",
   "author": {
     "name": "Marcel Wachter",

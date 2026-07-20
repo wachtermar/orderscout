@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createGlovoBasket, enrichGlovoOffers, glovoAddresses, glovoInternals, glovoMe, glovoMenu, glovoOrderConfirmation, glovoStoreCatalog, glovoSubmissionRequest, normalizeGlovoQuote, placeGlovoOrder, quoteGlovoBasket, searchGlovo } from "../src/glovo.js";
+import { createGlovoBasket, enrichGlovoOffers, glovoAddresses, glovoInternals, glovoMe, glovoMenu, glovoMenuOffers, glovoOrderConfirmation, glovoStoreCatalog, glovoSubmissionRequest, normalizeGlovoQuote, placeGlovoOrder, quoteGlovoBasket, searchGlovo } from "../src/glovo.js";
 
 function jwt(expiresAtSeconds) {
   return `${Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url")}.${Buffer.from(JSON.stringify({ exp: expiresAtSeconds })).toString("base64url")}.${"s".repeat(40)}`;
@@ -227,6 +227,7 @@ test("Glovo searches a discovered store catalog and surfaces its legal-age gate"
 
 test("Glovo parses the current PRODUCT_TILE flight format and detects restricted collections", async () => {
   const flight = [
+    { path: "/v4/stores/12/addresses/99/content/main" },
     { type: "PRODUCT_TILE", data: { id: "p1", externalId: "e1", storeProductId: "s1", name: "Chicken bowl", description: "Grilled chicken", price: 9.5, priceInfo: { amount: 9.5, currencyCode: "EUR" }, attributeGroups: [] } },
     { type: "COLLECTION_TILE", data: { title: "Recargas", slug: "recargas", action: { type: "POPUP", data: { id: "RESTRICTIONS" } } } },
   ].map((value) => JSON.stringify(value)).join("");
@@ -234,7 +235,37 @@ test("Glovo parses the current PRODUCT_TILE flight format and detects restricted
   const menu = await glovoMenu("https://glovoapp.com/es/es/marbella/stores/test-store", async () => new Response(html));
   assert.equal(menu.products.length, 1);
   assert.equal(menu.products[0].name, "Chicken bowl");
+  assert.deepEqual(menu.store, { id: "12", addressId: "99" });
   assert.equal(menu.restrictionsDetected, true);
+});
+
+test("Glovo menu metadata replaces a stale search-card shop ID before basket creation", async () => {
+  const flight = [
+    { path: "/v4/stores/12/addresses/99/content/main" },
+    {
+      type: "PRODUCT_ROW",
+      data: {
+        id: "56", externalId: "P56", storeProductId: "sp56", name: "Pad Thai", price: 9.5,
+        priceInfo: { amount: 9.5, currencyCode: "EUR" }, attributeGroups: [],
+      },
+    },
+  ].map((value) => JSON.stringify(value)).join("");
+  const html = `<script>self.__next_f.push([1,${JSON.stringify(flight)}])</script>`;
+  const fetchImpl = async () => new Response(html);
+  const menu = await glovoMenu("https://glovoapp.com/es/es/marbella/stores/test-store", fetchImpl);
+  const offers = glovoMenuOffers({
+    id: "12", addressId: "34", categoryId: "1", name: "Test", url: "https://glovoapp.com/es/es/marbella/stores/test-store",
+  }, menu);
+  assert.equal(offers[0].source.storeAddressId, "99");
+
+  const prepared = await createGlovoBasket({
+    url: "https://glovoapp.com/es/es/marbella/stores/test-store",
+    item: { name: "Pad Thai" }, quantity: 1,
+    source: { storeId: "12", storeAddressId: "34", storeCategoryId: "1", productId: "56", productExternalId: "P56", storeProductId: "sp56" },
+  }, { prepareOnly: true, fetchImpl });
+  assert.equal(prepared.payload.storeId, 12);
+  assert.equal(prepared.payload.storeAddressId, 99);
+  assert.equal(prepared.payload.storeCategoryId, 1);
 });
 
 test("Glovo blocks age-restricted basket creation until explicit confirmation", async () => {
