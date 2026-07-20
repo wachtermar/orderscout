@@ -64,13 +64,15 @@ Scheduled requests use the local Spain timezone and preserve the requested insta
 
 Provider-listed deals are retained: struck-through item prices and savings, percentage discounts, 2-for-1 listings, free delivery, merchant offers, and membership eligibility. Listed deals influence provisional value ranking, while only savings actually shown by checkout affect an exact comparison.
 
-Product matching is general. OrderScout separates the required product from optional preferences, generates several short provider-appropriate queries, and applies one strict whole-token/concept relevance gate after every provider responds. A preference cannot qualify an unrelated product—`ice` does not match `rice`, and an iced drink is not a vape result. Quantity-aware helpers add extra understanding where useful—for example bottle sizes, multipacks, total litres, still versus sparkling, and price per litre for water. Multi-person meal results contain explicit distinct dish lines, or one item explicitly sold for sharing; OrderScout does not multiply one ordinary dish by the party size. Breakfast searches require prepared breakfast dishes rather than raw egg packs or a keyword found in an unrelated product. “Healthy” and “tasty” remain transparent ranking signals, not medical or nutritional claims.
+Product and meal discovery is a hybrid LLM + CLI workflow. The LLM turns the request into broad merchant terms and separate in-catalog terms, including useful Spanish synonyms. OrderScout then performs provider-native retrieval: Glovo discovers relevant shops before querying each shop's full catalog search index, while Just Eat and Uber Eats expand merchants through their direct menu adapters. The CLI normalizes untrusted catalog data, separates required product form from optional preferences, and applies a strict whole-token/concept relevance gate; the LLM reasons over the resulting shortlist to judge combinations, quality, taste, deals, and trade-offs. This avoids both brittle single-keyword searches and dumping thousands of raw catalog fields into a model context.
+
+A preference cannot qualify an unrelated product—`ice` does not match `rice`, and a disposable vape is not e-liquid just because its description mentions liquid. Quantity-aware helpers add extra understanding where useful—for example bottle sizes, multipacks, total litres, still versus sparkling, and price per litre for water. Multi-person meal results contain explicit distinct dish lines, or one item explicitly sold for sharing; OrderScout does not multiply one ordinary dish by the party size. Breakfast searches require prepared breakfast dishes rather than raw egg packs or a keyword found in an unrelated product. “Healthy” and “tasty” remain transparent ranking signals, not medical or nutritional claims.
 
 ## Will it accidentally order?
 
 Searching, opening a menu, creating a basket, reading checkout, and opening the official checkout page do not place an order.
 
-For age- or identity-restricted goods, OrderScout never bypasses provider eligibility checks. The user must satisfy every official provider control before checkout can continue.
+For age- or identity-restricted goods, OrderScout never bypasses provider eligibility checks. It can discover and compare restricted catalog items, but basket creation is blocked. ChatGPT opens the trusted provider page and the user personally completes the official checkbox or verification. Only after explicit current confirmation does OrderScout unlock that store for the current search; it still does not create or submit an order without the normal later approvals.
 
 Programmatic placement has two locks:
 
@@ -153,6 +155,14 @@ orderscout ubereats menu <store-uuid>
 orderscout recommend "best-rated healthy dinner for two under €30" \
   --at "29603 Marbella"
 
+# Agent-guided two-stage discovery: shop first, then product catalog
+orderscout search begin "vape liquid, preferably ice" --agent --top 50 \
+  --discovery-queries '["vape","vaper","estanco"]' \
+  --catalog-queries '["liquid","líquido","recarga","ice","hielo","mentol"]'
+
+# Only after the user explicitly completes the provider's legal-age control
+orderscout eligibility confirm <search-id> <offer-id> --confirmed true
+
 # Prepare, create, and quote a selected offer
 orderscout basket prepare <search-id> <offer-id>
 orderscout basket create <search-id> <offer-id>
@@ -174,7 +184,7 @@ The original Just Eat-specific commands remain available under `orderscout juste
 | Capability | Just Eat | Glovo | Uber Eats |
 | --- | --- | --- | --- |
 | Login/status/logout | OAuth + API | Native Chrome session + API | Native Chrome session + API |
-| Search and menus | Direct | Direct | Direct |
+| Search and menus | Direct menus | Merchant → catalog | Direct menus |
 | Saved account/address context | Direct | Direct | Session-backed direct API |
 | Server-side basket | Direct | Direct | Direct |
 | Checkout quote | Direct | Direct validation | Direct |

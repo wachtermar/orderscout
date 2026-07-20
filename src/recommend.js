@@ -284,7 +284,10 @@ export function productIntentSpec(text) {
     productTokens(split.preference || intent.normalized), candidate.triggers,
   ));
   if (concept) {
-    const conceptTerms = new Set([...concept.triggers, ...concept.genericTerms].flatMap(productTokens));
+    // Remove only the words that identify the broad concept. Generic form
+    // qualifiers such as "liquid" in "vape liquid" must remain required so a
+    // disposable vape cannot satisfy a request for e-liquid.
+    const conceptTerms = new Set(concept.triggers.filter((trigger) => phraseMatches(coreTokens, trigger)).flatMap(productTokens));
     coreTerms = coreTerms.filter((term) => !conceptTerms.has(term));
   }
   if (preferenceConcepts.length) {
@@ -309,11 +312,19 @@ function productInputText(input) {
   ].flatMap((value) => Array.isArray(value) ? value : [value]).filter(Boolean).join(" ");
 }
 
+function productQualifierText(input) {
+  return [input.item?.name, input.itemName, input.item?.category, input.category]
+    .flatMap((value) => Array.isArray(value) ? value : [value]).filter(Boolean).join(" ");
+}
+
 export function productRelevance(text, input) {
   const spec = text?.coreTerms ? text : productIntentSpec(text);
   const tokens = productTokens(productInputText(input));
+  const qualifierTokens = productTokens(productQualifierText(input));
   const conceptMatched = spec.concept ? anyPhraseMatches(tokens, spec.concept.aliases) : false;
-  const matchedCore = spec.coreTerms.filter((term) => phraseMatches(tokens, term));
+  const matchedCore = spec.coreTerms.filter((term) => spec.concept?.genericTerms?.includes(term)
+    ? anyPhraseMatches(qualifierTokens, spec.concept.genericTerms)
+    : phraseMatches(tokens, term));
   const minimumCoreMatches = spec.coreTerms.length <= 2 ? spec.coreTerms.length : Math.ceil(spec.coreTerms.length * 0.6);
   const relevant = spec.concept
     ? conceptMatched && matchedCore.length === spec.coreTerms.length
@@ -621,7 +632,8 @@ export async function recommend(location, text, options = {}) {
   let restaurants = shouldRequireOpen && openRestaurants.length ? openRestaurants : eligibleRestaurants;
   if (intent.kind === "product") {
     const spec = productIntentSpec(intent);
-    const merchantFit = (restaurant) => productRelevance(spec, {
+    const merchantSpec = spec.concept ? { ...spec, coreTerms: [], preferenceTerms: [], preferenceConcepts: [] } : spec;
+    const merchantFit = (restaurant) => productRelevance(merchantSpec, {
       item: { name: restaurant.name, category: restaurant.cuisines?.map((entry) => entry.name) },
       merchant: { name: restaurant.name, cuisines: restaurant.cuisines?.map((entry) => entry.name) },
     }).relevant;

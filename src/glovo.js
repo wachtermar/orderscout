@@ -4,7 +4,7 @@ import { loadBrowserSession, persistBrowserSession, withBrowserSessionLock } fro
 
 const API = "https://api.glovoapp.com";
 const WEB = "https://glovoapp.com";
-const APP_VERSION = "v1.1782.0";
+const APP_VERSION = "v1.2483.0";
 const REFRESH_LEEWAY_MS = 90_000;
 const refreshes = new Map();
 
@@ -93,8 +93,48 @@ function headers(location = {}, token, sessionContext = {}) {
 async function responsePayload(response) {
   if (response.status === 204) return null;
   const text = await response.text();
-  try { return text ? JSON.parse(text) : null; }
+  try { return text ? parseJsonLosslessIds(text) : null; }
   catch { return { message: text }; }
+}
+
+// Glovo product IDs can exceed Number.MAX_SAFE_INTEGER. JSON.parse would round
+// those identifiers and later produce a basket payload for the wrong/nonexistent
+// product. Quote only unsafe integer tokens outside JSON strings before parsing;
+// ordinary prices, timestamps, booleans, and string contents are untouched.
+function parseJsonLosslessIds(text) {
+  let output = "";
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length;) {
+    const character = text[index];
+    if (inString) {
+      output += character;
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      index += 1;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      output += character;
+      index += 1;
+      continue;
+    }
+    if (character === "-" || /[0-9]/.test(character)) {
+      const match = text.slice(index).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+      if (match) {
+        const token = match[0];
+        const digits = token.replace(/^-/, "");
+        output += !/[.eE]/.test(token) && digits.length >= 16 ? `"${token}"` : token;
+        index += token.length;
+        continue;
+      }
+    }
+    output += character;
+    index += 1;
+  }
+  return JSON.parse(output);
 }
 
 async function refreshGlovoSession(session, { fetchImpl = fetch, persist = true } = {}) {
@@ -255,19 +295,63 @@ function storeFromCard(card, location) {
   const texts = JSON.stringify(labels);
   const eta = texts.match(/(\d+)\s*-\s*(\d+)\s*min/i);
   const rating = texts.match(/(\d{1,3})%/);
+  const impression = (card.actions ?? []).flatMap((action) => action?.data?.events ?? [])
+    .find((event) => event?.name === "shop_impressions.loaded")?.data ?? {};
+  const availabilityStatus = String(query.shop_availability_status ?? impression.shopAvailabilityStatus ?? "").toUpperCase();
+  const open = availabilityStatus === "OPEN" || availabilityStatus === "ASAP" || impression.shopIsOpen === "true";
+  const schedulable = availabilityStatus === "SCHEDULABLE" || Boolean(query.opening_or_schedulable_time ?? impression.openingOrSchedulableTime);
+  const promotionTypes = [...new Set(String(query.shop_promotion_types ?? impression.shopPromotionTypes ?? "")
+    .split(",").map((value) => value.trim().toUpperCase()).filter(Boolean))];
+  const promotionIds = [...new Set(String(query.shop_promotion_id ?? impression.shopPromotionId ?? "")
+    .split(",").map((value) => value.trim()).filter((value) => value && value !== "-1"))];
   return {
     id: query.store_id ?? null,
     addressId: query.shop_id ?? null,
     categoryId: query.category_id ?? "1",
     name: card.data?.title?.text?.text ?? card.data?.title ?? "Glovo store",
     slug: card.data?.slug ?? null,
-    rating: rating ? Number(rating[1]) / 20 : null,
-    ratingPercent: rating ? Number(rating[1]) : null,
+    rating: rating ? Number(rating[1]) / 20 : numericText(impression.shopRating) !== null ? numericText(impression.shopRating) / 20 : null,
+    ratingPercent: rating ? Number(rating[1]) : numericText(impression.shopRating),
+    ratingCount: numericText(impression.numberOfRatedOrders),
+    categories: String(impression.cuisineTypeStoreTags ?? "").split(",").map((value) => value.trim()).filter(Boolean),
     etaMinutes: eta ? { min: Number(eta[1]), max: Number(eta[2]) } : null,
     deliveryFee: numericText(query.shop_delivery_fee),
     prime: query.shop_is_prime === "true",
+    open,
+    schedulable,
+    availabilityStatus: availabilityStatus || null,
+    openingAt: query.opening_or_schedulable_time ?? impression.openingOrSchedulableTime ?? null,
+    promotion: promotionTypes.length || promotionIds.length ? {
+      types: promotionTypes,
+      ids: promotionIds,
+      descriptions: [],
+      eligible: true,
+      applied: false,
+      savings: 0,
+      source: "glovo-store-card",
+    } : null,
     url: card.data?.slug ? `${WEB}/es/es/${location.citySlug}/stores/${card.data.slug}` : null,
   };
+}
+
+function storesFromSearch(payload, location) {
+  const stores = [];
+  const seen = new Set();
+  function walk(value) {
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) return value.forEach(walk);
+    if (value.type === "STORE_CARD_V2") {
+      const store = storeFromCard(value, location);
+      const key = `${store.id}:${store.addressId}`;
+      if (store.id && store.addressId && !seen.has(key)) {
+        seen.add(key);
+        stores.push(store);
+      }
+    }
+    Object.values(value).forEach(walk);
+  }
+  walk(payload);
+  return stores;
 }
 
 function offersFromSearch(payload, location) {
@@ -330,7 +414,12 @@ export async function searchGlovo(query, location, options = {}) {
     fetchImpl: options.fetchImpl,
   });
   const limit = Math.max(1, Number(options.limit ?? 60));
-  return { location: resolved, offers: offersFromSearch(payload, resolved).slice(0, limit), raw: options.raw ? payload : undefined };
+  return {
+    location: resolved,
+    stores: storesFromSearch(payload, resolved).slice(0, Math.max(1, Number(options.storeLimit ?? 24))),
+    offers: offersFromSearch(payload, resolved).slice(0, limit),
+    raw: options.raw ? payload : undefined,
+  };
 }
 
 function nextFlightText(html) {
@@ -362,12 +451,189 @@ export async function glovoMenu(url, fetchImpl = fetch) {
   if (parsed.origin !== WEB || !parsed.pathname.includes("/stores/")) throw new CliError("A trusted Glovo store URL is required", "INVALID_URL");
   const response = await fetchImpl(parsed, { headers: { "accept-language": "es-ES" } });
   if (!response.ok) throw new CliError(`Glovo store page returned HTTP ${response.status}`, "GLOVO_HTTP_ERROR");
-  const products = objectsOfType(nextFlightText(await response.text()), "PRODUCT_ROW").map(({ data }) => ({
+  const flight = nextFlightText(await response.text());
+  const products = ["PRODUCT_ROW", "PRODUCT_TILE"].flatMap((type) => objectsOfType(flight, type)).map(({ data }) => ({
     id: data.id, externalId: data.externalId, storeProductId: data.storeProductId, name: data.name,
-    description: data.description ?? null, price: data.priceInfo?.amount ?? data.price, currency: data.priceInfo?.currencyCode ?? "EUR",
+    description: data.description ?? null, price: data.promotion?.priceInfo?.amount ?? data.promotion?.price ?? data.priceInfo?.amount ?? data.price,
+    currency: data.priceInfo?.currencyCode ?? data.promotion?.priceInfo?.currencyCode ?? "EUR",
     requiresCustomizations: Boolean(data.attributeGroups?.length), attributeGroups: data.attributeGroups ?? [], available: true,
   }));
-  return { url: parsed.toString(), products: [...new Map(products.map((item) => [item.id, item])).values()] };
+  const restricted = objectsOfType(flight, "RESTRICTED_PRODUCT_TILE");
+  const collections = objectsOfType(flight, "COLLECTION_TILE").map(({ data }) => ({
+    name: data.title ?? null,
+    slug: data.slug ?? null,
+    restricted: data.action?.type === "POPUP" && data.action?.data?.id === "RESTRICTIONS",
+  }));
+  return {
+    url: parsed.toString(),
+    products: [...new Map(products.filter((item) => item.id && item.name).map((item) => [`${item.storeProductId ?? item.externalId ?? item.id}`, item])).values()],
+    restrictionsDetected: restricted.length > 0 || collections.some((collection) => collection.restricted),
+    collections,
+  };
+}
+
+function catalogMenuSummary(menu) {
+  const categories = [];
+  let restrictionsDetected = false;
+  function walk(value, parent = null) {
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) return value.forEach((entry) => walk(entry, parent));
+    if (value.name && value.slug) {
+      const action = value.action ?? value.actions?.find((candidate) => candidate?.data?.path || candidate?.data?.redirectPath);
+      const restricted = action?.type === "POPUP" && action?.data?.id === "RESTRICTIONS";
+      if (restricted) restrictionsDetected = true;
+      categories.push({
+        name: value.name,
+        slug: value.slug,
+        parent,
+        restricted,
+        path: action?.data?.path ?? action?.data?.redirectPath ?? null,
+      });
+      parent = value.name;
+    }
+    for (const child of Object.values(value)) walk(child, parent);
+  }
+  walk(menu?.data?.elements ?? menu);
+  return { categories, restrictionsDetected };
+}
+
+function glovoCatalogPromotion(product) {
+  const listed = product.promotion ?? product.promotions?.[0] ?? null;
+  const originalPrice = numericText(product.priceInfo?.amount ?? product.price);
+  const promotionPrice = numericText(listed?.priceInfo?.amount ?? listed?.price);
+  const finalPrice = promotionPrice ?? originalPrice;
+  const savings = originalPrice !== null && finalPrice !== null && originalPrice > finalPrice
+    ? Math.round((originalPrice - finalPrice) * 100) / 100 : 0;
+  if (!listed && savings <= 0) return { finalPrice, originalPrice: null, savings: 0, promotion: null };
+  return {
+    finalPrice,
+    originalPrice: savings > 0 ? originalPrice : null,
+    savings,
+    promotion: {
+      types: [listed?.type].filter(Boolean).map((value) => String(value).toUpperCase()),
+      ids: [listed?.promotionId ?? listed?.promoId].filter((value) => value !== null && value !== undefined).map(String),
+      descriptions: [listed?.title].filter(Boolean),
+      eligible: true,
+      applied: savings > 0,
+      savings,
+      source: "glovo-store-catalog",
+    },
+  };
+}
+
+function glovoCatalogOffer(store, product, options = {}) {
+  const id = product.id === null || product.id === undefined ? null : String(product.id);
+  const externalId = product.externalId === null || product.externalId === undefined ? null : String(product.externalId);
+  const storeProductId = product.storeProductId === null || product.storeProductId === undefined ? null : String(product.storeProductId);
+  if (!product.name || (!id && !externalId && !storeProductId)) return null;
+  const deal = glovoCatalogPromotion(product);
+  const eligibility = options.eligibility ?? null;
+  return {
+    provider: "glovo",
+    merchant: { id: store.id, addressId: store.addressId, name: store.name, rating: store.rating, ratingCount: store.ratingCount, ratingPercent: store.ratingPercent, categories: store.categories ?? [] },
+    item: { id: id ?? externalId ?? storeProductId, externalId, storeProductId, name: product.name, description: product.description ?? null, unitPrice: deal.finalPrice },
+    quantity: 1,
+    etaMinutes: store.etaMinutes?.min ?? null,
+    available: store.open !== false,
+    pricing: {
+      currency: product.priceInfo?.currencyCode ?? "EUR",
+      originalSubtotal: deal.originalPrice,
+      subtotal: deal.finalPrice,
+      itemSavings: deal.savings,
+      total: null,
+      exact: false,
+      fees: { delivery: store.deliveryFee },
+    },
+    promotion: deal.promotion ?? store.promotion,
+    membershipEligible: store.prime,
+    url: store.url,
+    source: {
+      adapter: "glovo-api",
+      storeId: store.id,
+      storeAddressId: store.addressId,
+      storeCategoryId: store.categoryId,
+      productId: id ?? externalId ?? storeProductId,
+      productExternalId: externalId,
+      storeProductId,
+      product: {
+        id: id ?? externalId ?? storeProductId,
+        externalId,
+        storeProductId,
+        attributeGroups: product.attributeGroups ?? [],
+      },
+      ...(eligibility ? { eligibility } : {}),
+    },
+  };
+}
+
+async function mapConcurrent(values, concurrency, mapper) {
+  const output = new Array(values.length);
+  let next = 0;
+  async function worker() {
+    while (next < values.length) {
+      const index = next;
+      next += 1;
+      try { output[index] = await mapper(values[index], index); }
+      catch (error) { output[index] = { error }; }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), values.length) }, worker));
+  return output;
+}
+
+export async function glovoStoreCatalog(store, queries, location, options = {}) {
+  if (!store?.id || !store?.addressId) throw new CliError("Glovo store identifiers are required", "SOURCE_PLAN_MISSING");
+  const catalogQueries = [...new Set((Array.isArray(queries) ? queries : [queries])
+    .map((value) => String(value ?? "").trim()).filter(Boolean))].slice(0, Math.max(1, Number(options.queryLimit ?? 8)));
+  const menu = await request(`/v3/stores/${encodeURIComponent(store.id)}/addresses/${encodeURIComponent(store.addressId)}/node/store_menu`, {
+    location, fetchImpl: options.fetchImpl, session: options.session,
+  });
+  const summary = catalogMenuSummary(menu);
+  let restrictions = null;
+  if (summary.restrictionsDetected) {
+    try {
+      restrictions = await request(`/v4/stores/${encodeURIComponent(store.id)}/addresses/${encodeURIComponent(store.addressId)}/restrictions`, {
+        location, fetchImpl: options.fetchImpl, session: options.session,
+      });
+    } catch { /* a missing restriction description must not hide catalog results */ }
+  }
+  const eligibility = summary.restrictionsDetected && options.requireEligibility ? {
+    kind: "legal_age",
+    status: "confirmation_required",
+    title: restrictions?.title ?? "Legal-age confirmation required",
+    restrictions: (restrictions?.restrictions ?? []).map((entry) => ({ id: entry.id, text: entry.text, hyperlink: entry.hyperlink ?? null })),
+    providerActionUrl: store.url,
+  } : null;
+  const searched = await mapConcurrent(catalogQueries, Number(options.concurrency ?? 2), async (query) => {
+    let lastError;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const payload = await request(`/v3/stores/${encodeURIComponent(store.id)}/addresses/${encodeURIComponent(store.addressId)}/search?query=${encodeURIComponent(query)}&searchId=${randomUUID()}`, {
+          location, fetchImpl: options.fetchImpl, session: options.session,
+        });
+        return { query, products: (payload?.results ?? []).flatMap((result) => result?.products ?? []) };
+      } catch (error) {
+        lastError = error;
+        if (error?.details?.status !== 429 || attempt === 2) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 300 * (2 ** attempt)));
+      }
+    }
+    throw lastError;
+  });
+  if (searched.length && searched.every((entry) => entry?.error)) throw searched[0].error;
+  const products = [...new Map(searched.flatMap((entry) => entry?.products ?? []).map((product) => [
+    String(product.storeProductId ?? product.externalId ?? product.id), product,
+  ])).values()];
+  return {
+    store,
+    queries: catalogQueries,
+    categories: summary.categories,
+    restrictionsDetected: summary.restrictionsDetected,
+    eligibility,
+    products,
+    offers: products.map((product) => glovoCatalogOffer(store, product, { eligibility })).filter(Boolean),
+    failedQueries: searched.filter((entry) => entry?.error).length,
+  };
 }
 
 export async function enrichGlovoOffers(offers, options = {}) {
@@ -486,6 +752,13 @@ function glovoProduct(source, quantity, product, selections) {
 
 export async function createGlovoBasket(offer, options = {}) {
   const lines = offer.lines?.length ? offer.lines : [{ item: offer.item, quantity: offer.quantity ?? 1, source: offer.source }];
+  const pendingEligibility = lines.map((line) => line.source?.eligibility)
+    .find((eligibility) => eligibility?.status === "confirmation_required");
+  if (pendingEligibility) {
+    throw new CliError("Confirm Glovo's legal-age requirement before creating this basket", "AGE_CONFIRMATION_REQUIRED", {
+      eligibility: pendingEligibility,
+    });
+  }
   const stores = new Set(lines.map((line) => line.source?.storeId).filter(Boolean));
   if (stores.size !== 1 || lines.some((line) => !line.source?.storeAddressId || !line.source?.productId)) {
     throw new CliError("Glovo basket lines must belong to one store and include product identifiers", "SOURCE_PLAN_MISSING");
@@ -493,7 +766,7 @@ export async function createGlovoBasket(offer, options = {}) {
   const source = lines[0].source;
   const menu = offer.url ? await glovoMenu(offer.url, options.fetchImpl) : { products: [] };
   const configured = lines.map((line, index) => {
-    const product = menu.products.find((entry) => String(entry.id) === String(line.source.productId));
+    const product = menu.products.find((entry) => String(entry.id) === String(line.source.productId)) ?? line.source.product;
     const selections = options.customizations?.[String(line.source.productId)] ?? options.customizations?.[index]
       ?? (lines.length === 1 ? options.customizations : null);
     return glovoProduct(line.source, line.quantity ?? 1, product, selections);
@@ -751,4 +1024,4 @@ export async function placeGlovoOrder(offer, quote, options = {}) {
   }
 }
 
-export const glovoInternals = { accessToken, jwtExpiresAt, setCookieValue, shouldRefresh, refreshGlovoSession, request, offersFromSearch, nextFlightText, objectsOfType, headers, findSubmitAction, promotionFromCard, trustedApiPath };
+export const glovoInternals = { accessToken, jwtExpiresAt, setCookieValue, shouldRefresh, refreshGlovoSession, request, parseJsonLosslessIds, offersFromSearch, storesFromSearch, nextFlightText, objectsOfType, catalogMenuSummary, glovoCatalogOffer, headers, findSubmitAction, promotionFromCard, trustedApiPath };

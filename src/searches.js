@@ -36,6 +36,7 @@ export async function startSearch(intent, options = {}) {
     },
     objective: options.objective ?? parseObjective(text),
     locationHint: options.locationHint ?? null,
+    queryPlan: options.queryPlan ?? { source: "deterministic", discoveryQueries: [], catalogQueries: [] },
     providers: enabled,
     providerStatus: Object.fromEntries(enabled.map((id) => [id, { state: "pending", error: null }])),
     orchestration: "concurrent",
@@ -104,6 +105,7 @@ export async function ingestOffers(id, provider, inputs, options = {}) {
     state: options.complete === false ? "partial" : "complete",
     error: null,
     offerCount: normalized.length,
+    ...(options.providerMeta ? { discovery: options.providerMeta } : {}),
     ...(options.timing ?? {}),
   };
   await writeSearch(search);
@@ -378,15 +380,48 @@ export async function recordBasket(id, offerId, basket) {
   return search.offers[index];
 }
 
+export async function confirmEligibility(id, offerId, confirmed) {
+  if (confirmed !== true) throw new CliError("Explicit legal-age confirmation is required", "AGE_CONFIRMATION_REQUIRED");
+  const search = await loadSearch(id);
+  const selected = search.offers.find((offer) => offer.id === offerId);
+  const eligibility = selected?.source?.eligibility
+    ?? selected?.lines?.map((line) => line.source?.eligibility).find(Boolean);
+  if (!selected) throw new CliError("Offer not found in this search", "OFFER_NOT_FOUND");
+  if (selected.provider !== "glovo" || eligibility?.kind !== "legal_age") {
+    throw new CliError("This offer has no Glovo legal-age requirement", "ELIGIBILITY_NOT_REQUIRED");
+  }
+  const storeId = selected.source?.storeId ?? selected.lines?.[0]?.source?.storeId;
+  const confirmedAt = new Date().toISOString();
+  let updatedOffers = 0;
+  const confirmSource = (source) => source?.eligibility?.kind === "legal_age"
+    ? { ...source, eligibility: { ...source.eligibility, status: "confirmed", confirmedAt } }
+    : source;
+  search.offers = search.offers.map((offer) => {
+    const offerStoreId = offer.source?.storeId ?? offer.lines?.[0]?.source?.storeId;
+    if (offer.provider !== "glovo" || String(offerStoreId) !== String(storeId)) return offer;
+    updatedOffers += 1;
+    return {
+      ...offer,
+      source: confirmSource(offer.source),
+      lines: offer.lines?.map((line) => ({ ...line, source: confirmSource(line.source) })) ?? offer.lines,
+    };
+  });
+  await writeSearch(search);
+  return { provider: "glovo", storeId, status: "confirmed", confirmedAt, updatedOffers };
+}
+
 export function resultsFor(search) {
   const ranking = rankOffers(search.offers, search.intent, search.objective, { providers: search.providers });
   const statuses = Object.entries(search.providerStatus);
   const attemptedProviders = statuses.filter(([, status]) => status.state !== "pending").map(([provider]) => provider);
   const completedProviders = statuses.filter(([, status]) => status.state === "complete" || status.state === "partial").map(([provider]) => provider);
   const failedProviders = statuses.filter(([, status]) => status.state === "error").map(([provider]) => provider);
+  const partialProviders = statuses.filter(([, status]) => status.state === "partial").map(([provider]) => provider);
   const matchedProviders = [...new Set(search.offers.map((offer) => offer.provider))];
   const availableProviders = [...new Set(search.offers.filter((offer) => offer.available).map((offer) => offer.provider))];
   const unavailableOnlyProviders = matchedProviders.filter((provider) => !availableProviders.includes(provider));
+  const pendingEligibility = search.offers.filter((offer) => offer.source?.eligibility?.status === "confirmation_required"
+    || offer.lines?.some((line) => line.source?.eligibility?.status === "confirmation_required"));
   const coverage = {
     mode: search.orchestration ?? "legacy",
     configuredProviders: search.providers,
@@ -408,6 +443,8 @@ export function resultsFor(search) {
         ? [`Exact checkout totals are still missing for: ${ranking.exactPriceCoverage.missingQuoteProviders.join(", ")}. Cheapest is provisional.`] : []),
       ...(!coverage.allConfiguredAttempted ? ["Not every configured provider has been attempted yet."] : []),
       ...(failedProviders.length ? [`Provider search failed: ${failedProviders.join(", ")}. It was attempted and was not silently omitted.`] : []),
+      ...(partialProviders.length ? [`Provider catalog coverage was partial: ${partialProviders.join(", ")}. Empty results from failed catalog calls were not treated as proof of no match.`] : []),
+      ...(pendingEligibility.length ? ["Some Glovo matches require the user to confirm legal age on Glovo before basket creation."] : []),
       ...(Object.values(search.providerStatus).some((status) => status.state === "pending") ? ["Some enabled providers are still pending."] : []),
       ...(search.fulfilment?.mode === "scheduled" && !ranking.winnerReady
         ? [`No winner is confirmed until the requested time (${search.fulfilment.requestedAt ?? "unspecified"}) and exact delivered total are verified for every matching provider.`] : []),
@@ -426,6 +463,7 @@ function summarizeSearch(search) {
     parsedIntent: search.parsedIntent ?? parseIntent(search.intent),
     fulfilment: search.fulfilment ?? null,
     objective: search.objective,
+    queryPlan: search.queryPlan ?? null,
     providers: search.providers,
     providerStatus: search.providerStatus,
     orchestration: search.orchestration ?? "legacy",

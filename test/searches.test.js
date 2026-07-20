@@ -119,9 +119,11 @@ test("generic product intent filters noisy provider results before normalization
     { merchant: { name: "Market" }, item: { name: "Leche liquida entera", unitPrice: 1.5 }, pricing: {} },
     { merchant: { name: "DELIGO" }, item: { name: "Vape Lost Mary Triple Mango (1000)", unitPrice: 8 }, pricing: {} },
     { merchant: { name: "DELIGO" }, item: { name: "Vape Lost Mary Peach Ice (1000)", unitPrice: 8 }, pricing: {} },
+    { merchant: { name: "Vape shop" }, item: { name: "Líquido para vaper Mango 10ml", unitPrice: 6 }, pricing: {} },
+    { merchant: { name: "Vape shop" }, item: { name: "Vape liquid Peach Ice 10ml", unitPrice: 7 }, pricing: {} },
   ], "I need some vape liquid, preferably something with ice");
   assert.deepEqual(offers.map((offer) => offer.item.name), [
-    "Vape Lost Mary Triple Mango (1000)", "Vape Lost Mary Peach Ice (1000)",
+    "Líquido para vaper Mango 10ml", "Vape liquid Peach Ice 10ml",
   ]);
   assert.equal(offers[0].signals.preference, 0);
   assert.equal(offers[1].signals.preference, 100);

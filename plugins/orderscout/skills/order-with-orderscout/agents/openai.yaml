@@ -1,4 +1,4 @@
 interface:
   display_name: "OrderScout"
   short_description: "Compare anything across delivery apps"
-  default_prompt: "Use $order-with-orderscout to find and compare the best delivery option across my enabled providers."
+  default_prompt: "Use $order-with-orderscout to search every enabled delivery app and compare the products or meals that best fit my request."
