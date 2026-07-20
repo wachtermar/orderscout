@@ -33,9 +33,9 @@ function normalizePromotion(value, pricing) {
 
 export function parseObjective(intent) {
   const text = String(intent ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-  if (/\b(fastest|quickest|rapido|rapida|antes|asap)\b/.test(text)) return "fastest";
-  if (/\b(best[ -]rated|highest[ -]rated|mejor valorad|calidad|best quality|tasty|delicious|sabros|rico|rica)\b/.test(text)) return "best";
-  if (/\b(cheapest|lowest price|cheap|barat|econom|mejor oferta)\b/.test(text)) return "cheapest";
+  if (/\b(fastest|quickest|soonest|rapid|rapido|rapida|antes|asap|lo antes posible|menos tiempo)\b/.test(text)) return "fastest";
+  if (/\b(best[ -]rated|highest[ -]rated|top[ -]rated|best reviews?|most popular|mejor valorad[oa]s?|mejores resenas|mas popular|calidad|best quality|highest quality|tasty|delicious|sabros[oa]?|rico|rica)\b/.test(text)) return "best";
+  if (/\b(cheapest|lowest (?:price|total|fees?)|least expensive|cheap|barat|econom|mejor oferta|menor precio|mas barato|menos gastos)\b/.test(text)) return "cheapest";
   return "value";
 }
 

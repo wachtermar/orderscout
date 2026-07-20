@@ -17,10 +17,42 @@ const HEALTHY_ANCHOR_TERMS = ["ensalada", "salad", "poke", "bowl", "plancha", "g
 const DIETARY = {
   vegan: ["vegan", "vegano", "vegana"],
   vegetarian: ["vegetarian", "vegetariano", "vegetariana"],
+  pescatarian: ["pescatarian", "pescetarian", "pescetariano", "pescetariana"],
   halal: ["halal"],
+  kosher: ["kosher"],
   glutenFree: ["gluten free", "sin gluten"],
-  lactoseFree: ["lactose free", "sin lactosa"],
+  lactoseFree: ["lactose free", "sin lactosa", "lactosa cero"],
+  dairyFree: ["dairy free", "without dairy", "sin lacteos", "sin leche"],
+  nutFree: ["nut free", "without nuts", "sin frutos secos", "sin nueces"],
+  keto: ["keto", "ketogenic", "cetogenico", "cetogenica"],
+  lowCarb: ["low carb", "low carbohydrate", "bajo en carbohidratos", "baja en carbohidratos"],
+  noPork: ["no pork", "without pork", "sin cerdo"],
 };
+
+const NUMBER_WORDS = {
+  one: 1, uno: 1, una: 1, un: 1,
+  two: 2, dos: 2,
+  three: 3, tres: 3,
+  four: 4, cuatro: 4,
+  five: 5, cinco: 5,
+  six: 6, seis: 6,
+  seven: 7, siete: 7,
+  eight: 8, ocho: 8,
+  nine: 9, nueve: 9,
+  ten: 10, diez: 10,
+  eleven: 11, once: 11,
+  twelve: 12, doce: 12,
+  thirteen: 13, trece: 13,
+  fourteen: 14, catorce: 14,
+  fifteen: 15, quince: 15,
+  sixteen: 16, dieciseis: 16,
+  seventeen: 17, diecisiete: 17,
+  eighteen: 18, dieciocho: 18,
+  nineteen: 19, diecinueve: 19,
+  twenty: 20, veinte: 20,
+};
+
+const MEAL_PATTERN = /\b(?:food|meal|dinner|lunch|breakfast|brunch|snack|restaurant|pizza|burger|kebab|shawarma|falafel|gyros?|tandoori|sushi|tacos?|burritos?|ramen|curry|pasta|paella|risotto|noodles?|sandwich(?:es)?|wraps?|salad|poke|bowl|soup|steak|chicken|dessert|ice cream|cake|donuts?|thai|chinese|indian|italian|mexican|mediterranean|japanese|vietnamese|korean|greek|comida|cena|almuerzo|desayuno|merienda|restaurante|hamburguesa|ensalada|bocadillo|sopa|pollo|carne|pescado|postre|helado|tarta|tailandes[ao]|chin[ao]|indi[ao]|italian[ao]|mexican[ao]|mediterrane[ao]|japones[ao]|vietnamita|corean[ao]|grieg[ao]|saludable|healthy|tasty|vegetarian|vegetariano|vegan|vegano|halal)\b/;
 
 function normalizedText(value) {
   return String(value ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
@@ -78,26 +110,100 @@ const MONTHS = {
   december: 12, diciembre: 12,
 };
 
+const WEEKDAYS = {
+  sunday: 0, domingo: 0,
+  monday: 1, lunes: 1,
+  tuesday: 2, martes: 2,
+  wednesday: 3, miercoles: 3,
+  thursday: 4, jueves: 4,
+  friday: 5, viernes: 5,
+  saturday: 6, sabado: 6,
+};
+
+function numberToken(value) {
+  if (/^\d+$/.test(String(value))) return Number(value);
+  return NUMBER_WORDS[String(value)] ?? null;
+}
+
+function partySize(normalized) {
+  if (/\b(?:for|para)\s+(?:(?:my|mi)\s+)?(?:wife|husband|partner|girlfriend|boyfriend|esposa|esposo|pareja)\s+(?:and|y)\s+(?:me|myself|mi)\b/.test(normalized)) return 2;
+  if (/\b(?:for|para)\s+(?:a\s+)?couple\b|\bpara\s+(?:una\s+)?pareja\b/.test(normalized)) return 2;
+  const numberPattern = "(?:\\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|un|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|dieciseis|diecisiete|dieciocho|diecinueve|veinte)";
+  const peoplePattern = "(?:people|persons?|adults?|children|kids?|guests?|diners?|personas?|adultos?|ninos?|ninas?|peques|invitados?|comensales?)";
+  const components = [...normalized.matchAll(new RegExp(`\\b(${numberPattern})\\s*${peoplePattern}\\b`, "g"))]
+    .map((match) => numberToken(match[1])).filter((value) => Number.isInteger(value));
+  if (components.length > 1) return components.reduce((sum, value) => sum + value, 0);
+  const direct = normalized.match(new RegExp(`\\b(?:for(?:\\s+a)?\\s+(?:family\\s+of\\s+)?|para(?:\\s+una)?\\s+(?:familia\\s+de\\s+)?|serves?\\s+|party\\s+of\\s+|group\\s+of\\s+|grupo\\s+de\\s+)(?:a\\s+|un\\s+|una\\s+)?(${numberPattern})\\b`))
+    ?? normalized.match(new RegExp(`\\b(${numberPattern})\\s*${peoplePattern}\\b`));
+  return direct ? numberToken(direct[1]) : null;
+}
+
+function budgetAmount(normalized) {
+  const prefix = normalized.match(/\b(?:under|below|less than|no more than|not over|up to|max(?:imum)?|budget(?: of)?|hasta|menos de|por debajo de|no mas de|maximo|presupuesto(?: de)?)\s*(?:€|eur)?\s*(\d+(?:\.\d+)?)\s*(?:€|eur(?:os?)?)?/);
+  if (prefix) return Number(prefix[1]);
+  const suffix = normalized.match(/(?:€\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:€|eur(?:os?)?))\s*(?:max(?:imum)?|budget|or less|o menos|de presupuesto)\b/);
+  if (suffix) return Number(suffix[1] ?? suffix[2]);
+  const currency = normalized.match(/(?:€\s*(\d+(?:\.\d+)?)|\b(?:for|por)\s+(\d+(?:\.\d+)?)\s*(?:€|eur(?:os?))\b)/);
+  return currency ? Number(currency[1] ?? currency[2]) : null;
+}
+
+function requestedLiters(normalized) {
+  const liters = (amount, unit) => unit === "ml" ? amount / 1_000 : unit === "cl" ? amount / 100 : amount;
+  const multiplied = normalized.match(/\b(\d+)\s*(?:x|bottles?|botellas?|units?|unidades?|uds?)\s*(?:of|de)?\s*(\d+(?:\.\d+)?)\s*(ml|cl|l|litro|litros|litre|litres)\b/);
+  if (multiplied) return Number(multiplied[1]) * liters(Number(multiplied[2]), multiplied[3]);
+  const volume = normalized.match(/(\d+(?:\.\d+)?)\s*(ml|cl|l|litro|litros|litre|litres)\b/);
+  return volume ? liters(Number(volume[1]), volume[2]) : 1.5;
+}
+
 function scheduledInstant(normalized, options = {}) {
   const timeZone = options.timeZone ?? "Europe/Madrid";
   const now = options.now instanceof Date ? options.now : new Date(options.now ?? Date.now());
   const explicitDate = normalized.match(/\b(\d{1,2})\s+(january|enero|february|febrero|march|marzo|april|abril|may|mayo|june|junio|july|julio|august|agosto|september|septiembre|october|octubre|november|noviembre|december|diciembre)(?:\s+(\d{4}))?\b/);
   const isoDate = normalized.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
-  const relative = /\b(?:tomorrow|manana)\b/.test(normalized) ? 1 : /\b(?:today|hoy|tonight)\b/.test(normalized) ? 0 : null;
-  const clock = normalized.match(/\b(?:at|a\s+las?|sobre)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/)
-    ?? normalized.match(/\b(\d{1,2}):(\d{2})\s*(am|pm)?\b/);
-  if (!clock || (!explicitDate && !isoDate && relative === null)) return null;
-  let hour = Number(clock[1]);
-  const minute = Number(clock[2] ?? 0);
-  const meridiem = clock[3];
+  const slashDate = normalized.match(/\b(\d{1,2})[\/.](\d{1,2})[\/.](20\d{2})\b/);
+  const weekday = normalized.match(/\b(?:next|this|el|este|esta|proximo|proxima)?\s*(sunday|domingo|monday|lunes|tuesday|martes|wednesday|miercoles|thursday|jueves|friday|viernes|saturday|sabado)\b/);
+  const relative = /\b(?:day after tomorrow|pasado manana)\b/.test(normalized) ? 2
+    : /\b(?:tomorrow|manana)\b/.test(normalized) ? 1
+      : /\b(?:today|hoy|tonight|esta noche)\b/.test(normalized) ? 0 : null;
+  const namedClock = /\b(?:noon|mediodia)\b/.test(normalized) ? { hour: 12, minute: 0 }
+    : /\b(?:midnight|medianoche)\b/.test(normalized) ? { hour: 0, minute: 0 } : null;
+  const clock = normalized.match(/\b(?:at|by|before|around|sobre|a\s+las?|antes\s+de)\s*(\d{1,2})(?:(?::|\.)(\d{2}))?\s*(am|pm|h)?\b/)
+    ?? normalized.match(/\b(\d{1,2})(?::|\.)(\d{2})\s*(am|pm|h)?\b/)
+    ?? normalized.match(/\b(\d{1,2})\s*(am|pm|h)\b/);
+  if (!clock && !namedClock) return null;
+  if (!explicitDate && !isoDate && !slashDate && !weekday && relative === null) return null;
+  let hour = namedClock?.hour ?? Number(clock[1]);
+  const compactClock = clock && clock[2] && /^(?:am|pm|h)$/.test(clock[2]) && !clock[3];
+  const minute = namedClock?.minute ?? Number(compactClock ? 0 : clock?.[2] ?? 0);
+  const meridiem = compactClock ? clock[2] : clock?.[3];
   if (meridiem === "pm" && hour < 12) hour += 12;
   if (meridiem === "am" && hour === 12) hour = 0;
   if (hour > 23 || minute > 59) return null;
   let year; let month; let day;
   if (isoDate) [, year, month, day] = isoDate.map(Number);
+  else if (slashDate) [, day, month, year] = slashDate.map(Number);
   else if (explicitDate) {
     day = Number(explicitDate[1]); month = MONTHS[explicitDate[2]];
     year = Number(explicitDate[3] ?? zonedParts(now, timeZone).year);
+    if (!explicitDate[3]) {
+      const provisional = zonedDate(year, month, day, hour, minute, timeZone);
+      if (provisional.getTime() <= now.getTime()) year += 1;
+    }
+  } else if (weekday) {
+    const local = zonedParts(now, timeZone);
+    const today = zonedDate(local.year, local.month, local.day, 12, 0, timeZone);
+    const targetWeekday = WEEKDAYS[weekday[1]];
+    const currentWeekday = today.getUTCDay();
+    let delta = (targetWeekday - currentWeekday + 7) % 7;
+    const explicitlyNext = /\b(?:next|proximo|proxima)\b/.test(weekday[0]);
+    if (explicitlyNext && delta === 0) delta = 7;
+    if (delta === 0) {
+      const requestedToday = zonedDate(local.year, local.month, local.day, hour, minute, timeZone);
+      if (requestedToday.getTime() <= now.getTime()) delta = 7;
+    }
+    today.setUTCDate(today.getUTCDate() + delta);
+    const target = zonedParts(today, timeZone);
+    ({ year, month, day } = target);
   } else {
     const local = zonedParts(now, timeZone);
     const noon = zonedDate(local.year, local.month, local.day, 12, 0, timeZone);
@@ -106,20 +212,19 @@ function scheduledInstant(normalized, options = {}) {
     ({ year, month, day } = target);
   }
   const result = zonedDate(Number(year), Number(month), Number(day), hour, minute, timeZone);
-  return Number.isNaN(result.getTime()) ? null : result.toISOString();
+  if (Number.isNaN(result.getTime())) return null;
+  const observed = zonedParts(result, timeZone);
+  if (observed.year !== Number(year) || observed.month !== Number(month) || observed.day !== Number(day)
+    || observed.hour !== hour || observed.minute !== minute) return null;
+  return result.toISOString();
 }
 
 export function parseIntent(text, options = {}) {
   const normalized = normalizedText(text).replace(/,/g, ".");
-  const volumeMatch = normalized.match(/(\d+(?:\.\d+)?)\s*(?:l|litro|litros|litre|litres)\b/);
-  const budgetMatch = normalized.match(/(?:under|below|less than|max(?:imum)?|hasta|menos de|por debajo de)\s*(?:€|eur)?\s*(\d+(?:\.\d+)?)/)
-    ?? normalized.match(/(?:€|eur)\s*(\d+(?:\.\d+)?)\s*(?:max)?/);
   const water = /\b(?:agua|water)\b/.test(normalized);
-  const meal = /\b(?:food|meal|dinner|lunch|breakfast|restaurant|pizza|burger|kebab|sushi|tacos?|comida|cena|almuerzo|desayuno|restaurante|hamburguesa|saludable|healthy|tasty|vegetarian|vegetariano|vegan|vegano|halal)\b/.test(normalized);
-  const peopleMatch = normalized.match(/\b(?:for|para)\s+(\d+)\b/)
-    ?? normalized.match(/\b(\d+)\s*(?:people|persons?|personas?|comensales?)\b/);
-  const peopleWordMatch = normalized.match(/\b(?:for|para)\s+(one|two|three|four|uno|una|dos|tres|cuatro)\b/);
-  const peopleWords = { one: 1, uno: 1, una: 1, two: 2, dos: 2, three: 3, tres: 3, four: 4, cuatro: 4 };
+  const packagedMealProduct = /\b(?:pasta sauce|salsa (?:de|para) pasta|pasta dental|instant ramen|ramen instantaneo|frozen pizza|pizza congelada|pizza dough|masa de pizza|meal kit|kit de comida|dog food|cat food|pet food|comida para perro|comida para gato|pienso)\b/.test(normalized);
+  const meal = MEAL_PATTERN.test(normalized) && !packagedMealProduct;
+  const people = partySize(normalized);
   const scheduledAt = scheduledInstant(normalized, options);
   const occasion = /\b(?:breakfast|desayuno|brunch)\b/.test(normalized) ? "breakfast"
     : /\b(?:lunch|almuerzo)\b/.test(normalized) ? "lunch"
@@ -128,15 +233,15 @@ export function parseIntent(text, options = {}) {
     text: String(text).trim(),
     normalized,
     kind: water ? "water" : meal ? "meal" : "product",
-    targetLiters: water ? Number(volumeMatch?.[1] ?? 1.5) : null,
-    people: meal ? Number(peopleMatch?.[1] ?? peopleWords[peopleWordMatch?.[1]] ?? 1) : null,
-    healthy: /\b(?:healthy|healthier|saludable|sano|sana|light|ligero)\b/.test(normalized),
-    tasty: /\b(?:tasty|delicious|rico|rica|sabroso|sabrosa|best[ -]rated|mejor valorado)\b/.test(normalized),
-    cheap: /\b(?:cheap|cheapest|budget|barato|barata|economico|economica|best deal|mejor oferta)\b/.test(normalized),
-    budget: budgetMatch ? Number(budgetMatch[1]) : null,
+    targetLiters: water ? requestedLiters(normalized) : null,
+    people: meal ? Number(people ?? 1) : null,
+    healthy: /\b(?:healthy|healthier|saludables?|sanos?|sanas?|light|ligeros?|ligeras?)\b/.test(normalized),
+    tasty: /\b(?:tasty|delicious|ricos?|ricas?|sabrosos?|sabrosas?|best[ -]rated|mejor valorad[oa]s?)\b/.test(normalized),
+    cheap: /\b(?:cheap|cheapest|budget|baratos?|baratas?|economicos?|economicas?|best deal|mejor oferta|mas barato|menor precio)\b/.test(normalized),
+    budget: budgetAmount(normalized),
     sparkling: /\b(?:sparkling|con gas|gaseosa)\b/.test(normalized),
     occasion,
-    deliveryTime: scheduledAt || /\b(?:tomorrow|manana|later|despues|preorder|programar)\b/.test(normalized) ? "scheduled" : "now",
+    deliveryTime: scheduledAt || /\b(?:tomorrow|manana|day after tomorrow|pasado manana|later|despues|preorder|programar|next|proximo|proxima)\b/.test(normalized) ? "scheduled" : "now",
     scheduledAt,
     timeZone: options.timeZone ?? "Europe/Madrid",
     allergyMentioned: /\b(?:allergy|allergic|allergen|alergia|alergico|alergica|anaphyl)/.test(normalized),

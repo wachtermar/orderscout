@@ -2,6 +2,17 @@
 
 This project follows Semantic Versioning. It is currently pre-1.0; command and normalized response changes may occur between minor releases and will be listed here.
 
+## 0.1.8 - 2026-07-20
+
+- Add a repeatable English/Spanish query matrix covering more than 1,800 food, grocery, pharmacy, drinks, household, scheduling, party-size, dietary, pricing, deal, paging, and bundle combinations.
+- Expand party-size, cuisine, dietary, budget, water-pack, objective, date, and time parsing while retaining model-driven semantic selection for every agent request.
+- Make candidate narrowing token-aware so `agua` does not retrieve `aguacate` and `ice` does not retrieve `rice`.
+- Fix Uber Eats integer minor-unit prices below €1, which previously allowed raw `90` to become €90 instead of €0.90.
+- Reuse Uber store menus across independent shopping-line queries, including same-store catalog expansion for multi-item lists, and pace provider query fan-out to reduce Glovo and Uber throttling.
+- Distinguish upstream rate limits from expired authentication, preserve `RATE_LIMITED` and `retryAt` in provider status, prevent needless browser-session refreshes, and persist bounded provider cooldowns across chat turns.
+- Apply the direct-merchant allergen-review gate to unified Just Eat, Glovo, and Uber Eats basket and placement tools.
+- Document the generic LLM/CLI boundary, matrix scope, provider-throttling behavior, and live-test limits.
+
 ## 0.1.7 - 2026-07-20
 
 - Remove semantic product and meal rejection from the ChatGPT/MCP ingest path so provider candidates reach model reasoning intact.

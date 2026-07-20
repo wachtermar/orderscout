@@ -215,7 +215,11 @@ async function request(path, { method = "GET", body, location, auth = false, ret
       token = accessToken(session);
       continue;
     }
-    throw new CliError(payload?.message ?? `Glovo returned HTTP ${response.status}`, response.status === 401 ? "AUTH_EXPIRED" : "GLOVO_HTTP_ERROR", { status: response.status, path });
+    throw new CliError(
+      response.status === 429 ? "Glovo temporarily rate-limited search; wait before retrying" : (payload?.message ?? `Glovo returned HTTP ${response.status}`),
+      response.status === 401 ? "AUTH_EXPIRED" : response.status === 429 ? "RATE_LIMITED" : "GLOVO_HTTP_ERROR",
+      { status: response.status, path, retryAfter: response.headers.get("retry-after") ?? null },
+    );
   }
   throw new CliError("Glovo authentication retry failed", "AUTH_EXPIRED");
 }

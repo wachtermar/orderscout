@@ -34,7 +34,16 @@ async function request(operation, body = {}, { auth = false, fetchImpl = fetch, 
   const text = await response.text();
   let payload;
   try { payload = JSON.parse(text); } catch { payload = { message: text.slice(0, 500) }; }
-  if (!response.ok) throw new CliError(`Uber Eats returned HTTP ${response.status}`, response.status === 401 || response.status === 403 ? "AUTH_EXPIRED" : "UBEREATS_HTTP_ERROR", { status: response.status, operation });
+  if (!response.ok) {
+    const message = payload?.data?.message ?? payload?.message ?? `Uber Eats returned HTTP ${response.status}`;
+    const rateLimited = response.status === 429 || /too[_ ]many[_ ]requests|rate.?limit/i.test(message);
+    const authExpired = response.status === 401 || (response.status === 403 && !rateLimited);
+    throw new CliError(
+      rateLimited ? "Uber Eats temporarily rate-limited search; wait before retrying" : `Uber Eats returned HTTP ${response.status}`,
+      rateLimited ? "RATE_LIMITED" : authExpired ? "AUTH_EXPIRED" : "UBEREATS_HTTP_ERROR",
+      { status: response.status, operation, retryAfter: response.headers.get("retry-after") ?? null },
+    );
+  }
   if (payload?.status === "failure" || payload?.code === 3) {
     const message = payload?.data?.message || payload?.message || "Uber Eats rejected the session";
     throw new CliError(message, /session|status code error|unauth/i.test(message) || payload?.code === 3 ? "AUTH_EXPIRED" : "UBEREATS_API_ERROR", { operation });
@@ -59,7 +68,10 @@ function price(value) {
   }
   const number = Number(value);
   if (!Number.isFinite(number)) return null;
-  return Number.isInteger(number) && Math.abs(number) >= 100 ? number / 100 : number;
+  // Uber's numeric money fields are integer minor units, including values
+  // below one euro (for example `90` means €0.90). Formatted strings and
+  // decimal numbers are already major-unit values.
+  return Number.isInteger(number) ? number / 100 : number;
 }
 
 function eta(value) {
@@ -257,7 +269,7 @@ function normalizedTerms(query) {
     .split(/[^a-z0-9]+/).filter((term) => term.length > 2 && !ignored.has(term));
 }
 
-function menuOffers(store, menu, query) {
+export function uberEatsMenuOffers(store, menu, query) {
   const terms = normalizedTerms(query);
   return menu.items.filter((item) => {
     if (!terms.length) return true;
@@ -290,18 +302,52 @@ function menuOffers(store, menu, query) {
   }));
 }
 
-async function mapConcurrent(values, concurrency, mapper) {
+async function mapConcurrentOutcomes(values, concurrency, mapper) {
   const results = new Array(values.length);
   let index = 0;
   async function worker() {
     while (index < values.length) {
       const current = index++;
-      try { results[current] = await mapper(values[current]); }
-      catch { results[current] = []; }
+      try { results[current] = { status: "fulfilled", value: await mapper(values[current]) }; }
+      catch (reason) { results[current] = { status: "rejected", reason }; }
     }
   }
   await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, worker));
-  return results.flat();
+  return results;
+}
+
+async function mapConcurrent(values, concurrency, mapper) {
+  const outcomes = await mapConcurrentOutcomes(values, concurrency, mapper);
+  return outcomes.filter((outcome) => outcome.status === "fulfilled").flatMap((outcome) => outcome.value);
+}
+
+export async function expandUberEatsCatalogs(stores, queries, options = {}) {
+  const selected = [...stores]
+    .sort((left, right) => Number(right.queryHits ?? 0) - Number(left.queryHits ?? 0)
+      || Number(right.rating ?? 0) - Number(left.rating ?? 0))
+    .slice(0, Math.max(1, Number(options.storeLimit ?? 3)));
+  const outcomes = await mapConcurrentOutcomes(selected, Number(options.concurrency ?? 2), async (store) => {
+    let menuPromise = options.menuCache?.get(store.id);
+    if (!menuPromise) {
+      menuPromise = uberEatsMenu(store.id, options);
+      options.menuCache?.set(store.id, menuPromise);
+    }
+    let menu;
+    try { menu = await menuPromise; }
+    catch (error) {
+      if (options.menuCache?.get(store.id) === menuPromise) options.menuCache.delete(store.id);
+      throw error;
+    }
+    return queries.flatMap((query) => uberEatsMenuOffers(store, menu, query));
+  });
+  const offers = outcomes.filter((outcome) => outcome.status === "fulfilled").flatMap((outcome) => outcome.value);
+  const failures = outcomes.filter((outcome) => outcome.status === "rejected");
+  return {
+    offers: [...new Map(offers.map((offer) => [`${offer.merchant.id}:${offer.item.id}`, offer])).values()],
+    searchedStores: outcomes.length - failures.length,
+    failedStores: failures.length,
+    rateLimitedStores: failures.filter((outcome) => outcome.reason?.code === "RATE_LIMITED").length,
+  };
 }
 
 export async function searchUberEats(query, options = {}) {
@@ -329,9 +375,14 @@ export async function searchUberEats(query, options = {}) {
   const limit = Math.max(1, Number(options.limit ?? 60));
   const directOffers = normalizeUberSearch(payload);
   let expandedOffers = [];
+  const allStores = collectUberStores(payload);
+  for (const store of allStores) {
+    const existing = options.storeCache?.get(store.id);
+    options.storeCache?.set(store.id, { ...existing, ...store, queryHits: Number(existing?.queryHits ?? 0) + 1 });
+  }
   if (directOffers.length < Math.min(10, limit) && options.expandStores !== false) {
     const terms = normalizedTerms(query);
-    const stores = collectUberStores(payload);
+    const stores = allStores;
     const relevant = stores.filter((store) => {
       const name = store.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
       return terms.some((term) => name.includes(term));
@@ -339,8 +390,18 @@ export async function searchUberEats(query, options = {}) {
     const selected = [...new Map([...relevant, ...stores].map((store) => [store.id, store])).values()]
       .slice(0, Math.max(1, Number(options.storeLimit ?? 6)));
     expandedOffers = await mapConcurrent(selected, Number(options.concurrency ?? 4), async (store) => {
-      const menu = await uberEatsMenu(store.id, options);
-      return menuOffers(store, menu, query);
+      let menuPromise = options.menuCache?.get(store.id);
+      if (!menuPromise) {
+        menuPromise = uberEatsMenu(store.id, options);
+        options.menuCache?.set(store.id, menuPromise);
+      }
+      let menu;
+      try { menu = await menuPromise; }
+      catch (error) {
+        if (options.menuCache?.get(store.id) === menuPromise) options.menuCache.delete(store.id);
+        throw error;
+      }
+      return uberEatsMenuOffers(store, menu, query);
     });
   }
   const offers = [...new Map([...directOffers, ...expandedOffers]
@@ -348,7 +409,7 @@ export async function searchUberEats(query, options = {}) {
   return {
     offers,
     fulfilment: scheduled ? { requestedAt: requestedAt.toISOString(), date, startTime, endTime, status: offers.length ? "candidate" : "unavailable", source: "uber-scheduled-search" } : null,
-    searchedStores: collectUberStores(payload).length,
+    searchedStores: allStores.length,
     expandedStores: expandedOffers.length ? new Set(expandedOffers.map((offer) => offer.merchant.id)).size : 0,
     raw: options.raw ? payload : undefined,
   };
@@ -612,4 +673,4 @@ export async function placeUberEatsOrder(draftOrderUuid, quote, options = {}) {
   }
 }
 
-export const uberEatsInternals = { apiHeaders, checkoutPayloadTypes: CHECKOUT_PAYLOAD_TYPES, collectCatalog, itemPromotion, menuOffers, mergePromotions, price, request, storeValue, storeWidePromotion, uberEatsScheduleAvailability };
+export const uberEatsInternals = { apiHeaders, checkoutPayloadTypes: CHECKOUT_PAYLOAD_TYPES, collectCatalog, itemPromotion, menuOffers: uberEatsMenuOffers, mergePromotions, price, request, storeValue, storeWidePromotion, uberEatsScheduleAvailability };

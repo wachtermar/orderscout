@@ -189,21 +189,21 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_prepare_basket",
-    description: "Preview the direct-provider basket payload, every meal line, required modifier groups, and selected comparison defaults. Glovo uses disclosed minimum-price required defaults unless explicit choices are supplied. No basket is changed and no exact checkout total is available yet.",
-    inputSchema: objectSchema({ searchId: string("OrderScout search ID."), offerId: string("Offer ID."), customizations: { type: "object", description: "Optional provider customization selections keyed by item and modifier-group IDs.", additionalProperties: true } }, ["searchId", "offerId"]), annotations: readOnly,
-    command: (input) => ["basket", "prepare", input.searchId, input.offerId, ...(input.customizations ? ["--customizations", JSON.stringify(input.customizations)] : []), "--agent"],
+    description: "Preview the direct-provider basket payload, every meal line, required modifier groups, and selected comparison defaults. Glovo uses disclosed minimum-price required defaults unless explicit choices are supplied. Allergy requests fail closed unless allergenReviewed reflects direct merchant confirmation. No basket is changed and no exact checkout total is available yet.",
+    inputSchema: objectSchema({ searchId: string("OrderScout search ID."), offerId: string("Offer ID."), customizations: { type: "object", description: "Optional provider customization selections keyed by item and modifier-group IDs.", additionalProperties: true }, allergenReviewed: boolean("True only after the merchant directly confirmed the stated allergen requirements.") }, ["searchId", "offerId"]), annotations: readOnly,
+    command: (input) => ["basket", "prepare", input.searchId, input.offerId, ...(input.customizations ? ["--customizations", JSON.stringify(input.customizations)] : []), ...(input.allergenReviewed ? ["--allergen-reviewed", "true"] : []), "--agent"],
   },
   {
     name: "orderscout_create_basket",
-    description: "Create the selected provider basket directly with every distinct meal line and required modifier selection. For scheduled Just Eat requests it configures only a provider-returned available delivery window. Never configures payment or places an order.",
-    inputSchema: objectSchema({ searchId: string("OrderScout search ID."), offerId: string("Offer ID."), customizations: { type: "object", description: "Optional provider customization selections keyed by item and modifier-group IDs.", additionalProperties: true } }, ["searchId", "offerId"]), annotations: remoteWrite,
-    command: (input) => ["basket", "create", input.searchId, input.offerId, ...(input.customizations ? ["--customizations", JSON.stringify(input.customizations)] : []), "--agent"],
+    description: "Create the selected provider basket directly with every distinct meal line and required modifier selection. Allergy requests fail closed unless allergenReviewed reflects direct merchant confirmation. For scheduled Just Eat requests it configures only a provider-returned available delivery window. Never configures payment or places an order.",
+    inputSchema: objectSchema({ searchId: string("OrderScout search ID."), offerId: string("Offer ID."), customizations: { type: "object", description: "Optional provider customization selections keyed by item and modifier-group IDs.", additionalProperties: true }, allergenReviewed: boolean("True only after the merchant directly confirmed the stated allergen requirements.") }, ["searchId", "offerId"]), annotations: remoteWrite,
+    command: (input) => ["basket", "create", input.searchId, input.offerId, ...(input.customizations ? ["--customizations", JSON.stringify(input.customizations)] : []), ...(input.allergenReviewed ? ["--allergen-reviewed", "true"] : []), "--agent"],
   },
   {
     name: "orderscout_checkout_review_task",
-    description: "Read the selected provider's current checkout quote directly, including scheduled-slot availability, subtotal, each fee, applied discounts, and total, then attach verified data to the comparison. A requested schedule failure is explicit and cannot become a winner. It never submits checkout.",
-    inputSchema: objectSchema({ searchId: string("OrderScout search ID."), offerId: string("Offer ID.") }, ["searchId", "offerId"]), annotations: localWrite,
-    command: (input) => ["basket", "checkout", input.searchId, input.offerId, "--agent"],
+    description: "Create the selected basket if needed, then read its current provider checkout quote directly, including scheduled-slot availability, subtotal, each fee, applied discounts, and total. A requested schedule failure is explicit and cannot become a winner. It changes the provider basket but never submits checkout or places an order.",
+    inputSchema: objectSchema({ searchId: string("OrderScout search ID."), offerId: string("Offer ID."), allergenReviewed: boolean("True only after the merchant directly confirmed the stated allergen requirements.") }, ["searchId", "offerId"]), annotations: remoteWrite,
+    command: (input) => ["basket", "checkout", input.searchId, input.offerId, ...(input.allergenReviewed ? ["--allergen-reviewed", "true"] : []), "--agent"],
   },
   {
     name: "orderscout_open_offer",
@@ -220,8 +220,8 @@ export const ORDERSCOUT_MCP_TOOLS = [
   {
     name: "orderscout_place_order",
     description: "Guarded final purchase boundary. With no confirmation it returns a fingerprint and exact total; only a second call with that fingerprint can submit, and server-side placement must also be explicitly enabled. Never call without action-time user approval.",
-    inputSchema: objectSchema({ searchId: string("OrderScout search ID."), offerId: string("Offer ID."), confirm: string("Exact fingerprint returned by the immediately preceding dry run, only after explicit approval.") }, ["searchId", "offerId"]), annotations: purchaseWrite,
-    command: (input) => ["order", "place", input.searchId, input.offerId, ...(input.confirm ? ["--confirm", input.confirm] : []), "--agent"],
+    inputSchema: objectSchema({ searchId: string("OrderScout search ID."), offerId: string("Offer ID."), confirm: string("Exact fingerprint returned by the immediately preceding dry run, only after explicit approval."), allergenReviewed: boolean("True only after the merchant directly confirmed the stated allergen requirements.") }, ["searchId", "offerId"]), annotations: purchaseWrite,
+    command: (input) => ["order", "place", input.searchId, input.offerId, ...(input.confirm ? ["--confirm", input.confirm] : []), ...(input.allergenReviewed ? ["--allergen-reviewed", "true"] : []), "--agent"],
   },
 ];
 
@@ -245,7 +245,7 @@ export function placementEnvironment(name, input = {}, base = {}) {
 
 export async function handleOrderScoutMcpMessage(message) {
   const id = message.id ?? null;
-  if (message.method === "initialize") return { jsonrpc: "2.0", id, result: { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "orderscout", version: "0.1.7" } } };
+  if (message.method === "initialize") return { jsonrpc: "2.0", id, result: { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "orderscout", version: "0.1.8" } } };
   if (message.method === "notifications/initialized") return null;
   if (message.method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: ORDERSCOUT_MCP_TOOLS.map(({ command, ...tool }) => tool) } };
   if (message.method === "tools/call") {

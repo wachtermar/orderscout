@@ -98,6 +98,21 @@ test("Glovo never retries a rejected mutation after refreshing would be ambiguou
   assert.deepEqual(paths, ["/v1/authenticated/customers/7/baskets"]);
 });
 
+test("Glovo exposes provider throttling as a rate limit rather than an authentication failure", async () => {
+  const session = {
+    source: "verification",
+    cookieHeader: `glovo_auth_info=${encodeURIComponent(JSON.stringify({ accessToken: jwt(Math.floor(Date.now() / 1_000) + 1_200) }))}`,
+  };
+  await assert.rejects(() => glovoInternals.request("/v3/stores/test/search", {
+    session,
+    fetchImpl: async () => Response.json({ message: "slow down" }, { status: 429, headers: { "retry-after": "30" } }),
+  }), (error) => {
+    assert.equal(error.code, "RATE_LIMITED");
+    assert.equal(error.details.retryAfter, "30");
+    return true;
+  });
+});
+
 test("Glovo treats an invalid refresh grant as an expired login", async () => {
   const session = {
     version: 2,

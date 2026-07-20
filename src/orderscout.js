@@ -12,13 +12,14 @@ import {
 import { CliError, parseArgs, resolveLocation } from "./lib.js";
 import { errorEnvelope, exitCodeFor, writeOutput } from "./output.js";
 import { PROVIDERS, configureAccounts, loadAccounts, parseProviderList, publicAccountStatus, recordProviderStatus } from "./providers.js";
+import { assertProviderAvailable, clearProviderCooldown, recordProviderRateLimit } from "./provider-cooldown.js";
 import {
   confirmEligibility, ingestOffers, loadSearch, recordBasket, recordProviderError, recordQuote, searchCandidates,
   searchResults, selectCandidates, startSearch,
 } from "./searches.js";
 import { runOrderScoutMcpServer } from "./orderscout-mcp.js";
 import {
-  createUberEatsBasket, placeUberEatsOrder, quoteUberEatsBasket, searchUberEats, uberEatsCarts, uberEatsMe, uberEatsMenu,
+  createUberEatsBasket, expandUberEatsCatalogs, placeUberEatsOrder, quoteUberEatsBasket, searchUberEats, uberEatsCarts, uberEatsMe, uberEatsMenu,
 } from "./ubereats.js";
 import { parseIntent, productIntentSpec, providerSearchQueries } from "./recommend.js";
 
@@ -106,6 +107,28 @@ function shoppingItemsFlag(flags) {
 function mergedQueries(primary, fallback, limit = 8) {
   return [...new Set([...(primary ?? []), ...(fallback ?? [])]
     .map((entry) => String(entry ?? "").trim()).filter(Boolean))].slice(0, limit);
+}
+
+export function assertAllergenReview(search, flags) {
+  const intent = search.parsedIntent ?? parseIntent(search.intent);
+  if (intent.allergyMentioned && booleanFlag(flags, "allergen-reviewed") !== true) {
+    throw new CliError("This request mentions an allergy; verify directly with the merchant before basket work", "ALLERGEN_REVIEW_REQUIRED");
+  }
+}
+
+async function settleConcurrent(values, concurrency, mapper) {
+  const outcomes = new Array(values.length);
+  let next = 0;
+  async function worker() {
+    while (next < values.length) {
+      const index = next;
+      next += 1;
+      try { outcomes[index] = { status: "fulfilled", value: await mapper(values[index], index) }; }
+      catch (reason) { outcomes[index] = { status: "rejected", reason }; }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), values.length) }, worker));
+  return outcomes;
 }
 
 async function runLegacyJustEat(args, { allowFailure = false } = {}) {
@@ -277,9 +300,10 @@ async function collectGlovo(intent, flags) {
   const fallbackQueries = mergedQueries(itemFallbackQueries, providerSearchQueries(parsed));
   const discoveryQueries = mergedQueries(flags.discoveryQueries, fallbackQueries);
   const catalogQueries = mergedQueries(flags.catalogQueries, fallbackQueries);
-  const results = await Promise.allSettled(discoveryQueries.map((query) => searchGlovo(query, location, { limit: flags.limit })));
+  const results = await settleConcurrent(discoveryQueries, 2, (query) => searchGlovo(query, location, { limit: flags.limit }));
   const fulfilled = results.filter((result) => result.status === "fulfilled");
   if (!fulfilled.length) throw results[0].reason;
+  const discoveryFailures = results.filter((result) => result.status === "rejected");
   const allStores = [...new Map(fulfilled.flatMap((result) => result.value.stores ?? [])
     .map((store) => [`${store.id}:${store.addressId}`, store])).values()];
   const merchantTerms = discoveryQueries.flatMap((query) => query.normalize("NFD").replace(/[\u0300-\u036f]/g, "")
@@ -289,7 +313,7 @@ async function collectGlovo(intent, flags) {
       .replace(/[\u0300-\u036f]/g, "").toLowerCase();
     return merchantTerms.some((term) => text.includes(term));
   });
-  const maxStores = Math.max(1, Math.min(8, Number(flags.stores ?? 6)));
+  const maxStores = Math.max(1, Math.min(8, Number(flags.stores ?? (parsed.kind === "meal" ? 4 : 3))));
   // When several merchant cards clearly match the LLM's discovery plan, stay
   // inside that set. Appending unrelated stores wastes Glovo's catalog-search
   // budget and can turn a precise request into a rate-limited partial scan.
@@ -299,19 +323,27 @@ async function collectGlovo(intent, flags) {
   const requireEligibility = [parsed, ...(flags.shoppingItems ?? []).map((item) => parseIntent(item.intent))]
     .some((itemIntent) => productIntentSpec(itemIntent).concept?.id === "vape");
   const catalogs = [];
+  const catalogErrors = [];
   let failedCatalogs = 0;
-  for (let start = 0; start < stores.length; start += 2) {
-    const batch = await Promise.allSettled(stores.slice(start, start + 2).map((store) => glovoStoreCatalog(store, catalogQueries, location, {
-      requireEligibility,
-      queryLimit: 6,
-      concurrency: 2,
-    })));
-    for (const result of batch) {
-      if (result.status === "fulfilled") catalogs.push(result.value);
-      else failedCatalogs += 1;
+  for (const store of stores) {
+    try {
+      catalogs.push(await glovoStoreCatalog(store, catalogQueries, location, {
+        requireEligibility,
+        queryLimit: 6,
+        concurrency: 1,
+      }));
+    } catch (error) {
+      failedCatalogs += 1;
+      catalogErrors.push(error);
     }
   }
   if (stores.length && !catalogs.length) {
+    if (catalogErrors.some((error) => error?.code === "RATE_LIMITED")) {
+      throw new CliError("Glovo temporarily rate-limited catalog search; wait before retrying", "RATE_LIMITED", {
+        discoveredStores: stores.length,
+        failedCatalogs,
+      });
+    }
     throw new CliError("Glovo discovered relevant merchants but every catalog request failed; retry instead of treating this as no match", "GLOVO_CATALOG_SEARCH_FAILED", {
       discoveredStores: stores.length,
       failedCatalogs,
@@ -335,13 +367,16 @@ async function collectGlovo(intent, flags) {
     providerMeta: {
       strategy: "merchant-discovery-then-catalog-search",
       discoveryQueries,
+      failedDiscoveryQueries: discoveryFailures.length,
+      rateLimitedDiscoveryQueries: discoveryFailures.filter((result) => result.reason?.code === "RATE_LIMITED").length,
       catalogQueries,
       discoveredStores: stores.length,
       searchedStores: catalogs.length,
       catalogProducts: catalogs.reduce((sum, catalog) => sum + catalog.products.length, 0),
       failedCatalogs,
+      rateLimitedCatalogs: catalogErrors.filter((error) => error?.code === "RATE_LIMITED").length,
       failedCatalogQueries: catalogs.reduce((sum, catalog) => sum + catalog.failedQueries, 0),
-      partial: failedCatalogs > 0 || catalogs.some((catalog) => catalog.failedQueries > 0),
+      partial: discoveryFailures.length > 0 || failedCatalogs > 0 || catalogs.some((catalog) => catalog.failedQueries > 0),
       eligibilityRequired: catalogs.filter((catalog) => catalog.eligibility).map((catalog) => ({
         merchantId: catalog.store.id,
         merchantName: catalog.store.name,
@@ -359,16 +394,58 @@ async function collectUberEats(intent, flags) {
     [...(flags.discoveryQueries ?? []), ...(flags.catalogQueries ?? [])],
     [...itemFallbackQueries, ...providerSearchQueries(parsed)],
   );
-  const results = await Promise.allSettled(queries.map((query) => searchUberEats(query, {
-    limit: flags.limit, scheduledAt: parsed.scheduledAt, timeZone: parsed.timeZone,
-  })));
+  const menuCache = new Map();
+  const storeCache = new Map();
+  const results = await settleConcurrent(queries, 2, (query) => searchUberEats(query, {
+    limit: flags.limit,
+    scheduledAt: parsed.scheduledAt,
+    timeZone: parsed.timeZone,
+    storeLimit: Math.max(1, Math.min(4, Number(flags.stores ?? 3))),
+    concurrency: 2,
+    menuCache,
+    storeCache,
+  }));
   const fulfilled = results.filter((result) => result.status === "fulfilled");
   if (!fulfilled.length) throw results[0].reason;
-  return [...new Map(fulfilled.flatMap((result) => result.value.offers)
+  const failures = results.filter((result) => result.status === "rejected");
+  const crossCatalogQueries = mergedQueries(
+    flags.catalogQueries,
+    (flags.shoppingItems ?? []).flatMap((item) => item.catalogQueries),
+  );
+  let crossCatalog = { offers: [], searchedStores: 0, failedStores: 0, rateLimitedStores: 0 };
+  let crossCatalogError = null;
+  if ((flags.shoppingItems?.length ?? 0) > 1 && storeCache.size && crossCatalogQueries.length) {
+    try {
+      crossCatalog = await expandUberEatsCatalogs(storeCache.values(), crossCatalogQueries, {
+        menuCache,
+        storeLimit: Math.max(1, Math.min(4, Number(flags.stores ?? 3))),
+        concurrency: 2,
+      });
+    } catch (error) { crossCatalogError = error; }
+  }
+  const offers = [...new Map([...fulfilled.flatMap((result) => result.value.offers), ...crossCatalog.offers]
     .map((offer) => [`${offer.merchant?.id}:${offer.item?.id}`, {
       ...offer,
       ...(parsed.deliveryTime === "scheduled" ? { fulfilment: { requestedAt: parsed.scheduledAt, timeZone: parsed.timeZone, status: "candidate", source: "uber-scheduled-search" } } : {}),
     }])).values()];
+  return {
+    offers,
+    providerMeta: {
+      strategy: "bounded-query-and-shared-menu-expansion",
+      queries,
+      completedQueries: fulfilled.length,
+      failedQueries: failures.length,
+      rateLimitedQueries: failures.filter((result) => result.reason?.code === "RATE_LIMITED").length
+        + crossCatalog.rateLimitedStores
+        + (crossCatalogError?.code === "RATE_LIMITED" ? 1 : 0),
+      crossCatalogStores: crossCatalog.searchedStores,
+      crossCatalogFailedStores: crossCatalog.failedStores,
+      crossCatalogRateLimitedStores: crossCatalog.rateLimitedStores,
+      crossCatalogOffers: crossCatalog.offers.length,
+      crossCatalogError: crossCatalogError?.code ?? null,
+      partial: failures.length > 0 || crossCatalog.failedStores > 0 || Boolean(crossCatalogError),
+    },
+  };
 }
 
 export async function runConcurrentProviderTasks(providers, task) {
@@ -387,12 +464,24 @@ export async function runConcurrentProviderTasks(providers, task) {
 async function collectAllProviders(searchId, providers, intent, flags) {
   const collectors = { justeat: collectJustEat, glovo: collectGlovo, ubereats: collectUberEats };
   const outcomes = await runConcurrentProviderTasks(providers, async (provider) => {
+    await assertProviderAvailable(provider);
     try {
-      return await collectors[provider](intent, flags);
+      const value = await collectors[provider](intent, flags);
+      const providerMeta = Array.isArray(value) ? null : value.providerMeta;
+      const wasRateLimited = Object.entries(providerMeta ?? {})
+        .some(([key, entry]) => /rateLimited/i.test(key) && Number(entry) > 0);
+      if (wasRateLimited) await recordProviderRateLimit(provider);
+      else await clearProviderCooldown(provider);
+      return value;
     } catch (error) {
+      if (error.code === "RATE_LIMITED" && error.details?.source !== "local-cooldown") {
+        await recordProviderRateLimit(provider, { retryAfter: error.details?.retryAfter });
+      }
       if (provider === "justeat" || !["AUTH_EXPIRED", "AUTH_REQUIRED"].includes(error.code)) throw error;
       await refreshChromeProviderSession(provider);
-      return collectors[provider](intent, flags);
+      const value = await collectors[provider](intent, flags);
+      await clearProviderCooldown(provider);
+      return value;
     }
   });
 
@@ -400,7 +489,7 @@ async function collectAllProviders(searchId, providers, intent, flags) {
   // one provider cannot overwrite another provider's offers.
   for (const outcome of outcomes) {
     const timing = { startedAt: outcome.startedAt, completedAt: outcome.completedAt, durationMs: outcome.durationMs };
-    if (outcome.error) await recordProviderError(searchId, outcome.provider, outcome.error.message ?? outcome.error.code, timing);
+    if (outcome.error) await recordProviderError(searchId, outcome.provider, outcome.error, timing);
     else await ingestOffers(searchId, outcome.provider, Array.isArray(outcome.value) ? outcome.value : outcome.value.offers, {
       timing,
       providerMeta: Array.isArray(outcome.value) ? null : outcome.value.providerMeta,
@@ -665,6 +754,7 @@ export async function runOrderScout(argv) {
       if (!flags["no-open"]) await openSystemUrl(url);
       return writeOutput({ provider: offer.provider, opened: !flags["no-open"], url, submitted: false }, flags);
     }
+    assertAllergenReview(search, flags);
     if (offer.provider === "glovo") {
       if (action === "checkout") {
         let basketId = offer.basket?.id;
@@ -752,6 +842,7 @@ export async function runOrderScout(argv) {
     const search = await loadSearch(rest[1]);
     const offer = search.offers.find((entry) => entry.id === rest[2]);
     if (!offer) throw new CliError("Offer not found", "OFFER_NOT_FOUND");
+    assertAllergenReview(search, flags);
     if (offer.provider === "ubereats") {
       let id = offer.basket?.id;
       if (!id) {

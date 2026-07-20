@@ -66,6 +66,10 @@ Provider-listed deals are retained: struck-through item prices and savings, perc
 
 Product and meal discovery is a hybrid LLM + CLI workflow with a deliberate boundary. The CLI retrieves provider-native catalogs, normalizes untrusted data, deduplicates it, paginates it, and preserves prices, deals, availability, ratings, and source IDs. In agent mode it does not decide what a product or meal means. ChatGPT splits distinct needs into separate shopping lines, chooses broad merchant and catalog queries, inspects normalized candidate pages, and explicitly selects the same-store bundle that best satisfies each line. Deterministic code then validates quantities, basket compatibility, eligibility, exact totals, and purchase approval.
 
+This applies to every agent request, not only the examples in this README. Food, groceries, pharmacy and personal-care items, drinks, household goods, electronics, pet supplies, flowers, and provider-permitted restricted catalogs all use the same candidate workflow. The model may choose different retrieval terms for each shopping line; the CLI never requires one product to match unrelated needs simultaneously.
+
+For pharmacy searches, OrderScout can locate and compare an exact product the user requests; it does not diagnose symptoms, prescribe medication or dosage, or invent medical suitability. Those decisions belong with a pharmacist or clinician.
+
 A preference cannot qualify an unrelated product—`ice` does not match `rice`, and a disposable vape is not e-liquid just because its description mentions liquid. Quantity-aware helpers add extra understanding where useful—for example bottle sizes, multipacks, total litres, still versus sparkling, and price per litre for water. Multi-person meal results contain explicit distinct dish lines, or one item explicitly sold for sharing; OrderScout does not multiply one ordinary dish by the party size. Breakfast searches require prepared breakfast dishes rather than raw egg packs or a keyword found in an unrelated product. “Healthy” and “tasty” remain transparent ranking signals, not medical or nutritional claims.
 
 ## Will it accidentally order?
@@ -210,9 +214,12 @@ OrderScout is experimental pre-1.0 software built against private consumer APIs 
 
 ```bash
 npm run check
+npm run test:matrix
 npm run test:coverage
 npm run pack:check
 ```
+
+`test:matrix` runs the generated English/Spanish request matrix without provider traffic. It currently covers more than 1,800 natural-language combinations plus paging, bundle, pricing, promotion, schedule, eligibility, and failure invariants. See [the query-matrix documentation](docs/query-matrix.md) for scope and known limits. Live smoke checks deliberately use a small, paced set of read-only requests because provider rate limits are real production behavior, not something the test suite should bypass.
 
 The design takes operational lessons from [`steipete/ordercli`](https://github.com/steipete/ordercli) and the [Domino's Printing Press CLI](https://github.com/mvanhorn/printing-press-library/tree/main/library/food-and-dining/dominos). The implementation is original; see [third-party notices](THIRD_PARTY_NOTICES.md).
 
