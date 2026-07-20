@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createGlovoBasket, enrichGlovoOffers, glovoAddresses, glovoInternals, glovoMe, glovoMenu, glovoOrderConfirmation, glovoStoreCatalog, glovoSubmissionRequest, normalizeGlovoQuote, placeGlovoOrder, searchGlovo } from "../src/glovo.js";
+import { createGlovoBasket, enrichGlovoOffers, glovoAddresses, glovoInternals, glovoMe, glovoMenu, glovoOrderConfirmation, glovoStoreCatalog, glovoSubmissionRequest, normalizeGlovoQuote, placeGlovoOrder, quoteGlovoBasket, searchGlovo } from "../src/glovo.js";
 
 function jwt(expiresAtSeconds) {
   return `${Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url")}.${Buffer.from(JSON.stringify({ exp: expiresAtSeconds })).toString("base64url")}.${"s".repeat(40)}`;
@@ -298,6 +298,128 @@ test("Glovo basket prepare preserves distinct meal lines", async () => {
     { item: { name: "Salmon poke" }, quantity: 1, source: { storeId: "12", storeAddressId: "34", productId: "57", productExternalId: "P57", storeProductId: "sp57" } },
   ] }, { prepareOnly: true });
   assert.deepEqual(prepared.payload.products.map((product) => product.ids.id), ["56", "57"]);
+});
+
+test("Glovo customizations match the current frontend basket payload", async () => {
+  const prepared = await createGlovoBasket({
+    item: { name: "Pad Thai" },
+    source: {
+      storeId: "12", storeAddressId: "34", productId: "56", productExternalId: "P56", storeProductId: "sp56",
+      product: { attributeGroups: [{
+        id: 101, externalId: "group-external", name: "Heat level", min: 1, max: 1, position: 2,
+        attributes: [{ id: 202, externalId: "attribute-external", name: "Thai spicy", priceImpact: 0 }],
+      }] },
+    },
+  }, { prepareOnly: true });
+
+  assert.deepEqual(prepared.payload.products[0].customizations, [{
+    ids: {
+      groupLegacyId: "101", groupId: "101", groupExternalId: "group-external", groupPosition: 2,
+      legacyId: "202", externalId: "attribute-external",
+    },
+    name: "Heat level",
+    quantity: { increments: 1 },
+    customizationName: "Thai spicy",
+    groupName: "Heat level",
+  }]);
+});
+
+test("Glovo rejects a basket that silently drops requested products", async (t) => {
+  const previousCookie = process.env.ORDERSCOUT_GLOVO_COOKIE;
+  t.after(() => {
+    if (previousCookie === undefined) delete process.env.ORDERSCOUT_GLOVO_COOKIE;
+    else process.env.ORDERSCOUT_GLOVO_COOKIE = previousCookie;
+  });
+  process.env.ORDERSCOUT_GLOVO_COOKIE = `glovo_auth_info=${encodeURIComponent(JSON.stringify({ accessToken: jwt(Math.floor(Date.now() / 1_000) + 1_200) }))}`;
+
+  const offer = { lines: [
+    {
+      item: { name: "Customized main" }, quantity: 1,
+      source: {
+        storeId: "12", storeAddressId: "34", storeCategoryId: "1", productId: "56", productExternalId: "P56", storeProductId: "sp56",
+        product: { attributeGroups: [{
+          id: 101, externalId: "group-external", name: "Heat level", min: 1, max: 1, position: 0,
+          attributes: [{ id: 202, externalId: "attribute-external", name: "Thai spicy", priceImpact: 0 }],
+        }] },
+      },
+    },
+    {
+      item: { name: "Water" }, quantity: 1,
+      source: { storeId: "12", storeAddressId: "34", storeCategoryId: "1", productId: "57", productExternalId: "P57", storeProductId: "sp57" },
+    },
+  ] };
+  let rollbackCalls = 0;
+  const fetchImpl = async (url, options = {}) => {
+    const path = new URL(url).pathname;
+    if (path === "/customer_profile/api/v1/address_book/me/addresses") {
+      return Response.json({ data: { addresses: [{
+        entryType: "CURRENT", address: { id: 1, latitude: 36.5, longitude: -4.8, cityCode: "MBA", cityName: "Marbella" },
+      }] } });
+    }
+    if (path === "/v3/me") return Response.json({ id: 7, name: "Test" });
+    if (path === "/customers/7/subscription/status") return Response.json({ isSubscribed: false });
+    if (path === "/v1/authenticated/customers/7/baskets/stores/12") return Response.json(null);
+    if (path === "/v1/authenticated/customers/7/baskets" && options.method === "POST") {
+      const payload = JSON.parse(options.body);
+      return Response.json({
+        basketId: "basket-1", storeId: 12, storeAddressId: 34, storeCategoryId: 1,
+        products: [payload.products[1]],
+      });
+    }
+    if (path === "/v1/authenticated/customers/7/baskets/basket-1" && options.method === "DELETE") {
+      rollbackCalls += 1;
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`Unexpected Glovo test request: ${options.method ?? "GET"} ${path}`);
+  };
+
+  await assert.rejects(() => createGlovoBasket(offer, { fetchImpl }), (error) => {
+    assert.equal(error.code, "BASKET_CONTENT_MISMATCH");
+    assert.deepEqual(error.details.missingItems, [{ itemId: "56", itemName: "Customized main", expectedQuantity: 1, acceptedQuantity: 0 }]);
+    assert.equal(error.details.expectedItemCount, 2);
+    assert.equal(error.details.acceptedItemCount, 1);
+    assert.deepEqual(error.details.rollback, { attempted: true, succeeded: true });
+    return true;
+  });
+  assert.equal(rollbackCalls, 1);
+});
+
+test("Glovo refuses to quote a previously recorded partial basket", async (t) => {
+  const previousCookie = process.env.ORDERSCOUT_GLOVO_COOKIE;
+  t.after(() => {
+    if (previousCookie === undefined) delete process.env.ORDERSCOUT_GLOVO_COOKIE;
+    else process.env.ORDERSCOUT_GLOVO_COOKIE = previousCookie;
+  });
+  process.env.ORDERSCOUT_GLOVO_COOKIE = `glovo_auth_info=${encodeURIComponent(JSON.stringify({ accessToken: jwt(Math.floor(Date.now() / 1_000) + 1_200) }))}`;
+  let checkoutCalls = 0;
+  const fetchImpl = async (url) => {
+    const path = new URL(url).pathname;
+    if (path === "/v3/me") return Response.json({ id: 7, name: "Test" });
+    if (path === "/customers/7/subscription/status") return Response.json({ isSubscribed: false });
+    if (path === "/v1/authenticated/customers/7/baskets/basket-1") {
+      return Response.json({
+        basketId: "basket-1", storeId: 12, storeAddressId: 34, storeCategoryId: 1,
+        products: [{ ids: { id: "rewritten-water-id", storeProductId: "stable-water" }, quantity: { increments: 1 } }],
+      });
+    }
+    if (path === "/v3/checkouts/order/1/template") checkoutCalls += 1;
+    throw new Error(`Unexpected Glovo test request: ${path}`);
+  };
+
+  await assert.rejects(() => quoteGlovoBasket("basket-1", {
+    fetchImpl,
+    location: { latitude: 36.5, longitude: -4.8, cityCode: "MBA" },
+    expectedLines: [
+      { item: { name: "Customized main" }, quantity: 1, source: { productId: "56" } },
+      { item: { name: "Water" }, quantity: 1, source: { productId: "57", storeProductId: "stable-water" } },
+    ],
+  }), (error) => {
+    assert.equal(error.code, "BASKET_CONTENT_MISMATCH");
+    assert.deepEqual(error.details.missingItems, [{ itemId: "56", itemName: "Customized main", expectedQuantity: 1, acceptedQuantity: 0 }]);
+    assert.deepEqual(error.details.unexpectedItems, []);
+    return true;
+  });
+  assert.equal(checkoutCalls, 0);
 });
 
 test("Glovo checkout prefers the submit action returned by validation", () => {

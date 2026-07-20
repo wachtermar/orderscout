@@ -85,6 +85,7 @@ export function normalizeOffer(provider, input, context = {}) {
   const stable = JSON.stringify([provider, input.merchant?.id, merchantName, input.item?.id, itemName,
     input.lines?.map((line) => [line.item?.id, line.quantity]), input.url]);
   const lines = Array.isArray(input.lines) ? input.lines.map((line) => ({
+    candidateId: line.candidateId ?? null,
     item: {
       id: line.item?.id ?? null,
       name: String(line.item?.name ?? "").trim(),

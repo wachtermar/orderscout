@@ -2,6 +2,14 @@
 
 This project follows Semantic Versioning. It is currently pre-1.0; command and normalized response changes may occur between minor releases and will be listed here.
 
+## 0.1.11 - 2026-07-20
+
+- Match Glovo's current customization payload so required choices such as protein, heat level, and drinks are accepted with configured products.
+- Verify every requested product and quantity against Glovo's returned basket before checkout pricing, and roll back a newly created partial basket instead of quoting it.
+- Reject previously recorded partial Glovo baskets before checkout validation and invalidate stale exact totals after any failed re-quote.
+- Return and persist Glovo's configured choices with comparison quotes so agents can disclose the exact protein, heat, drink, and other required selections.
+- Preserve selected candidate identities through bundle normalization for reliable basket diagnostics.
+
 ## 0.1.10 - 2026-07-20
 
 - Add an optional native-web research stage for qualitative requests such as spiciness, food quality, authenticity, outside ratings, popularity, portions, healthiness, and dietary fit.

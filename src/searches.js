@@ -446,6 +446,7 @@ export async function recordComparisonOutcomes(id, outcomes) {
       pricing: outcome.pricing ?? null,
       fulfilment: outcome.fulfilment ?? null,
       issues: outcome.issues ?? [],
+      customizationReview: outcome.customizationReview ?? null,
       error: outcome.error ?? null,
       recordedAt,
     };
@@ -470,6 +471,24 @@ export async function recordComparisonOutcomes(id, outcomes) {
         ...offer,
         pricing: { ...offer.pricing, ...outcome.pricing },
         ...(outcome.fulfilment ? { fulfilment: outcome.fulfilment } : {}),
+      });
+      if (basket) offer.basket = basket;
+    } else if (outcome.status === "error") {
+      const basket = offer.basket;
+      const lineSubtotals = offer.lines?.map((line) => Number(line.pricing?.subtotal));
+      const subtotal = lineSubtotals?.length && lineSubtotals.every(Number.isFinite)
+        ? Math.round(lineSubtotals.reduce((sum, value) => sum + value, 0) * 100) / 100
+        : offer.pricing?.subtotal;
+      offer = normalizeOffer(offer.provider, {
+        ...offer,
+        pricing: {
+          ...offer.pricing,
+          subtotal,
+          fees: { delivery: null, service: null, smallOrder: null, bag: null, other: null },
+          discount: 0,
+          total: null,
+          exact: false,
+        },
       });
       if (basket) offer.basket = basket;
     }

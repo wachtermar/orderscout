@@ -757,11 +757,96 @@ function glovoCustomization(group, attribute) {
   return {
     ids: {
       groupLegacyId: String(group.id), groupId: String(group.id), groupExternalId: group.externalId ?? "",
-      groupPosition: Number(group.position ?? 0), legacyId: String(attribute.id), id: String(attribute.id),
-      externalId: attribute.externalId ?? "",
+      groupPosition: Number(group.position ?? 0), legacyId: String(attribute.id), externalId: attribute.externalId ?? "",
     },
-    name: attribute.name, quantity: { increments: 1 }, customizationName: attribute.name, groupName: group.name,
+    name: group.name, quantity: { increments: 1 }, customizationName: attribute.name, groupName: group.name,
   };
+}
+
+function identifier(value) {
+  return value === null || value === undefined || value === "" ? null : String(value);
+}
+
+function sourceProductIdentity(source) {
+  const storeProductId = identifier(source?.storeProductId);
+  if (storeProductId) return `store:${storeProductId}`;
+  const externalId = identifier(source?.productExternalId ?? source?.externalId);
+  if (externalId) return `external:${externalId}`;
+  const id = identifier(source?.productId ?? source?.id);
+  return id ? `id:${id}` : null;
+}
+
+function basketProductIdentity(product) {
+  const ids = product?.ids ?? product;
+  const storeProductId = identifier(ids?.storeProductId);
+  if (storeProductId) return `store:${storeProductId}`;
+  const externalId = identifier(ids?.externalId);
+  if (externalId) return `external:${externalId}`;
+  const id = identifier(ids?.id ?? ids?.legacyId ?? product?.productId);
+  return id ? `id:${id}` : null;
+}
+
+function productQuantity(product) {
+  const value = Number(product?.quantity?.increments ?? product?.quantity ?? 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function glovoBasketLineMismatch(basket, lines) {
+  const expected = new Map();
+  for (const line of lines) {
+    const identity = sourceProductIdentity(line?.source);
+    if (!identity) continue;
+    const itemId = identifier(line?.source?.productId ?? line?.source?.storeProductId ?? line?.source?.productExternalId);
+    const requestedQuantity = Number(line.quantity ?? 1);
+    const quantity = Number.isFinite(requestedQuantity) && requestedQuantity > 0 ? requestedQuantity : 1;
+    const current = expected.get(identity) ?? { identity, itemId, itemName: line.item?.name ?? null, quantity: 0 };
+    current.quantity += quantity;
+    expected.set(identity, current);
+  }
+  const accepted = new Map();
+  for (const product of basket?.products ?? []) {
+    const identity = basketProductIdentity(product);
+    if (!identity) continue;
+    const current = accepted.get(identity) ?? {
+      itemId: identifier(product?.ids?.id ?? product?.ids?.legacyId ?? product?.id),
+      quantity: 0,
+    };
+    current.quantity += productQuantity(product);
+    accepted.set(identity, current);
+  }
+  const missingItems = [...expected.values()].flatMap((item) => {
+    const acceptedQuantity = accepted.get(item.identity)?.quantity ?? 0;
+    return acceptedQuantity < item.quantity ? [{
+      itemId: item.itemId,
+      itemName: item.itemName,
+      expectedQuantity: item.quantity,
+      acceptedQuantity,
+    }] : [];
+  });
+  const unexpectedItems = [...accepted].flatMap(([identity, item]) => {
+    const expectedQuantity = expected.get(identity)?.quantity ?? 0;
+    return item.quantity > expectedQuantity ? [{ itemId: item.itemId, expectedQuantity, acceptedQuantity: item.quantity }] : [];
+  });
+  const expectedItemCount = [...expected.values()].reduce((sum, item) => sum + item.quantity, 0);
+  const acceptedItemCount = [...accepted.values()].reduce((sum, item) => sum + item.quantity, 0);
+  if (!missingItems.length && !unexpectedItems.length && expectedItemCount === acceptedItemCount) return null;
+  return {
+    basketId: basket?.basketId ?? basket?.id ?? null,
+    expectedItemCount,
+    acceptedItemCount,
+    missingItems,
+    unexpectedItems,
+  };
+}
+
+function assertGlovoBasketLines(basket, lines) {
+  const mismatch = glovoBasketLineMismatch(basket, lines);
+  if (!mismatch) return;
+  throw new CliError(
+    "Glovo did not accept every configured basket item; checkout pricing for this partial basket is invalid",
+    "BASKET_CONTENT_MISMATCH",
+    mismatch,
+  );
 }
 
 function glovoProduct(source, quantity, product, selections) {
@@ -825,7 +910,26 @@ export async function createGlovoBasket(offer, options = {}) {
     }
     basket = await request(`/v1/authenticated/customers/${me.id}/baskets/${existing.basketId}/products`, { method: "PUT", auth: true, location, fetchImpl: options.fetchImpl, body: { ...existing, products: [...(existing.products ?? []), ...products] } });
   }
-  if (!(basket?.products?.length > 0)) throw new CliError("Glovo rejected the configured basket products", "BASKET_REJECTED", { customizationReview });
+  const mismatch = glovoBasketLineMismatch(basket, lines);
+  if (mismatch) {
+    let rollback = { attempted: false, succeeded: false };
+    if (mismatch.basketId) {
+      rollback = { attempted: true, succeeded: false };
+      try {
+        await request(`/v1/authenticated/customers/${me.id}/baskets/${encodeURIComponent(mismatch.basketId)}`, {
+          method: "DELETE", auth: true, location, fetchImpl: options.fetchImpl,
+        });
+        rollback.succeeded = true;
+      } catch (error) {
+        rollback.error = { code: error.code ?? "ROLLBACK_FAILED", message: error.message };
+      }
+    }
+    throw new CliError(
+      "Glovo did not accept every configured basket item; the partial basket cannot be quoted",
+      "BASKET_CONTENT_MISMATCH",
+      { ...mismatch, rollback },
+    );
+  }
   return { mutated: true, basket, customizationReview, submitted: false };
 }
 
@@ -835,6 +939,7 @@ export async function quoteGlovoBasket(basketId, options = {}) {
   const basket = await request(`/v1/authenticated/customers/${me.id}/baskets/${encodeURIComponent(basketId)}`, {
     auth: true, location, fetchImpl: options.fetchImpl,
   });
+  if (options.expectedLines?.length) assertGlovoBasketLines(basket, options.expectedLines);
   const products = (basket.products ?? []).map((product) => ({
     id: product.ids?.id ?? "", storeProductId: product.ids?.storeProductId ?? "", externalId: product.ids?.externalId ?? "",
     quantity: product.quantity?.increments ?? 0, name: product.name ?? "", displayedPrice: product.price?.final?.major ?? 0,
