@@ -91,7 +91,6 @@ export const ORDERSCOUT_MCP_TOOLS = [
           catalogQueries: { type: "array", maxItems: 8, items: { type: "string", minLength: 1, maxLength: 80 } },
         }, ["intent"]),
       },
-      maxCandidates: { type: "integer", minimum: 1, maximum: 100, description: "How many normalized matching candidates the LLM wants back for final reasoning. The CLI still scans beyond this display limit." },
     }, ["intent"]), annotations: localWrite,
     command: (input) => [
       "search", "begin", input.intent, "--agent", "--semantic-mode", "llm",
@@ -100,7 +99,6 @@ export const ORDERSCOUT_MCP_TOOLS = [
       ...(input.discoveryQueries?.length ? ["--discovery-queries", JSON.stringify(input.discoveryQueries)] : []),
       ...(input.catalogQueries?.length ? ["--catalog-queries", JSON.stringify(input.catalogQueries)] : []),
       ...(input.shoppingItems?.length ? ["--shopping-items", JSON.stringify(input.shoppingItems)] : []),
-      ...(input.maxCandidates ? ["--top", String(input.maxCandidates)] : []),
     ],
   },
   {
@@ -247,7 +245,7 @@ export function placementEnvironment(name, input = {}, base = {}) {
 
 export async function handleOrderScoutMcpMessage(message) {
   const id = message.id ?? null;
-  if (message.method === "initialize") return { jsonrpc: "2.0", id, result: { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "orderscout", version: "0.1.6" } } };
+  if (message.method === "initialize") return { jsonrpc: "2.0", id, result: { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "orderscout", version: "0.1.7" } } };
   if (message.method === "notifications/initialized") return null;
   if (message.method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: ORDERSCOUT_MCP_TOOLS.map(({ command, ...tool }) => tool) } };
   if (message.method === "tools/call") {

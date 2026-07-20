@@ -491,15 +491,19 @@ export function buildLlmSelection(search, requestedSelections) {
     const forItem = String(requested.forItem ?? "").trim();
     const reason = String(requested.reason ?? "").trim();
     if (!forItem || !reason) throw new CliError(`Selection ${index + 1} requires forItem and reason`, "INVALID_SELECTION");
+    if (forItem.length > 200 || reason.length > 500) throw new CliError(`Selection ${index + 1} labels are too long`, "INVALID_SELECTION");
     const unitPrice = Number(offer.item?.unitPrice);
     const subtotal = Number.isFinite(unitPrice) ? Math.round(unitPrice * quantity * 100) / 100 : null;
+    const originalSubtotal = Number.isFinite(Number(offer.pricing?.originalSubtotal))
+      ? Math.round(Number(offer.pricing.originalSubtotal) * quantity * 100) / 100 : null;
+    const itemSavings = Math.round(Number(offer.pricing?.itemSavings ?? 0) * quantity * 100) / 100;
     return {
       candidateId: offer.id,
       item: { ...offer.item },
       quantity,
       forItem,
       reason,
-      pricing: { ...offer.pricing, subtotal, total: null, exact: false },
+      pricing: { ...offer.pricing, originalSubtotal, subtotal, itemSavings, discount: 0, total: null, exact: false },
       promotion: offer.promotion,
       source: offer.source,
       signals: offer.signals,
@@ -545,6 +549,7 @@ export function buildLlmSelection(search, requestedSelections) {
       originalSubtotal: null,
       subtotal,
       itemSavings: Math.round(lines.reduce((sum, line) => sum + Number(line.pricing?.itemSavings ?? 0), 0) * 100) / 100,
+      discount: 0,
       total: estimatedTotal,
       exact: false,
       missing: ["final checkout validation"],

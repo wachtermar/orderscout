@@ -21,8 +21,8 @@ test("OrderScout MCP exposes direct login, basket, checkout, and guarded order t
   assert.match(search.description, /concurrently/i);
   assert.equal(search.inputSchema.properties.providers, undefined);
   assert.deepEqual(search.command({ intent: "meal", objective: "value" }), ["search", "begin", "meal", "--agent", "--semantic-mode", "llm", "--objective", "value"]);
-  assert.deepEqual(search.command({ intent: "vape liquid", discoveryQueries: ["vape", "estanco"], catalogQueries: ["ice", "liquido"], shoppingItems: [{ intent: "Tappo pod" }], maxCandidates: 40 }), [
-    "search", "begin", "vape liquid", "--agent", "--semantic-mode", "llm", "--discovery-queries", '["vape","estanco"]', "--catalog-queries", '["ice","liquido"]', "--shopping-items", '[{"intent":"Tappo pod"}]', "--top", "40",
+  assert.deepEqual(search.command({ intent: "vape liquid", discoveryQueries: ["vape", "estanco"], catalogQueries: ["ice", "liquido"], shoppingItems: [{ intent: "Tappo pod" }] }), [
+    "search", "begin", "vape liquid", "--agent", "--semantic-mode", "llm", "--discovery-queries", '["vape","estanco"]', "--catalog-queries", '["ice","liquido"]', "--shopping-items", '[{"intent":"Tappo pod"}]',
   ]);
   assert.deepEqual(ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_candidates").command({
     searchId: "search", provider: "glovo", query: "mint ice", offset: 20, limit: 20,
