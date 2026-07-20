@@ -37,10 +37,13 @@ export async function startSearch(intent, options = {}) {
     objective: options.objective ?? parseObjective(text),
     locationHint: options.locationHint ?? null,
     queryPlan: options.queryPlan ?? { source: "deterministic", discoveryQueries: [], catalogQueries: [] },
+    semanticMode: options.semanticMode === "llm" ? "llm" : "deterministic",
+    shoppingItems: Array.isArray(options.shoppingItems) ? options.shoppingItems : [],
     providers: enabled,
     providerStatus: Object.fromEntries(enabled.map((id) => [id, { state: "pending", error: null }])),
     orchestration: "concurrent",
     offers: [],
+    selections: [],
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
@@ -82,7 +85,8 @@ export async function ingestOffers(id, provider, inputs, options = {}) {
   const search = await loadSearch(id);
   if (!search.providers.includes(provider)) throw new CliError(`${provider} is not enabled for this search`, "PROVIDER_NOT_ENABLED");
   const accounts = await loadAccounts();
-  let values = applyIntent(Array.isArray(inputs) ? inputs : [inputs], search.intent);
+  const rawInputs = Array.isArray(inputs) ? inputs : [inputs];
+  let values = semanticInputsForSearch(search, rawInputs);
   if (search.fulfilment?.mode === "scheduled") {
     values = values.map((input) => ({
       ...input,
@@ -105,11 +109,16 @@ export async function ingestOffers(id, provider, inputs, options = {}) {
     state: options.complete === false ? "partial" : "complete",
     error: null,
     offerCount: normalized.length,
+    candidateCount: search.semanticMode === "llm" ? normalized.length : undefined,
     ...(options.providerMeta ? { discovery: options.providerMeta } : {}),
     ...(options.timing ?? {}),
   };
   await writeSearch(search);
   return resultsFor(search);
+}
+
+export function semanticInputsForSearch(search, inputs) {
+  return search.semanticMode === "llm" ? inputs : applyIntent(inputs, search.intent);
 }
 
 export function applyIntent(inputs, text) {
@@ -410,18 +419,185 @@ export async function confirmEligibility(id, offerId, confirmed) {
   return { provider: "glovo", storeId, status: "confirmed", confirmedAt, updatedOffers };
 }
 
+function isLlmSelection(offer) {
+  return offer.source?.llmSelected === true;
+}
+
+function merchantKey(offer) {
+  return `${offer.provider}:${offer.merchant?.id ?? offer.merchant?.name ?? ""}`;
+}
+
+function selectionPromotion(lines) {
+  const promotions = lines.map((line) => line.promotion).filter(Boolean);
+  if (!promotions.length) return null;
+  return {
+    types: [...new Set(promotions.flatMap((promotion) => promotion.types ?? []))],
+    descriptions: [...new Set(promotions.flatMap((promotion) => promotion.descriptions ?? []))],
+    ids: [...new Set(promotions.flatMap((promotion) => promotion.ids ?? []))],
+    eligible: promotions.every((promotion) => promotion.eligible !== false),
+    applied: promotions.some((promotion) => promotion.applied),
+    savings: Math.round(lines.reduce((sum, line) => sum + Number(line.pricing?.itemSavings ?? 0), 0) * 100) / 100,
+    source: "llm-selected-lines",
+  };
+}
+
+export function candidatePageForSearch(search, options = {}) {
+  let candidates = search.offers.filter((offer) => !isLlmSelection(offer));
+  if (options.provider) candidates = candidates.filter((offer) => offer.provider === options.provider);
+  if (options.merchantId) candidates = candidates.filter((offer) => String(offer.merchant?.id) === String(options.merchantId));
+  if (options.query) {
+    const terms = String(options.query).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+      .split(/[^a-z0-9]+/).filter(Boolean);
+    candidates = candidates.filter((offer) => {
+      const text = `${offer.merchant?.name ?? ""} ${offer.item?.name ?? ""} ${offer.item?.description ?? ""} ${offer.item?.category ?? ""}`
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+      return terms.every((term) => text.includes(term));
+    });
+  }
+  const offset = Math.max(0, Math.trunc(Number(options.offset ?? 0)) || 0);
+  const limit = Math.max(1, Math.min(100, Math.trunc(Number(options.limit ?? 50)) || 50));
+  const page = candidates.slice(offset, offset + limit);
+  return {
+    searchId: search.id,
+    semanticMode: search.semanticMode ?? "deterministic",
+    total: candidates.length,
+    offset,
+    limit,
+    hasMore: offset + page.length < candidates.length,
+    nextOffset: offset + page.length < candidates.length ? offset + page.length : null,
+    candidates: page,
+  };
+}
+
+export async function searchCandidates(id, options = {}) {
+  return candidatePageForSearch(await loadSearch(id), options);
+}
+
+export function buildLlmSelection(search, requestedSelections) {
+  if (search.semanticMode !== "llm") throw new CliError("LLM selection is only available for LLM-mode searches", "LLM_SELECTION_NOT_AVAILABLE");
+  if (!Array.isArray(requestedSelections) || !requestedSelections.length || requestedSelections.length > 20) {
+    throw new CliError("Selections must be a non-empty array with at most 20 lines", "INVALID_SELECTION");
+  }
+  const candidates = new Map(search.offers.filter((offer) => !isLlmSelection(offer)).map((offer) => [offer.id, offer]));
+  const seen = new Set();
+  const lines = requestedSelections.map((requested, index) => {
+    if (!requested || typeof requested !== "object") throw new CliError(`Selection ${index + 1} must be an object`, "INVALID_SELECTION");
+    const offer = candidates.get(String(requested.offerId ?? ""));
+    if (!offer) throw new CliError(`Candidate ${requested.offerId ?? ""} does not exist in this search`, "CANDIDATE_NOT_FOUND");
+    if (seen.has(offer.id)) throw new CliError(`Candidate ${offer.id} was selected more than once; use quantity instead`, "DUPLICATE_SELECTION");
+    seen.add(offer.id);
+    const quantity = Number(requested.quantity ?? offer.quantity ?? 1);
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) throw new CliError(`Selection ${index + 1} quantity must be an integer from 1 to 99`, "INVALID_SELECTION");
+    const forItem = String(requested.forItem ?? "").trim();
+    const reason = String(requested.reason ?? "").trim();
+    if (!forItem || !reason) throw new CliError(`Selection ${index + 1} requires forItem and reason`, "INVALID_SELECTION");
+    const unitPrice = Number(offer.item?.unitPrice);
+    const subtotal = Number.isFinite(unitPrice) ? Math.round(unitPrice * quantity * 100) / 100 : null;
+    return {
+      candidateId: offer.id,
+      item: { ...offer.item },
+      quantity,
+      forItem,
+      reason,
+      pricing: { ...offer.pricing, subtotal, total: null, exact: false },
+      promotion: offer.promotion,
+      source: offer.source,
+      signals: offer.signals,
+      available: offer.available,
+    };
+  });
+  const selectedOffers = lines.map((line) => candidates.get(line.candidateId));
+  if (new Set(selectedOffers.map((offer) => merchantKey(offer))).size !== 1) {
+    throw new CliError("One selectable bundle must use a single provider and merchant", "SELECTION_BASKET_CONFLICT");
+  }
+  if (selectedOffers[0].provider === "justeat"
+    && new Set(selectedOffers.map((offer) => offer.source?.planId).filter(Boolean)).size !== 1) {
+    throw new CliError("Selected Just Eat candidates must come from the same source plan", "SELECTION_BASKET_CONFLICT");
+  }
+  const first = selectedOffers[0];
+  const subtotalValues = lines.map((line) => line.pricing.subtotal);
+  const subtotal = subtotalValues.every((value) => Number.isFinite(value))
+    ? Math.round(subtotalValues.reduce((sum, value) => sum + value, 0) * 100) / 100 : null;
+  const knownFees = Object.values(first.pricing?.fees ?? {}).filter((value) => Number.isFinite(Number(value)));
+  const estimatedTotal = subtotal === null ? null
+    : Math.round((subtotal + knownFees.reduce((sum, value) => sum + Number(value), 0)) * 100) / 100;
+  return {
+    ...first,
+    id: searchId().slice(0, 20),
+    item: {
+      id: lines.map((line) => line.item.id).filter(Boolean).join("+") || null,
+      name: lines.map((line) => line.item.name).join(" + "),
+      description: lines.map((line) => `${line.forItem}: ${line.reason}`).join(" "),
+      unitPrice: subtotal,
+    },
+    quantity: 1,
+    composition: {
+      kind: lines.length > 1 ? "llm-shopping-list" : "llm-selection",
+      complete: true,
+      requestedItems: lines.length,
+      distinctItems: new Set(lines.map((line) => line.item.id ?? line.item.name)).size,
+    },
+    lines,
+    available: selectedOffers.every((offer) => offer.available !== false),
+    etaMinutes: Math.max(...selectedOffers.map((offer) => Number(offer.etaMinutes ?? 0))) || null,
+    pricing: {
+      ...first.pricing,
+      originalSubtotal: null,
+      subtotal,
+      itemSavings: Math.round(lines.reduce((sum, line) => sum + Number(line.pricing?.itemSavings ?? 0), 0) * 100) / 100,
+      total: estimatedTotal,
+      exact: false,
+      missing: ["final checkout validation"],
+    },
+    promotion: selectionPromotion(lines),
+    source: {
+      ...first.source,
+      bundle: lines.length > 1,
+      llmSelected: true,
+      selectedCandidateIds: lines.map((line) => line.candidateId),
+    },
+    signals: { ...first.signals },
+  };
+}
+
+export async function selectCandidates(id, selections) {
+  const search = await loadSearch(id);
+  const selection = buildLlmSelection(search, selections);
+  search.offers.push(selection);
+  search.selections = [...(search.selections ?? []), {
+    id: selection.id,
+    candidateIds: selection.source.selectedCandidateIds,
+    createdAt: new Date().toISOString(),
+  }];
+  await writeSearch(search);
+  return { selection, results: resultsFor(search), mutatedProviderState: false };
+}
+
 export function resultsFor(search) {
-  const ranking = rankOffers(search.offers, search.intent, search.objective, { providers: search.providers });
+  const llmMode = search.semanticMode === "llm";
+  const candidates = search.offers.filter((offer) => !isLlmSelection(offer));
+  const selectedOffers = search.offers.filter(isLlmSelection);
+  const rankingInputs = llmMode ? selectedOffers : search.offers;
+  const rankingProviders = llmMode ? [...new Set(selectedOffers.map((offer) => offer.provider))] : search.providers;
+  const ranking = rankOffers(rankingInputs, search.intent, search.objective, { providers: rankingProviders });
   const statuses = Object.entries(search.providerStatus);
   const attemptedProviders = statuses.filter(([, status]) => status.state !== "pending").map(([provider]) => provider);
   const completedProviders = statuses.filter(([, status]) => status.state === "complete" || status.state === "partial").map(([provider]) => provider);
   const failedProviders = statuses.filter(([, status]) => status.state === "error").map(([provider]) => provider);
   const partialProviders = statuses.filter(([, status]) => status.state === "partial").map(([provider]) => provider);
-  const matchedProviders = [...new Set(search.offers.map((offer) => offer.provider))];
-  const availableProviders = [...new Set(search.offers.filter((offer) => offer.available).map((offer) => offer.provider))];
+  const matchedProviders = [...new Set(rankingInputs.map((offer) => offer.provider))];
+  const candidateProviders = [...new Set(candidates.map((offer) => offer.provider))];
+  const availableProviders = [...new Set(rankingInputs.filter((offer) => offer.available).map((offer) => offer.provider))];
   const unavailableOnlyProviders = matchedProviders.filter((provider) => !availableProviders.includes(provider));
-  const pendingEligibility = search.offers.filter((offer) => offer.source?.eligibility?.status === "confirmation_required"
+  const pendingEligibility = rankingInputs.filter((offer) => offer.source?.eligibility?.status === "confirmation_required"
     || offer.lines?.some((line) => line.source?.eligibility?.status === "confirmation_required"));
+  const candidatePool = llmMode ? {
+    total: candidates.length,
+    providers: Object.fromEntries(search.providers.map((provider) => [provider, candidates.filter((offer) => offer.provider === provider).length])),
+    merchants: new Set(candidates.map(merchantKey)).size,
+    selectedBundles: selectedOffers.length,
+    selectionRequired: selectedOffers.length === 0,
+  } : null;
   const coverage = {
     mode: search.orchestration ?? "legacy",
     configuredProviders: search.providers,
@@ -429,6 +605,7 @@ export function resultsFor(search) {
     completedProviders,
     failedProviders,
     matchedProviders,
+    candidateProviders,
     availableProviders,
     unavailableOnlyProviders,
     allConfiguredAttempted: attemptedProviders.length === search.providers.length,
@@ -438,6 +615,8 @@ export function resultsFor(search) {
     search: summarizeSearch(search),
     coverage,
     comparison: ranking,
+    candidatePool,
+    shoppingItems: search.shoppingItems ?? [],
     warnings: [
       ...(!ranking.exactPriceComparison && ranking.exactPriceCoverage.requiredProviders.length
         ? [`Exact checkout totals are still missing for: ${ranking.exactPriceCoverage.missingQuoteProviders.join(", ")}. Cheapest is provisional.`] : []),
@@ -445,6 +624,8 @@ export function resultsFor(search) {
       ...(failedProviders.length ? [`Provider search failed: ${failedProviders.join(", ")}. It was attempted and was not silently omitted.`] : []),
       ...(partialProviders.length ? [`Provider catalog coverage was partial: ${partialProviders.join(", ")}. Empty results from failed catalog calls were not treated as proof of no match.`] : []),
       ...(pendingEligibility.length ? ["Some Glovo matches require the user to confirm legal age on Glovo before basket creation."] : []),
+      ...(llmMode && selectedOffers.length === 0
+        ? ["Candidate retrieval is complete enough to inspect, but semantic selection is still required. Page through candidates and let the LLM choose; do not report no match yet."] : []),
       ...(Object.values(search.providerStatus).some((status) => status.state === "pending") ? ["Some enabled providers are still pending."] : []),
       ...(search.fulfilment?.mode === "scheduled" && !ranking.winnerReady
         ? [`No winner is confirmed until the requested time (${search.fulfilment.requestedAt ?? "unspecified"}) and exact delivered total are verified for every matching provider.`] : []),
@@ -464,10 +645,14 @@ function summarizeSearch(search) {
     fulfilment: search.fulfilment ?? null,
     objective: search.objective,
     queryPlan: search.queryPlan ?? null,
+    semanticMode: search.semanticMode ?? "deterministic",
+    shoppingItems: search.shoppingItems ?? [],
     providers: search.providers,
     providerStatus: search.providerStatus,
     orchestration: search.orchestration ?? "legacy",
     offerCount: search.offers.length,
+    candidateCount: search.offers.filter((offer) => !isLlmSelection(offer)).length,
+    selectionCount: search.offers.filter(isLlmSelection).length,
     createdAt: search.createdAt,
     updatedAt: search.updatedAt,
   };

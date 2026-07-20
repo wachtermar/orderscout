@@ -13,7 +13,8 @@ import { CliError, parseArgs, resolveLocation } from "./lib.js";
 import { errorEnvelope, exitCodeFor, writeOutput } from "./output.js";
 import { PROVIDERS, configureAccounts, loadAccounts, parseProviderList, publicAccountStatus, recordProviderStatus } from "./providers.js";
 import {
-  confirmEligibility, ingestOffers, loadSearch, recordBasket, recordProviderError, recordQuote, searchResults, startSearch,
+  confirmEligibility, ingestOffers, loadSearch, recordBasket, recordProviderError, recordQuote, searchCandidates,
+  searchResults, selectCandidates, startSearch,
 } from "./searches.js";
 import { runOrderScoutMcpServer } from "./orderscout-mcp.js";
 import {
@@ -38,6 +39,8 @@ Usage:
   orderscout search begin <what you want> [the same flags]
   orderscout search ingest <search-id> <provider> --json '[normalized offers]'
   orderscout search error <search-id> <provider> --message text
+  orderscout search candidates <search-id> [--offset 0] [--limit 50] [--provider glovo] [--merchant-id id]
+  orderscout search select <search-id> --json '[{"offerId":"...","quantity":1,"forItem":"...","reason":"..."}]'
   orderscout search results <search-id>
   orderscout eligibility confirm <search-id> <offer-id> --confirmed true
   orderscout quote record <search-id> <offer-id> --json '{"subtotal":10,"fees":{"delivery":2},"total":12}'
@@ -73,6 +76,31 @@ function stringArrayFlag(flags, key) {
     throw new CliError(`--${key} must be a JSON array of strings`, "INVALID_QUERY_PLAN");
   }
   return [...new Set(value.map((entry) => entry.trim()).filter(Boolean))].slice(0, 8);
+}
+
+function shoppingItemsFlag(flags) {
+  const value = jsonFlag(flags, "shopping-items", []);
+  if (!Array.isArray(value) || value.length > 12) throw new CliError("--shopping-items must be a JSON array with at most 12 items", "INVALID_SHOPPING_ITEMS");
+  return value.map((item, index) => {
+    if (!item || typeof item !== "object" || typeof item.intent !== "string" || !item.intent.trim()) {
+      throw new CliError(`Shopping item ${index + 1} requires a non-empty intent`, "INVALID_SHOPPING_ITEMS");
+    }
+    const quantity = Number(item.quantity ?? 1);
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) throw new CliError(`Shopping item ${index + 1} quantity must be 1..99`, "INVALID_SHOPPING_ITEMS");
+    const queries = (key) => {
+      const values = item[key] ?? [];
+      if (!Array.isArray(values) || values.some((entry) => typeof entry !== "string")) throw new CliError(`Shopping item ${index + 1} ${key} must be strings`, "INVALID_SHOPPING_ITEMS");
+      return [...new Set(values.map((entry) => entry.trim()).filter(Boolean))].slice(0, 8);
+    };
+    return {
+      id: String(item.id ?? `item-${index + 1}`),
+      label: String(item.label ?? item.intent).trim(),
+      intent: item.intent.trim(),
+      quantity,
+      discoveryQueries: queries("discoveryQueries"),
+      catalogQueries: queries("catalogQueries"),
+    };
+  });
 }
 
 function mergedQueries(primary, fallback, limit = 8) {
@@ -222,9 +250,13 @@ function compactSearchResult(result, flags) {
 async function collectJustEat(intent, flags) {
   const args = ["recommend", intent, "--agent"];
   const parsed = parseIntent(intent);
+  if (flags.semanticMode === "llm") {
+    args.push("--candidate-mode", "llm", "--limit", String(flags.limit ?? 2_000));
+    if (flags.shoppingItems?.length) args.push("--shopping-items", JSON.stringify(flags.shoppingItems));
+  }
   if (parsed.deliveryTime === "scheduled") args.push("--include-closed");
   if (parsed.occasion === "breakfast" && flags.stores === undefined) args.push("--stores", "40");
-  for (const [flag, value] of [["at", flags.at], ["stores", flags.stores], ["limit", flags.limit], ["vertical", flags.vertical]]) {
+  for (const [flag, value] of [["at", flags.at], ["stores", flags.stores], ["limit", flags.semanticMode === "llm" ? undefined : flags.limit], ["vertical", flags.vertical]]) {
     if (value !== undefined) args.push(`--${flag}`, String(value));
   }
   const result = await runLegacyJustEat(args, { allowFailure: true });
@@ -241,7 +273,8 @@ async function collectGlovo(intent, flags) {
     if (!location) throw new CliError("Glovo has no usable saved delivery address; pass --at once", "LOCATION_REQUIRED");
   }
   const parsed = parseIntent(intent);
-  const fallbackQueries = providerSearchQueries(parsed);
+  const itemFallbackQueries = (flags.shoppingItems ?? []).flatMap((item) => providerSearchQueries(parseIntent(item.intent)));
+  const fallbackQueries = mergedQueries(itemFallbackQueries, providerSearchQueries(parsed));
   const discoveryQueries = mergedQueries(flags.discoveryQueries, fallbackQueries);
   const catalogQueries = mergedQueries(flags.catalogQueries, fallbackQueries);
   const results = await Promise.allSettled(discoveryQueries.map((query) => searchGlovo(query, location, { limit: flags.limit })));
@@ -263,7 +296,8 @@ async function collectGlovo(intent, flags) {
   const prioritizedStores = relevantStores.length >= 2 ? relevantStores : allStores;
   const stores = [...new Map(prioritizedStores
     .map((store) => [`${store.id}:${store.addressId}`, store])).values()].slice(0, maxStores);
-  const requireEligibility = productIntentSpec(parsed).concept?.id === "vape";
+  const requireEligibility = [parsed, ...(flags.shoppingItems ?? []).map((item) => parseIntent(item.intent))]
+    .some((itemIntent) => productIntentSpec(itemIntent).concept?.id === "vape");
   const catalogs = [];
   let failedCatalogs = 0;
   for (let start = 0; start < stores.length; start += 2) {
@@ -320,7 +354,11 @@ async function collectGlovo(intent, flags) {
 
 async function collectUberEats(intent, flags) {
   const parsed = parseIntent(intent);
-  const queries = mergedQueries([...(flags.discoveryQueries ?? []), ...(flags.catalogQueries ?? [])], providerSearchQueries(parsed));
+  const itemFallbackQueries = (flags.shoppingItems ?? []).flatMap((item) => providerSearchQueries(parseIntent(item.intent)));
+  const queries = mergedQueries(
+    [...(flags.discoveryQueries ?? []), ...(flags.catalogQueries ?? [])],
+    [...itemFallbackQueries, ...providerSearchQueries(parsed)],
+  );
   const results = await Promise.allSettled(queries.map((query) => searchUberEats(query, {
     limit: flags.limit, scheduledAt: parsed.scheduledAt, timeZone: parsed.timeZone,
   })));
@@ -546,20 +584,29 @@ export async function runOrderScout(argv) {
     if (action === "begin") {
       const intent = args.join(" ");
       if (flags.providers) throw new CliError("Search always uses every enabled account. Change providers with `orderscout accounts set --providers ...`.", "PROVIDER_SELECTION_IS_ACCOUNT_SETTING");
-      const discoveryQueries = stringArrayFlag(flags, "discovery-queries");
-      const catalogQueries = stringArrayFlag(flags, "catalog-queries");
+      const shoppingItems = shoppingItemsFlag(flags);
+      const explicitDiscoveryQueries = stringArrayFlag(flags, "discovery-queries");
+      const explicitCatalogQueries = stringArrayFlag(flags, "catalog-queries");
+      const discoveryQueries = mergedQueries(explicitDiscoveryQueries, shoppingItems.flatMap((item) => item.discoveryQueries));
+      const catalogQueries = mergedQueries(explicitCatalogQueries, shoppingItems.flatMap((item) => item.catalogQueries));
+      const semanticMode = flags["semantic-mode"] === "llm" || flags.agent ? "llm" : "deterministic";
       const started = await startSearch(intent, {
         objective: flags.objective,
         locationHint: flags.at,
+        semanticMode,
+        shoppingItems,
         queryPlan: {
-          source: discoveryQueries.length || catalogQueries.length ? "agent+deterministic-fallback" : "deterministic",
+          source: semanticMode === "llm" ? "llm-retrieval-plan" : "deterministic",
+          semanticMode,
           discoveryQueries,
           catalogQueries,
         },
       });
       let result = started;
       if (!flags["skip-api"]) {
-        await collectAllProviders(started.search.id, started.apiProviders, intent, { ...flags, discoveryQueries, catalogQueries });
+        await collectAllProviders(started.search.id, started.apiProviders, intent, {
+          ...flags, discoveryQueries, catalogQueries, shoppingItems, semanticMode,
+        });
         result = { ...started, results: compactSearchResult(await searchResults(started.search.id), flags) };
       }
       return writeOutput(result, flags);
@@ -574,8 +621,22 @@ export async function runOrderScout(argv) {
       const [searchId, provider] = args;
       return writeOutput(await recordProviderError(searchId, provider, flags.message ?? "Provider search failed"), flags);
     }
+    if (action === "candidates") {
+      const [searchId] = args;
+      return writeOutput(await searchCandidates(searchId, {
+        offset: flags.offset,
+        limit: flags.limit,
+        provider: flags.provider,
+        merchantId: flags["merchant-id"],
+        query: flags.query,
+      }), flags);
+    }
+    if (action === "select") {
+      const [searchId] = args;
+      return writeOutput(await selectCandidates(searchId, jsonFlag(flags, "json")), flags);
+    }
     if (action === "results" || action === "show") return writeOutput(compactSearchResult(await searchResults(args[0]), flags), flags);
-    throw new CliError("Use `orderscout search begin|ingest|error|results`");
+    throw new CliError("Use `orderscout search begin|ingest|error|candidates|select|results`");
   }
 
   if (command === "quote" && rest[0] === "record") {

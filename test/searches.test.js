@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { checkoutFulfilment, providerDiverseOffers, runConcurrentProviderTasks } from "../src/orderscout.js";
-import { applyIntent, providerRoutes, resultsFor } from "../src/searches.js";
+import {
+  applyIntent, buildLlmSelection, candidatePageForSearch, providerRoutes, resultsFor, semanticInputsForSearch,
+} from "../src/searches.js";
 import { defaultAccounts, publicAccountStatus } from "../src/providers.js";
 import { normalizeOffer, parseObjective, rankOffers } from "../src/ranking.js";
 
@@ -76,6 +78,53 @@ test("coverage distinguishes currently available matches from unavailable catalo
   assert.deepEqual(result.coverage.matchedProviders, ["justeat", "ubereats"]);
   assert.deepEqual(result.coverage.availableProviders, ["justeat"]);
   assert.deepEqual(result.coverage.unavailableOnlyProviders, ["ubereats"]);
+});
+
+test("LLM-mode retrieval never requires one product to satisfy every shopping line", () => {
+  const candidates = [
+    normalizeOffer("glovo", {
+      merchant: { id: "vape-shop", name: "Vape Shop" },
+      item: { id: "tappo", name: "Cartucho Lost Mary Tappo Pineapple Ice 20mg", unitPrice: 4.95 },
+      pricing: {}, source: { storeId: "vape-shop", storeProductId: "tappo" },
+    }),
+    normalizeOffer("glovo", {
+      merchant: { id: "vape-shop", name: "Vape Shop" },
+      item: { id: "liquid", name: "Líquido Babel Boreal 10ml 3mg", description: "Mint ice", unitPrice: 4.95 },
+      pricing: {}, source: { storeId: "vape-shop", storeProductId: "liquid" },
+    }),
+  ];
+  const search = {
+    id: "c".repeat(24), semanticMode: "llm",
+    intent: "Lost Mary Tappo pods and bottled ice liquid that is not too sweet",
+    objective: "value", providers: ["glovo"], offers: candidates,
+    providerStatus: { glovo: { state: "complete", error: null } }, createdAt: "now", updatedAt: "now",
+  };
+  assert.equal(semanticInputsForSearch(search, candidates).length, 2);
+  assert.equal(candidatePageForSearch(search, { query: "lost mary tappo" }).total, 1);
+  assert.equal(candidatePageForSearch(search, { query: "mint ice" }).total, 1);
+  const beforeSelection = resultsFor(search);
+  assert.equal(beforeSelection.candidatePool.total, 2);
+  assert.equal(beforeSelection.candidatePool.selectionRequired, true);
+  assert.equal(beforeSelection.comparison.offers.length, 0);
+
+  const selection = buildLlmSelection(search, [
+    { offerId: candidates[0].id, quantity: 1, forItem: "Mary's Tappo pod", reason: "It is explicitly a Lost Mary Tappo cartridge." },
+    { offerId: candidates[1].id, quantity: 1, forItem: "less-sweet ice liquid", reason: "It is bottled liquid described as mint ice rather than a sweet fruit profile." },
+  ]);
+  assert.equal(selection.lines.length, 2);
+  assert.equal(selection.source.llmSelected, true);
+  assert.equal(selection.pricing.subtotal, 9.9);
+  assert.equal(selection.composition.kind, "llm-shopping-list");
+});
+
+test("LLM selection rejects candidates that cannot share one merchant basket", () => {
+  const offers = ["one", "two"].map((id) => normalizeOffer("glovo", {
+    merchant: { id, name: id }, item: { id, name: id, unitPrice: 1 }, pricing: {}, source: { storeId: id },
+  }));
+  assert.throws(() => buildLlmSelection({ semanticMode: "llm", offers }, [
+    { offerId: offers[0].id, forItem: "a", reason: "a" },
+    { offerId: offers[1].id, forItem: "b", reason: "b" },
+  ]), { code: "SELECTION_BASKET_CONFLICT" });
 });
 
 test("taste-focused requests use the quality objective", () => {

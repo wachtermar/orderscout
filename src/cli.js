@@ -224,6 +224,14 @@ async function run(argv) {
       location = await resolveSavedLocation(token, addressIndex);
     }
     const token = await getAuthToken();
+    let shoppingItems = [];
+    if (flags["shopping-items"] !== undefined) {
+      try { shoppingItems = JSON.parse(String(flags["shopping-items"])); }
+      catch { throw new CliError("--shopping-items must be valid JSON", "INVALID_SHOPPING_ITEMS"); }
+      if (!Array.isArray(shoppingItems) || shoppingItems.some((item) => !item || typeof item.intent !== "string")) {
+        throw new CliError("--shopping-items must be an array of objects with intent", "INVALID_SHOPPING_ITEMS");
+      }
+    }
     const recommendation = await recommend(location, intent, {
       token,
       stores: flags.stores,
@@ -231,6 +239,8 @@ async function run(argv) {
       vertical: flags.vertical,
       open: Boolean(flags.open),
       includeClosed: Boolean(flags["include-closed"]),
+      candidateMode: flags["candidate-mode"],
+      shoppingIntents: shoppingItems.map((item) => item.intent),
     });
     const plan = await savePlan(recommendation);
     writeOutput({ planId: plan.id, ...recommendation }, flags);
