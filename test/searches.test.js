@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { assertAllergenReview, checkoutFulfilment, providerDiverseOffers, runConcurrentProviderTasks } from "../src/orderscout.js";
 import {
-  applyIntent, buildLlmSelection, candidatePageForSearch, providerRoutes, resultsFor, semanticInputsForSearch,
+  applyIntent, buildLlmSelection, candidatePageForSearch, normalizeExternalEvidence, normalizeExternalResearchPlan,
+  providerRoutes, resultsFor, semanticInputsForSearch,
 } from "../src/searches.js";
 import { defaultAccounts, publicAccountStatus } from "../src/providers.js";
 import { normalizeOffer, parseObjective, rankOffers } from "../src/ranking.js";
@@ -165,6 +166,100 @@ test("LLM selection rejects candidates that cannot share one merchant basket", (
     { offerId: offers[0].id, forItem: "a", reason: "a" },
     { offerId: offers[1].id, forItem: "b", reason: "b" },
   ]), { code: "SELECTION_BASKET_CONFLICT" });
+});
+
+function externalSpiceEvidence(overrides = {}) {
+  return normalizeExternalEvidence({
+    status: "found",
+    query: '"Curry House" Marbella phaal spicy',
+    dimensions: ["spiciness", "outside_rating"],
+    identity: {
+      confidence: "high",
+      matchedSignals: ["name", "city", "menu_item"],
+      reason: "The source names Curry House in Marbella and the same phaal dish.",
+    },
+    sources: [{
+      url: "https://example.com/marbella/curry-house-review",
+      title: "Curry House review",
+      publisher: "Marbella Food Guide",
+      sourceType: "independent_review",
+      claims: [
+        { dimension: "spiciness", summary: "The review identifies the phaal as the menu's most intensely hot curry.", confidence: "high", scope: "item" },
+        { dimension: "outside_rating", summary: "The restaurant is rated 4.6 out of 5 from 320 reviews.", confidence: "high", scope: "merchant", rating: { value: 4.6, scale: 5, count: 320 } },
+      ],
+    }],
+    ...overrides,
+  });
+}
+
+test("external evidence validates source identity, rating scale, and public URLs", () => {
+  const evidence = externalSpiceEvidence({ pricing: { total: 0 } });
+  assert.equal(evidence.sources[0].claims[1].rating.count, 320);
+  assert.equal(evidence.pricing, undefined);
+  assert.throws(() => externalSpiceEvidence({
+    identity: { confidence: "low", matchedSignals: ["name"], reason: "Same name only." },
+  }), { code: "EXTERNAL_IDENTITY_MISMATCH" });
+  assert.throws(() => externalSpiceEvidence({
+    sources: [{
+      url: "http://127.0.0.1/private", title: "Private", publisher: "Private", sourceType: "other",
+      claims: [
+        { dimension: "spiciness", summary: "Hot.", confidence: "low", scope: "item" },
+        { dimension: "outside_rating", summary: "Rated.", confidence: "low", scope: "merchant" },
+      ],
+    }],
+  }), { code: "INVALID_EXTERNAL_EVIDENCE" });
+  assert.throws(() => normalizeExternalResearchPlan("required", []), { code: "INVALID_EXTERNAL_RESEARCH" });
+  assert.throws(() => normalizeExternalResearchPlan("not_needed", ["spiciness"]), { code: "INVALID_EXTERNAL_RESEARCH" });
+});
+
+test("qualitative selection is blocked until every candidate has completed external research", () => {
+  const candidate = normalizeOffer("glovo", {
+    merchant: { id: "curry", name: "Curry House", rating: 4.7, ratingCount: 100 },
+    item: { id: "phaal", name: "Chicken phaal", description: "Very hot curry", unitPrice: 12 },
+    pricing: {}, source: { storeId: "curry", storeProductId: "phaal" },
+  });
+  const search = {
+    id: "e".repeat(24), semanticMode: "llm", intent: "spiciest dinner", objective: "best",
+    externalResearch: normalizeExternalResearchPlan("required", ["spiciness", "outside_rating"]),
+    providers: ["glovo"], providerStatus: { glovo: { state: "complete", error: null } },
+    providerReviews: {}, offers: [candidate], createdAt: "now", updatedAt: "now",
+  };
+  const requested = [{
+    offerId: candidate.id, quantity: 1, forItem: "dinner", reason: "Dish-specific heat evidence.",
+    requestFit: 95, confidence: "high", evidence: ["Provider menu says very hot curry."],
+  }];
+  assert.throws(() => buildLlmSelection(search, requested), { code: "EXTERNAL_RESEARCH_REQUIRED" });
+
+  candidate.externalEvidence = [externalSpiceEvidence()];
+  const selection = buildLlmSelection(search, requested);
+  assert.equal(selection.externalEvidence.length, 1);
+  assert.equal(selection.lines[0].externalEvidence[0].sources[0].sourceType, "independent_review");
+  const requoted = normalizeOffer("glovo", { ...selection, pricing: { ...selection.pricing, exact: true, total: 14 } });
+  assert.equal(requoted.externalEvidence.length, 1);
+  assert.equal(requoted.lines[0].externalEvidence.length, 1);
+  assert.equal(requoted.lines[0].forItem, "dinner");
+  selection.pricing = { ...selection.pricing, exact: true, total: 14, missing: [] };
+  search.offers.push(selection);
+  search.providerReviews.glovo = { disposition: "selected", offerId: selection.id, reason: "Strongest supported heat." };
+  const results = resultsFor(search);
+  assert.equal(results.coverage.externalEvidence.complete, true);
+  assert.equal(results.coverage.externalEvidence.usableSources, 1);
+  assert.equal(results.comparison.winnerReady, true);
+});
+
+test("ambiguous merchant identity does not complete external research", () => {
+  const candidate = normalizeOffer("justeat", {
+    merchant: { id: "same-name", name: "Curry House" }, item: { id: "vindaloo", name: "Vindaloo", unitPrice: 11 },
+    pricing: {}, source: { planId: "plan", storeId: "same-name" },
+  });
+  candidate.externalEvidence = [normalizeExternalEvidence({
+    status: "ambiguous", query: "Curry House review", dimensions: ["spiciness"],
+    identity: { confidence: "low", matchedSignals: ["name"], reason: "Many restaurants share this name and locality was not confirmed." },
+    sources: [],
+  })];
+  assert.throws(() => buildLlmSelection({
+    semanticMode: "llm", intent: "spiciest", externalResearch: { mode: "required", dimensions: ["spiciness"] }, offers: [candidate],
+  }, [{ offerId: candidate.id, forItem: "dinner", reason: "Menu says spicy." }]), { code: "EXTERNAL_RESEARCH_REQUIRED" });
 });
 
 test("taste-focused requests use the quality objective", () => {

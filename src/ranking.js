@@ -92,10 +92,14 @@ export function normalizeOffer(provider, input, context = {}) {
       unitPrice: money(numberOrNull(line.item?.unitPrice)),
     },
     quantity: Math.max(1, Math.trunc(numberOrNull(line.quantity) ?? 1)),
+    forItem: line.forItem ?? null,
+    reason: line.reason ?? null,
     pricing: line.pricing ?? null,
     promotion: line.promotion ?? null,
     source: line.source ?? null,
     signals: line.signals ?? null,
+    semanticAssessment: line.semanticAssessment ?? null,
+    externalEvidence: Array.isArray(line.externalEvidence) ? line.externalEvidence : [],
   })) : null;
   return {
     id: input.id ?? createHash("sha256").update(stable).digest("hex").slice(0, 20),
@@ -144,6 +148,7 @@ export function normalizeOffer(provider, input, context = {}) {
         ? input.semanticAssessment.confidence : "low",
       evidence: stringList(input.semanticAssessment.evidence, false).slice(0, 8),
     } : null,
+    externalEvidence: Array.isArray(input.externalEvidence) ? input.externalEvidence : [],
     signals: {
       health: numberOrNull(input.signals?.health) ?? 0,
       taste: numberOrNull(input.signals?.taste) ?? 0,

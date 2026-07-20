@@ -2,6 +2,21 @@
 
 This project follows Semantic Versioning. It is currently pre-1.0; command and normalized response changes may occur between minor releases and will be listed here.
 
+## 0.1.10 - 2026-07-20
+
+- Add an optional native-web research stage for qualitative requests such as spiciness, food quality, authenticity, outside ratings, popularity, portions, healthiness, and dietary fit.
+- Add `search evidence` and `orderscout_record_external_evidence` for structured, source-linked LLM findings with public URLs, merchant-identity signals, item/merchant scope, confidence, and normalized rating scale/count.
+- Reject ambiguous same-name evidence and block qualitative candidate selection until every requested dimension has a completed `found` or honest `not_found` research outcome.
+- Keep provider APIs authoritative for current availability, menu contents, deals, ETA, fees, exact checkout totals, and all cart or order state; external evidence cannot mutate those fields.
+- Update the ChatGPT Work workflow to research shortlisted candidates with native web search, cite used sources, and never use provider browser automation as a search backend.
+
+## 0.1.9 - 2026-07-20
+
+- Require explicit model selection or no-match review for every completed provider before a cross-provider winner can be confirmed.
+- Quote selected Just Eat, Glovo, and Uber Eats baskets concurrently and require exact checkout totals for every matched provider.
+- Verify delivery-location parity without exposing coordinates and keep login, provider retrieval, and basket execution on the CLI adapters.
+- Expand the scenario corpus to 456 realistic requests across 1,368 provider paths and require provider-diverse exact-quote invariants.
+
 ## 0.1.8 - 2026-07-20
 
 - Add a repeatable English/Spanish query matrix covering more than 1,800 food, grocery, pharmacy, drinks, household, scheduling, party-size, dietary, pricing, deal, paging, and bundle combinations.

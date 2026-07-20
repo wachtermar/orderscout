@@ -66,6 +66,8 @@ Provider-listed deals are retained: struck-through item prices and savings, perc
 
 Product and meal discovery is a hybrid LLM + CLI workflow with a deliberate boundary. The CLI executes a fair query plan across every shopping line, retrieves provider-native catalogs, normalizes untrusted data, deduplicates it, paginates it, and preserves prices, deals, availability, ratings, and source IDs. Just Eat scans every currently eligible area menu, Glovo loads the complete menu of every discovered merchant, and Uber Eats executes every planned provider search before loading complete menus for the strongest returned merchant cards. Any omitted query, failed menu, or provider limit is reported as partial coverage and blocks a confirmed winner. In agent mode static keyword code does not decide what a product or meal means. ChatGPT splits distinct needs into separate shopping lines, chooses broad merchant and catalog queries, inspects normalized candidate pages, assigns a grounded request-fit score on one cross-provider scale, and explicitly selects the same-store bundle that best satisfies each line. Deterministic code then validates quantities, basket compatibility, eligibility, exact totals, and purchase approval.
 
+Qualitative requests add a separate web-evidence stage. For questions such as “spiciest,” “most authentic,” “tastiest,” or “best-rated outside the apps,” ChatGPT uses its native web search only after the CLI has found current provider candidates. It looks for the exact merchant and locality, and the exact dish when the claim is item-specific; official menus, independent reviews, local press, and outside rating sources are stored as structured claims with direct URLs, rating scale/count, and merchant-match signals. Ambiguous same-name results are rejected. The CLI will not accept a qualitative selection until every requested evidence dimension has either a supported source or an honest `not_found` research outcome. External evidence never changes provider availability, menu data, promotions, ETA, fees, or price—the provider APIs and exact checkout remain authoritative.
+
 This applies to every agent request, not only the examples in this README. Food, groceries, pharmacy and personal-care items, drinks, household goods, electronics, pet supplies, flowers, and provider-permitted restricted catalogs all use the same candidate workflow. The model may choose different retrieval terms for each shopping line; the CLI never requires one product to match unrelated needs simultaneously.
 
 For pharmacy searches, OrderScout can locate and compare an exact product the user requests; it does not diagnose symptoms, prescribe medication or dosage, or invent medical suitability. Those decisions belong with a pharmacist or clinician.
@@ -168,6 +170,18 @@ orderscout search begin "Lost Mary Tappo pods and bottled ice liquid" --agent \
 # The LLM pages and reasons over normalized candidates; this is lexical retrieval, not semantic filtering
 orderscout search candidates <search-id> --provider glovo --query "lost mary tappo" --limit 50
 orderscout search candidates <search-id> --provider glovo --query "liquido ice" --limit 50
+
+# Qualitative searches can require native-web evidence before selection
+orderscout search begin "spiciest dinner in Marbella" --agent \
+  --external-research required \
+  --external-dimensions '["spiciness","outside_rating"]'
+orderscout search evidence <search-id> --offer-ids '["<candidate-id>"]' --json '{
+  "status":"found",
+  "query":"Curry House Marbella phaal spicy review",
+  "dimensions":["spiciness","outside_rating"],
+  "identity":{"confidence":"high","matchedSignals":["name","city","menu_item"],"reason":"Same merchant, locality, and dish."},
+  "sources":[{"url":"https://example.com/review","title":"Review","publisher":"Local guide","sourceType":"independent_review","claims":[{"dimension":"spiciness","summary":"The review identifies the phaal as the hottest curry.","confidence":"high","scope":"item"},{"dimension":"outside_rating","summary":"Rated 4.6/5 from 320 reviews.","confidence":"high","scope":"merchant","rating":{"value":4.6,"scale":5,"count":320}}]}]
+}'
 
 # Save one LLM-chosen, same-store bundle locally; this does not create a provider basket
 orderscout search select <search-id> --json '[

@@ -4,7 +4,7 @@ import { ORDERSCOUT_MCP_TOOLS, handleOrderScoutMcpMessage, placementEnvironment 
 
 test("OrderScout MCP exposes direct login, basket, checkout, and guarded order tools", () => {
   const names = new Set(ORDERSCOUT_MCP_TOOLS.map((tool) => tool.name));
-  for (const name of ["orderscout_justeat_auth_login", "orderscout_justeat_auth_complete", "orderscout_provider_auth_login", "orderscout_provider_auth_complete", "orderscout_search_begin", "orderscout_candidates", "orderscout_select_candidates", "orderscout_confirm_eligibility", "orderscout_prepare_basket", "orderscout_create_basket", "orderscout_checkout_review_task", "orderscout_open_basket", "orderscout_place_order"]) {
+  for (const name of ["orderscout_justeat_auth_login", "orderscout_justeat_auth_complete", "orderscout_provider_auth_login", "orderscout_provider_auth_complete", "orderscout_search_begin", "orderscout_candidates", "orderscout_record_external_evidence", "orderscout_select_candidates", "orderscout_confirm_eligibility", "orderscout_prepare_basket", "orderscout_create_basket", "orderscout_checkout_review_task", "orderscout_open_basket", "orderscout_place_order"]) {
     assert.equal(names.has(name), true, `${name} is missing`);
   }
   assert.deepEqual(ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_justeat_auth_login").command({}), ["auth", "login", "justeat", "--agent"]);
@@ -25,6 +25,18 @@ test("OrderScout MCP exposes direct login, basket, checkout, and guarded order t
   assert.deepEqual(search.command({ intent: "meal", objective: "value" }), ["search", "begin", "meal", "--agent", "--semantic-mode", "llm", "--objective", "value"]);
   assert.deepEqual(search.command({ intent: "vape liquid", discoveryQueries: ["vape", "estanco"], catalogQueries: ["ice", "liquido"], shoppingItems: [{ intent: "Tappo pod" }] }), [
     "search", "begin", "vape liquid", "--agent", "--semantic-mode", "llm", "--discovery-queries", '["vape","estanco"]', "--catalog-queries", '["ice","liquido"]', "--shopping-items", '[{"intent":"Tappo pod"}]',
+  ]);
+  assert.deepEqual(search.command({
+    intent: "spiciest dinner", externalResearch: "required", externalDimensions: ["spiciness", "outside_rating"],
+  }), [
+    "search", "begin", "spiciest dinner", "--agent", "--semantic-mode", "llm", "--external-research", "required", "--external-dimensions", '["spiciness","outside_rating"]',
+  ]);
+  const externalEvidence = ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_record_external_evidence");
+  assert.match(externalEvidence.description, /cannot change provider availability/i);
+  assert.deepEqual(externalEvidence.command({
+    searchId: "search", offerIds: ["offer"], evidence: { status: "not_found", query: "q", dimensions: ["spiciness"], identity: { confidence: "low", matchedSignals: [], reason: "No unambiguous source." }, sources: [] },
+  }), [
+    "search", "evidence", "search", "--offer-ids", '["offer"]', "--json", '{"status":"not_found","query":"q","dimensions":["spiciness"],"identity":{"confidence":"low","matchedSignals":[],"reason":"No unambiguous source."},"sources":[]}', "--agent",
   ]);
   assert.deepEqual(ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_candidates").command({
     searchId: "search", provider: "glovo", query: "mint ice", offset: 20, limit: 20,

@@ -397,8 +397,10 @@ test("every corpus request produces a bounded LLM-owned retrieval plan without c
 test("MCP and Work-skill contracts expose provider disposition and all-provider quote orchestration", () => {
   const review = tool("orderscout_review_provider");
   const quote = tool("orderscout_quote_comparison");
+  const externalEvidence = tool("orderscout_record_external_evidence");
   assert.ok(review, "orderscout_review_provider is required");
   assert.ok(quote, "orderscout_quote_comparison is required");
+  assert.ok(externalEvidence, "orderscout_record_external_evidence is required");
   assert.deepEqual(review.inputSchema.properties.disposition.enum, ["inspected_no_suitable_match", "unavailable"]);
   assert.deepEqual(review.command({
     searchId: "search", provider: "glovo", disposition: "inspected_no_suitable_match", reason: "No complete same-store bundle",
@@ -406,6 +408,9 @@ test("MCP and Work-skill contracts expose provider disposition and all-provider 
   assert.deepEqual(quote.command({ searchId: "search" }), ["comparison", "quote", "search", "--agent"]);
   assert.match(SKILL_TEXT, /orderscout_review_provider/);
   assert.match(SKILL_TEXT, /orderscout_quote_comparison/);
+  assert.match(SKILL_TEXT, /native web search/i);
+  assert.match(SKILL_TEXT, /ambiguous same-name/i);
+  assert.match(SKILL_TEXT, /externalEvidence\.complete/);
   assert.match(SKILL_TEXT, /distinct suitable dishes/i);
   assert.match(SKILL_TEXT, /every provider/i);
 });

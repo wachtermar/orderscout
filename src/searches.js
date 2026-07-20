@@ -1,4 +1,5 @@
 import { mkdir, readFile } from "node:fs/promises";
+import { isIP } from "node:net";
 import { join } from "node:path";
 import { CliError } from "./lib.js";
 import {
@@ -12,6 +13,16 @@ import {
 
 const searchPath = (id) => join(providerPaths.searchesDirectory, `${validateId(id)}.json`);
 
+const EXTERNAL_RESEARCH_MODES = new Set(["not_needed", "required", "unavailable"]);
+const EXTERNAL_EVIDENCE_STATUSES = new Set(["found", "not_found", "ambiguous"]);
+const EXTERNAL_SOURCE_TYPES = new Set([
+  "official_menu", "official_site", "official_social", "independent_review", "local_press", "review_aggregator", "other",
+]);
+const EXTERNAL_CLAIM_DIMENSIONS = new Set([
+  "spiciness", "food_quality", "outside_rating", "authenticity", "popularity", "portion_size", "healthiness", "dietary_fit", "other",
+]);
+const EXTERNAL_IDENTITY_SIGNALS = new Set(["name", "city", "address", "phone", "official_domain", "provider_url", "menu_item"]);
+
 function validateId(id) {
   if (!/^[a-f0-9]{24}$/.test(String(id ?? ""))) throw new CliError("Invalid OrderScout search ID", "INVALID_SEARCH_ID");
   return id;
@@ -24,6 +35,7 @@ export async function startSearch(intent, options = {}) {
   const enabled = PROVIDER_IDS.filter((id) => accounts.providers[id].enabled && accounts.providers[id].hasAccount !== false);
   if (!enabled.length) throw new CliError("No enabled providers have an account", "NO_ENABLED_PROVIDERS");
   const parsedIntent = parseIntent(text, options);
+  const externalResearch = normalizeExternalResearchPlan(options.externalResearch, options.externalDimensions);
   const search = {
     id: searchId(),
     version: 2,
@@ -39,6 +51,7 @@ export async function startSearch(intent, options = {}) {
     queryPlan: options.queryPlan ?? { source: "deterministic", discoveryQueries: [], catalogQueries: [] },
     semanticMode: options.semanticMode === "llm" ? "llm" : "deterministic",
     shoppingItems: Array.isArray(options.shoppingItems) ? options.shoppingItems : [],
+    externalResearch,
     providers: enabled,
     providerStatus: Object.fromEntries(enabled.map((id) => [id, { state: "pending", error: null }])),
     orchestration: "concurrent",
@@ -56,6 +69,29 @@ export async function startSearch(intent, options = {}) {
     accounts: publicAccountStatus(accounts),
     ...routes,
   };
+}
+
+export function normalizeExternalResearchPlan(mode = "not_needed", dimensions = []) {
+  const normalizedMode = String(mode ?? "not_needed").trim();
+  if (!EXTERNAL_RESEARCH_MODES.has(normalizedMode)) {
+    throw new CliError("External research must be not_needed, required, or unavailable", "INVALID_EXTERNAL_RESEARCH");
+  }
+  if (!Array.isArray(dimensions) || dimensions.length > 8) {
+    throw new CliError("External research dimensions must be an array with at most 8 values", "INVALID_EXTERNAL_RESEARCH");
+  }
+  const normalizedDimensions = [...new Set(dimensions.map((entry) => String(entry ?? "").trim()).filter(Boolean))];
+  for (const dimension of normalizedDimensions) {
+    if (!EXTERNAL_CLAIM_DIMENSIONS.has(dimension)) {
+      throw new CliError(`Unsupported external research dimension: ${dimension}`, "INVALID_EXTERNAL_RESEARCH");
+    }
+  }
+  if (["required", "unavailable"].includes(normalizedMode) && !normalizedDimensions.length) {
+    throw new CliError(`${normalizedMode} external research needs at least one qualitative dimension`, "INVALID_EXTERNAL_RESEARCH");
+  }
+  if (normalizedMode === "not_needed" && normalizedDimensions.length) {
+    throw new CliError("External research dimensions require required or unavailable mode", "INVALID_EXTERNAL_RESEARCH");
+  }
+  return { mode: normalizedMode, dimensions: normalizedDimensions };
 }
 
 export function providerRoutes(enabled, accounts) {
@@ -557,6 +593,163 @@ export async function searchCandidates(id, options = {}) {
   return candidatePageForSearch(await loadSearch(id), options);
 }
 
+function boundedText(value, label, maximum, required = true) {
+  const text = String(value ?? "").trim();
+  if (required && !text) throw new CliError(`${label} is required`, "INVALID_EXTERNAL_EVIDENCE");
+  if (text.length > maximum) throw new CliError(`${label} is too long`, "INVALID_EXTERNAL_EVIDENCE");
+  return text || null;
+}
+
+function externalSourceUrl(value) {
+  let url;
+  try { url = new URL(String(value ?? "")); } catch { throw new CliError("External evidence source URL is invalid", "INVALID_EXTERNAL_EVIDENCE"); }
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
+    throw new CliError("External evidence must use a public HTTP(S) source without embedded credentials", "INVALID_EXTERNAL_EVIDENCE");
+  }
+  const host = url.hostname.toLowerCase();
+  const unbracketedHost = host.replace(/^\[|\]$/g, "");
+  if (!host || isIP(unbracketedHost) || host === "localhost" || host.endsWith(".local") || /^127\./.test(host) || /^10\./.test(host)
+    || /^192\.168\./.test(host) || /^169\.254\./.test(host) || /^0\./.test(host) || host === "::1") {
+    throw new CliError("External evidence source must be a public web page", "INVALID_EXTERNAL_EVIDENCE");
+  }
+  url.hash = "";
+  return url.toString();
+}
+
+function normalizeExternalClaim(input) {
+  if (!input || typeof input !== "object") throw new CliError("External evidence claims must be objects", "INVALID_EXTERNAL_EVIDENCE");
+  const dimension = String(input.dimension ?? "").trim();
+  if (!EXTERNAL_CLAIM_DIMENSIONS.has(dimension)) throw new CliError(`Unsupported external claim dimension: ${dimension}`, "INVALID_EXTERNAL_EVIDENCE");
+  const confidence = String(input.confidence ?? "").trim();
+  if (!["low", "medium", "high"].includes(confidence)) throw new CliError("External claim confidence must be low, medium, or high", "INVALID_EXTERNAL_EVIDENCE");
+  const scope = String(input.scope ?? "merchant").trim();
+  if (!["merchant", "item"].includes(scope)) throw new CliError("External claim scope must be merchant or item", "INVALID_EXTERNAL_EVIDENCE");
+  let rating = null;
+  if (input.rating !== undefined && input.rating !== null) {
+    const value = Number(input.rating.value);
+    const scale = Number(input.rating.scale);
+    const count = input.rating.count === undefined || input.rating.count === null ? null : Number(input.rating.count);
+    if (!Number.isFinite(value) || !Number.isFinite(scale) || scale <= 0 || value < 0 || value > scale
+      || (count !== null && (!Number.isInteger(count) || count < 0))) {
+      throw new CliError("External rating requires a value within its positive scale and an optional non-negative count", "INVALID_EXTERNAL_EVIDENCE");
+    }
+    rating = { value, scale, count };
+  }
+  return {
+    dimension,
+    summary: boundedText(input.summary, "External claim summary", 500),
+    confidence,
+    scope,
+    ...(rating ? { rating } : {}),
+  };
+}
+
+function normalizeExternalSource(input) {
+  if (!input || typeof input !== "object") throw new CliError("External evidence sources must be objects", "INVALID_EXTERNAL_EVIDENCE");
+  const sourceType = String(input.sourceType ?? "").trim();
+  if (!EXTERNAL_SOURCE_TYPES.has(sourceType)) throw new CliError(`Unsupported external source type: ${sourceType}`, "INVALID_EXTERNAL_EVIDENCE");
+  if (!Array.isArray(input.claims) || !input.claims.length || input.claims.length > 8) {
+    throw new CliError("Each external source requires 1 to 8 structured claims", "INVALID_EXTERNAL_EVIDENCE");
+  }
+  const retrievedAt = input.retrievedAt ? new Date(input.retrievedAt) : new Date();
+  if (Number.isNaN(retrievedAt.getTime())) throw new CliError("External source retrievedAt must be a valid date", "INVALID_EXTERNAL_EVIDENCE");
+  return {
+    url: externalSourceUrl(input.url),
+    title: boundedText(input.title, "External source title", 300),
+    publisher: boundedText(input.publisher, "External source publisher", 200),
+    sourceType,
+    retrievedAt: retrievedAt.toISOString(),
+    claims: input.claims.map(normalizeExternalClaim),
+  };
+}
+
+export function normalizeExternalEvidence(input) {
+  if (!input || typeof input !== "object") throw new CliError("External evidence must be an object", "INVALID_EXTERNAL_EVIDENCE");
+  const status = String(input.status ?? "").trim();
+  if (!EXTERNAL_EVIDENCE_STATUSES.has(status)) throw new CliError("External evidence status must be found, not_found, or ambiguous", "INVALID_EXTERNAL_EVIDENCE");
+  if (!Array.isArray(input.dimensions) || !input.dimensions.length || input.dimensions.length > 8) {
+    throw new CliError("External evidence needs 1 to 8 qualitative dimensions", "INVALID_EXTERNAL_EVIDENCE");
+  }
+  const dimensions = [...new Set(input.dimensions.map((entry) => String(entry ?? "").trim()))];
+  for (const dimension of dimensions) {
+    if (!EXTERNAL_CLAIM_DIMENSIONS.has(dimension)) throw new CliError(`Unsupported external research dimension: ${dimension}`, "INVALID_EXTERNAL_EVIDENCE");
+  }
+  const query = boundedText(input.query, "External research query", 500);
+  const identityInput = input.identity ?? {};
+  const identityConfidence = String(identityInput.confidence ?? "low").trim();
+  if (!["low", "medium", "high"].includes(identityConfidence)) throw new CliError("Merchant identity confidence must be low, medium, or high", "INVALID_EXTERNAL_EVIDENCE");
+  if (!Array.isArray(identityInput.matchedSignals) || identityInput.matchedSignals.length > 8) {
+    throw new CliError("Merchant identity matchedSignals must be an array", "INVALID_EXTERNAL_EVIDENCE");
+  }
+  const matchedSignals = [...new Set(identityInput.matchedSignals.map((entry) => String(entry ?? "").trim()).filter(Boolean))];
+  for (const signal of matchedSignals) {
+    if (!EXTERNAL_IDENTITY_SIGNALS.has(signal)) throw new CliError(`Unsupported merchant identity signal: ${signal}`, "INVALID_EXTERNAL_EVIDENCE");
+  }
+  const identity = {
+    confidence: identityConfidence,
+    matchedSignals,
+    reason: boundedText(identityInput.reason, "Merchant identity reason", 500, status === "found"),
+  };
+  if (status === "found" && (identityConfidence === "low" || matchedSignals.length < 2)) {
+    throw new CliError("Found evidence requires a medium/high-confidence merchant match with at least two identity signals", "EXTERNAL_IDENTITY_MISMATCH");
+  }
+  if (!Array.isArray(input.sources) || input.sources.length > 8 || (status === "found" && !input.sources.length)) {
+    throw new CliError("Found external evidence needs 1 to 8 sources", "INVALID_EXTERNAL_EVIDENCE");
+  }
+  const sources = (input.sources ?? []).map(normalizeExternalSource);
+  if (status === "found") {
+    const claimedDimensions = new Set(sources.flatMap((source) => source.claims.map((claim) => claim.dimension)));
+    const missing = dimensions.filter((dimension) => !claimedDimensions.has(dimension));
+    if (missing.length) throw new CliError(`External sources do not support every declared dimension: ${missing.join(", ")}`, "INVALID_EXTERNAL_EVIDENCE");
+  }
+  return {
+    id: searchId().slice(0, 20),
+    status,
+    query,
+    dimensions,
+    identity,
+    sources,
+    recordedAt: new Date().toISOString(),
+  };
+}
+
+function completedExternalDimensions(offer) {
+  return new Set((offer.externalEvidence ?? [])
+    .filter((record) => record.status === "found" || record.status === "not_found")
+    .flatMap((record) => record.dimensions ?? []));
+}
+
+function missingExternalDimensions(search, offer) {
+  if (search.externalResearch?.mode !== "required") return [];
+  const complete = completedExternalDimensions(offer);
+  return (search.externalResearch.dimensions ?? []).filter((dimension) => !complete.has(dimension));
+}
+
+export async function recordExternalEvidence(id, offerIds, input) {
+  const search = await loadSearch(id);
+  if (search.semanticMode !== "llm") throw new CliError("External research recording is only available for LLM-mode searches", "EXTERNAL_RESEARCH_NOT_AVAILABLE");
+  if (!Array.isArray(offerIds) || !offerIds.length || offerIds.length > 20) {
+    throw new CliError("External evidence needs 1 to 20 candidate offer IDs", "INVALID_EXTERNAL_EVIDENCE");
+  }
+  const uniqueIds = [...new Set(offerIds.map((entry) => String(entry ?? "").trim()).filter(Boolean))];
+  const candidates = new Map(search.offers.filter((offer) => !isLlmSelection(offer)).map((offer) => [offer.id, offer]));
+  const selected = uniqueIds.map((offerId) => {
+    const offer = candidates.get(offerId);
+    if (!offer) throw new CliError(`Candidate ${offerId} does not exist in this search`, "CANDIDATE_NOT_FOUND");
+    return offer;
+  });
+  const record = normalizeExternalEvidence(input);
+  for (const offer of selected) offer.externalEvidence = [...(offer.externalEvidence ?? []), record].slice(-20);
+  await writeSearch(search);
+  return {
+    searchId: search.id,
+    offerIds: selected.map((offer) => offer.id),
+    evidence: record,
+    externalResearch: search.externalResearch,
+    mutatedProviderState: false,
+  };
+}
+
 export function buildLlmSelection(search, requestedSelections) {
   if (search.semanticMode !== "llm") throw new CliError("LLM selection is only available for LLM-mode searches", "LLM_SELECTION_NOT_AVAILABLE");
   if (!Array.isArray(requestedSelections) || !requestedSelections.length || requestedSelections.length > 20) {
@@ -568,6 +761,13 @@ export function buildLlmSelection(search, requestedSelections) {
     if (!requested || typeof requested !== "object") throw new CliError(`Selection ${index + 1} must be an object`, "INVALID_SELECTION");
     const offer = candidates.get(String(requested.offerId ?? ""));
     if (!offer) throw new CliError(`Candidate ${requested.offerId ?? ""} does not exist in this search`, "CANDIDATE_NOT_FOUND");
+    const missingResearch = missingExternalDimensions(search, offer);
+    if (missingResearch.length) {
+      throw new CliError(`Candidate ${offer.id} still needs external research for: ${missingResearch.join(", ")}`, "EXTERNAL_RESEARCH_REQUIRED", {
+        candidateId: offer.id,
+        dimensions: missingResearch,
+      });
+    }
     if (seen.has(offer.id)) throw new CliError(`Candidate ${offer.id} was selected more than once; use quantity instead`, "DUPLICATE_SELECTION");
     seen.add(offer.id);
     const quantity = Number(requested.quantity ?? offer.quantity ?? 1);
@@ -605,6 +805,7 @@ export function buildLlmSelection(search, requestedSelections) {
       source: offer.source,
       signals: offer.signals,
       available: offer.available,
+      externalEvidence: offer.externalEvidence ?? [],
     };
   });
   const selectedOffers = lines.map((line) => candidates.get(line.candidateId));
@@ -705,6 +906,7 @@ export function buildLlmSelection(search, requestedSelections) {
         : lines.some((line) => line.semanticAssessment?.confidence === "low" || !line.semanticAssessment) ? "low" : "medium",
       evidence: [...new Set(lines.flatMap((line) => line.semanticAssessment?.evidence ?? []))].slice(0, 8),
     } : null,
+    externalEvidence: lines.flatMap((line) => line.externalEvidence ?? []),
     signals: { ...first.signals },
   };
 }
@@ -791,9 +993,31 @@ export function resultsFor(search) {
     return llmMode && candidateProviders.includes(provider) && !reviewedProviders.includes(provider);
   });
   const deliveryLocation = deliveryLocationCoverage(search);
+  const candidatesById = new Map(candidates.map((offer) => [offer.id, offer]));
+  const selectedCandidateIds = [...new Set(selectedOffers.flatMap((offer) => offer.source?.selectedCandidateIds ?? []))];
+  const externalMissing = selectedCandidateIds.flatMap((candidateId) => {
+    const offer = candidatesById.get(candidateId);
+    const dimensions = offer ? missingExternalDimensions(search, offer) : (search.externalResearch?.dimensions ?? []);
+    return dimensions.length ? [{ candidateId, dimensions }] : [];
+  });
+  const externalEvidenceCoverage = {
+    mode: search.externalResearch?.mode ?? "not_needed",
+    dimensions: search.externalResearch?.dimensions ?? [],
+    selectedCandidateIds,
+    researchedCandidateIds: selectedCandidateIds.filter((candidateId) => {
+      const offer = candidatesById.get(candidateId);
+      return offer && missingExternalDimensions(search, offer).length === 0;
+    }),
+    missing: externalMissing,
+    usableSources: selectedCandidateIds.reduce((count, candidateId) => count
+      + (candidatesById.get(candidateId)?.externalEvidence ?? [])
+        .filter((record) => record.status === "found").flatMap((record) => record.sources ?? []).length, 0),
+    complete: search.externalResearch?.mode !== "required" || (selectedCandidateIds.length > 0 && externalMissing.length === 0),
+  };
   const ranking = {
     ...baseRanking,
-    winnerReady: baseRanking.winnerReady && unresolvedProviders.length === 0 && deliveryLocation.status !== "mismatch",
+    winnerReady: baseRanking.winnerReady && unresolvedProviders.length === 0
+      && deliveryLocation.status !== "mismatch" && externalEvidenceCoverage.complete,
   };
   const availableProviders = [...new Set(rankingInputs.filter((offer) => offer.available).map((offer) => offer.provider))];
   const unavailableOnlyProviders = matchedProviders.filter((provider) => !availableProviders.includes(provider));
@@ -835,6 +1059,7 @@ export function resultsFor(search) {
     allConfiguredAttempted: attemptedProviders.length === search.providers.length,
     allConfiguredCompleted: search.providers.every((provider) => search.providerStatus?.[provider]?.state === "complete"),
     deliveryLocation,
+    externalEvidence: externalEvidenceCoverage,
   };
   return {
     search: summarizeSearch(search),
@@ -856,6 +1081,12 @@ export function resultsFor(search) {
         ? [`Provider review is still required for: ${unreviewedCandidateProviders.join(", ")}. No winner can be confirmed yet.`] : []),
       ...(unresolvedProviders.length
         ? [`Comparison is unresolved for: ${unresolvedProviders.join(", ")}. Every configured provider must complete retrieval and candidate review before a winner can be confirmed.`] : []),
+      ...(search.externalResearch?.mode === "required" && selectedOffers.length === 0
+        ? [`External web research is required for ${search.externalResearch.dimensions.join(", ")} before qualitative candidates can be selected.`] : []),
+      ...(search.externalResearch?.mode === "unavailable"
+        ? ["Native web research was unavailable; qualitative claims are limited to current provider evidence and cannot be externally corroborated."] : []),
+      ...(externalMissing.length
+        ? [`External web research is incomplete for ${externalMissing.length} selected candidate(s); no qualitative winner can be confirmed.`] : []),
       ...(deliveryLocation.status === "mismatch"
         ? [`Provider delivery locations do not match (${deliveryLocation.maximumDistanceKm} km apart). Fix the saved address before comparing or quoting.`] : []),
       ...(deliveryLocation.status === "unverified"
@@ -881,6 +1112,7 @@ function summarizeSearch(search) {
     queryPlan: search.queryPlan ?? null,
     semanticMode: search.semanticMode ?? "deterministic",
     shoppingItems: search.shoppingItems ?? [],
+    externalResearch: search.externalResearch ?? { mode: "not_needed", dimensions: [] },
     providers: search.providers,
     providerStatus: Object.fromEntries(Object.entries(search.providerStatus ?? {}).map(([provider, status]) => [provider, {
       ...status,
