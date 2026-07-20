@@ -1,6 +1,6 @@
 {
   "name": "orderscout-cli",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Compare Just Eat, Glovo, and Uber Eats in Spain from one agent-friendly CLI",
   "keywords": [
     "just-eat",

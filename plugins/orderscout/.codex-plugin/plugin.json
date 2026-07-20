@@ -1,6 +1,6 @@
 {
   "name": "orderscout",
-  "version": "0.1.13+codex.20260720235110",
+  "version": "0.1.14+codex.20260721000843",
   "description": "Find and compare anything deliverable through Just Eat, Glovo, and Uber Eats in Spain, then prepare or safely place the selected order.",
   "author": {
     "name": "Marcel Wachter",
@@ -36,8 +36,6 @@
     "defaultPrompt": [
       "Find the best-rated healthy dinner under \u20ac25 across my delivery apps. Do not order.",
       "Find the cheapest delivered groceries on my list across Just Eat, Glovo, and Uber Eats.",
-      "Find a pharmacy or convenience store that can deliver the product I need fastest.",
-      "I only use Just Eat and Uber Eats, and I have Uber One. Save that preference.",
       "Prepare the best option in my basket, but stop before ordering."
     ],
     "brandColor": "#E54B4B"

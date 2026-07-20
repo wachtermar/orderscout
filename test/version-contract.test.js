@@ -20,4 +20,7 @@ test("package, MCP, and plugin pins stay on one public release", async () => {
   assert.ok(mcp.mcpServers.orderscout.args.includes(`github:wachtermar/orderscout#v${packageJson.version}`));
   assert.equal(initialized.result.serverInfo.version, packageJson.version);
   assert.ok(skill.includes(`requires \`orderscout_context.version: ${packageJson.version}\``));
+  assert.ok(Array.isArray(plugin.interface.defaultPrompt));
+  assert.ok(plugin.interface.defaultPrompt.length >= 1 && plugin.interface.defaultPrompt.length <= 3);
+  assert.ok(plugin.interface.defaultPrompt.every((prompt) => typeof prompt === "string" && prompt.length <= 128));
 });
