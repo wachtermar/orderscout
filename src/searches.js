@@ -787,6 +787,13 @@ export function buildLlmSelection(search, requestedSelections) {
     if (!requested || typeof requested !== "object") throw new CliError(`Selection ${index + 1} must be an object`, "INVALID_SELECTION");
     const offer = candidates.get(String(requested.offerId ?? ""));
     if (!offer) throw new CliError(`Candidate ${requested.offerId ?? ""} does not exist in this search`, "CANDIDATE_NOT_FOUND");
+    if (offer.available === false && search.fulfilment?.mode !== "scheduled") {
+      throw new CliError(`Candidate ${offer.id} is not currently available for immediate delivery`, "CANDIDATE_UNAVAILABLE", {
+        candidateId: offer.id,
+        provider: offer.provider,
+        merchantId: offer.merchant?.id ?? null,
+      });
+    }
     const missingResearch = missingExternalDimensions(search, offer);
     if (missingResearch.length) {
       throw new CliError(`Candidate ${offer.id} still needs external research for: ${missingResearch.join(", ")}`, "EXTERNAL_RESEARCH_REQUIRED", {

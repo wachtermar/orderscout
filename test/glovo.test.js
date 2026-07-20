@@ -476,6 +476,59 @@ test("Glovo refuses to quote a previously recorded partial basket", async (t) =>
   assert.equal(checkoutCalls, 0);
 });
 
+test("Glovo rejects a price-bearing basket when immediate delivery is disabled", async (t) => {
+  const previousCookie = process.env.ORDERSCOUT_GLOVO_COOKIE;
+  t.after(() => {
+    if (previousCookie === undefined) delete process.env.ORDERSCOUT_GLOVO_COOKIE;
+    else process.env.ORDERSCOUT_GLOVO_COOKIE = previousCookie;
+  });
+  process.env.ORDERSCOUT_GLOVO_COOKIE = `glovo_auth_info=${encodeURIComponent(JSON.stringify({ accessToken: jwt(Math.floor(Date.now() / 1_000) + 1_200) }))}`;
+
+  const fetchImpl = async (url) => {
+    const path = new URL(url).pathname;
+    if (path === "/v3/me") return Response.json({ id: 7, name: "Test" });
+    if (path === "/customers/7/subscription/status") return Response.json({ isSubscribed: false });
+    if (path === "/v1/authenticated/customers/7/baskets/basket-1") {
+      return Response.json({
+        basketId: "basket-1", storeId: 12, storeAddressId: 34, storeCategoryId: 1,
+        products: [{ ids: { id: "56", storeProductId: "sp56" }, quantity: { increments: 1 } }],
+      });
+    }
+    if (path === "/v3/checkouts/order/1/template") {
+      return Response.json({ checkout: {
+        enabled: true,
+        orderDetails: { purchaseTotalCents: 499, currencyCode: "EUR" },
+        components: [
+          { id: "schedulingTime", type: "timeSelector", timeSelectorData: { required: true, selectors: [
+            { value: "STANDARD", label: "Estándar", description: "El establecimiento está cerrado", disabled: true },
+            { label: "Programar", disabled: false, options: [{ label: "Mañana", timeSlots: [{ label: "09:30 - 10:00", value: "2026/07/22 09:30" }] }] },
+          ] } },
+          { id: "priceBreakdown", type: "priceBreakdown", priceBreakdownData: { breakDown: [
+            { type: "OTHER", title: "Productos", value: "3,00 €" },
+            { type: "DELIVERY", title: "Entrega", value: "0,00 €" },
+            { type: "OTHER", title: "Pedido pequeño", value: "1,99 €" },
+            { type: "TOTAL", title: "TOTAL", value: "4,99 €" },
+          ] } },
+          { id: "placeOrder", type: "button", buttonData: { label: "Pagar y realizar pedido" } },
+        ],
+      } });
+    }
+    throw new Error(`Unexpected Glovo test request: ${path}`);
+  };
+
+  await assert.rejects(() => quoteGlovoBasket("basket-1", {
+    fetchImpl,
+    location: { latitude: 36.5, longitude: -4.8, cityCode: "MBA" },
+    expectedLines: [{ item: { name: "Water" }, quantity: 1, source: { productId: "56", storeProductId: "sp56" } }],
+  }), (error) => {
+    assert.equal(error.code, "CHECKOUT_UNAVAILABLE");
+    assert.equal(error.details.reason, "El establecimiento está cerrado");
+    assert.equal(error.details.pricing.total, 4.99);
+    assert.deepEqual(error.details.nextScheduledWindows, [{ label: "09:30 - 10:00", value: "2026/07/22 09:30" }]);
+    return true;
+  });
+});
+
 test("Glovo checkout prefers the submit action returned by validation", () => {
   const request = glovoSubmissionRequest("basket-1", {
     actions: [{ type: "SUBMIT_ORDER", data: { method: "POST", path: "/v2/checkout/orders", body: { checkoutSessionId: "session-1", basketId: "basket-1" } } }],

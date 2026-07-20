@@ -1,5 +1,5 @@
 # Agent usage
-Call `orderscout_context` and the live `orderscout_accounts_status` first. This release requires version `0.1.15`, `workflowContract: llm-comparison-v5`, and every tool listed in `requiredTools`; an older version or contract must be updated or reloaded, never worked around with browser search or static ranking. Configure only accounts and memberships stated by the user. For Glovo and Uber Eats, try `orderscout_provider_auth_complete` before opening a login page; it automatically discovers an already signed-in Chrome profile. If login is needed, open the official page, let the user finish, then complete and live-verify without asking for a terminal or profile name.
+Call `orderscout_context` and the live `orderscout_accounts_status` first. This release requires version `0.1.16`, `workflowContract: llm-comparison-v6`, and every tool listed in `requiredTools`; an older version or contract must be updated or reloaded, never worked around with browser search or static ranking. Configure only accounts and memberships stated by the user. For Glovo and Uber Eats, try `orderscout_provider_auth_complete` before opening a login page; it automatically discovers an already signed-in Chrome profile. If login is needed, open the official page, let the user finish, then complete and live-verify without asking for a terminal or profile name.
 
 ## Workflow
 

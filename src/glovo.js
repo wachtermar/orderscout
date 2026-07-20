@@ -1021,8 +1021,9 @@ export async function quoteGlovoBasket(basketId, options = {}) {
       selectedWindow: { value: selected.value, label: selected.label }, source: "glovo-checkout-template",
     };
   }
+  const pricing = assertGlovoCheckoutPlaceable(quote, { scheduledAt: options.scheduledAt });
   return {
-    provider: "glovo", basketId, quote, fulfilment, pricing: normalizeGlovoQuote(quote),
+    provider: "glovo", basketId, quote, fulfilment, pricing,
     remoteBasketVerification, submitted: false,
   };
 }
@@ -1113,6 +1114,50 @@ export function normalizeGlovoQuote(quote) {
     total,
     exact: total !== null,
   };
+}
+
+function glovoScheduledWindows(selectors) {
+  return selectors.flatMap((selector) => selector?.options ?? [])
+    .flatMap((option) => option?.timeSlots ?? [])
+    .filter((slot) => slot?.value)
+    .slice(0, 12)
+    .map((slot) => ({ label: slot.label ?? null, value: slot.value }));
+}
+
+function assertGlovoCheckoutPlaceable(quote, options = {}) {
+  const pricing = normalizeGlovoQuote(quote);
+  const components = quote?.components ?? [];
+  const placeOrder = components.find((component) => component.id === "placeOrder" || component.type === "button");
+  if (!placeOrder) {
+    throw new CliError("Glovo checkout did not return a place-order action; the quoted price is not enough to prove orderability", "CHECKOUT_UNVERIFIED", {
+      provider: "glovo", pricing,
+    });
+  }
+  if (quote?.enabled === false || placeOrder.buttonData?.disabled === true || placeOrder.buttonData?.enabled === false) {
+    throw new CliError("Glovo checkout is currently disabled", "CHECKOUT_UNAVAILABLE", {
+      provider: "glovo", pricing,
+    });
+  }
+  if (options.scheduledAt) return pricing;
+
+  const timeSelector = components.find((component) => component.id === "schedulingTime" || component.type === "timeSelector");
+  const selectors = timeSelector?.timeSelectorData?.selectors ?? [];
+  const standard = selectors.find((selector) => String(selector?.value ?? "").toUpperCase() === "STANDARD")
+    ?? selectors.find((selector) => /^(?:standard|estándar)$/i.test(String(selector?.label ?? "")));
+  if (!standard) {
+    throw new CliError("Glovo checkout did not verify immediate-delivery availability", "CHECKOUT_UNVERIFIED", {
+      provider: "glovo", pricing,
+    });
+  }
+  if (standard.disabled === true) {
+    throw new CliError("Glovo cannot deliver this basket now", "CHECKOUT_UNAVAILABLE", {
+      provider: "glovo",
+      reason: standard.description ?? standard.label ?? "Immediate delivery is disabled",
+      pricing,
+      nextScheduledWindows: glovoScheduledWindows(selectors),
+    });
+  }
+  return pricing;
 }
 
 function findSubmitAction(value) {

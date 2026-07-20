@@ -881,7 +881,7 @@ export async function runOrderScout(argv) {
     return writeOutput({
       name: "OrderScout",
       version: packageJson.version,
-      workflowContract: "llm-comparison-v5",
+      workflowContract: "llm-comparison-v6",
       requiredTools: [
         "orderscout_search_begin", "orderscout_candidates", "orderscout_record_external_evidence", "orderscout_select_candidates",
         "orderscout_review_provider", "orderscout_quote_comparison", "orderscout_results",
