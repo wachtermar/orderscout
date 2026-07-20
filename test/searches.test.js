@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { checkoutFulfilment, providerDiverseOffers, runConcurrentProviderTasks } from "../src/orderscout.js";
+import { assertAllergenReview, checkoutFulfilment, providerDiverseOffers, runConcurrentProviderTasks } from "../src/orderscout.js";
 import {
   applyIntent, buildLlmSelection, candidatePageForSearch, providerRoutes, resultsFor, semanticInputsForSearch,
 } from "../src/searches.js";
@@ -32,6 +32,13 @@ test("checkout-verified fulfilment overrides stale search and basket state", () 
   }), verified);
 });
 
+test("all providers fail closed on allergy basket work until direct merchant review", () => {
+  const search = { intent: "Dinner for two; severe peanut allergy" };
+  assert.throws(() => assertAllergenReview(search, {}), { code: "ALLERGEN_REVIEW_REQUIRED" });
+  assert.doesNotThrow(() => assertAllergenReview(search, { "allergen-reviewed": "true" }));
+  assert.doesNotThrow(() => assertAllergenReview({ intent: "Dinner for two" }, {}));
+});
+
 test("compact agent results retain the best offer from every matched provider", () => {
   const offers = [
     ...Array.from({ length: 20 }, (_, index) => ({ id: `j${index}`, provider: "justeat", available: true, ranking: { score: 100 - index } })),
@@ -49,14 +56,21 @@ test("search results prove coverage and never silently omit a failed provider", 
     providers: ["justeat", "glovo", "ubereats"], offers: [], createdAt: "now", updatedAt: "now",
     providerStatus: {
       justeat: { state: "complete", error: null },
-      glovo: { state: "error", error: "expired" },
+      glovo: {
+        state: "error", error: "temporarily rate-limited", errorCode: "RATE_LIMITED",
+        errorDetails: { retryAt: "2026-07-20T17:00:00.000Z", source: "local-cooldown" },
+      },
       ubereats: { state: "complete", error: null },
     },
   });
   assert.equal(result.coverage.allConfiguredAttempted, true);
   assert.equal(result.coverage.allConfiguredCompleted, false);
   assert.deepEqual(result.coverage.failedProviders, ["glovo"]);
+  assert.deepEqual(result.coverage.rateLimitedProviders, ["glovo"]);
+  assert.equal(result.search.providerStatus.glovo.errorCode, "RATE_LIMITED");
+  assert.equal(result.search.providerStatus.glovo.errorDetails.retryAt, "2026-07-20T17:00:00.000Z");
   assert.match(result.warnings.join(" "), /not silently omitted/);
+  assert.match(result.warnings.join(" "), /instead of re-authenticating/);
 });
 
 test("coverage distinguishes currently available matches from unavailable catalog matches", () => {

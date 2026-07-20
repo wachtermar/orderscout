@@ -129,8 +129,17 @@ export function applyIntent(inputs, text) {
     const stronglyIndulgent = ["frito", "fried", "burger", "hamburgues", "pizza", "donut", "cake", "empanado", "breaded", "battered", "croqueta", "chips"];
     const healthyAnchors = ["ensalada", "salad", "poke", "bowl", "plancha", "grilled", "verdura", "vegetable", "quinoa", "integral", "healthy", "saludable", "vegan", "vegano", "vegetar", "fruta", "fruit", "huevo", "egg", "yogur", "avena", "oat", "granola", "aguacate", "avocado", "tostada", "toast", "acai", "chia"];
     const dietaryTerms = {
-      vegan: ["vegan", "vegano", "vegana"], vegetarian: ["vegetarian", "vegetariano", "vegetariana"],
-      halal: ["halal"], glutenFree: ["gluten free", "sin gluten"], lactoseFree: ["lactose free", "sin lactosa"],
+      vegan: ["vegan", "vegano", "vegana"],
+      vegetarian: ["vegetarian", "vegetariano", "vegetariana"],
+      pescatarian: ["pescatarian", "pescetarian", "pescetariano", "pescetariana"],
+      halal: ["halal"], kosher: ["kosher"],
+      glutenFree: ["gluten free", "sin gluten"],
+      lactoseFree: ["lactose free", "sin lactosa", "lactosa cero"],
+      dairyFree: ["dairy free", "without dairy", "sin lacteos", "sin leche"],
+      nutFree: ["nut free", "without nuts", "sin frutos secos", "sin nueces"],
+      keto: ["keto", "ketogenic", "cetogenico", "cetogenica"],
+      lowCarb: ["low carb", "low carbohydrate", "bajo en carbohidratos", "baja en carbohidratos"],
+      noPork: ["no pork", "without pork", "sin cerdo"],
     };
     const eligible = inputs.flatMap((input) => {
       const itemName = `${input.item?.name ?? input.itemName ?? ""}`
@@ -359,7 +368,15 @@ export function composeMealBundles(inputs, intent) {
 
 export async function recordProviderError(id, provider, error, timing = {}) {
   const search = await loadSearch(id);
-  search.providerStatus[provider] = { state: "error", error: String(error).slice(0, 300), offerCount: 0, ...timing };
+  const message = error instanceof Error ? error.message : String(error);
+  search.providerStatus[provider] = {
+    state: "error",
+    error: message.slice(0, 300),
+    errorCode: error?.code ?? timing.errorCode ?? null,
+    ...(error?.details ? { errorDetails: error.details } : {}),
+    offerCount: 0,
+    ...timing,
+  };
   await writeSearch(search);
   return resultsFor(search);
 }
@@ -441,6 +458,15 @@ function selectionPromotion(lines) {
   };
 }
 
+function lexicalForms(value) {
+  return new Set([
+    value,
+    ...(value.endsWith("ies") && value.length > 4 ? [`${value.slice(0, -3)}y`] : []),
+    ...(value.endsWith("es") && value.length > 4 ? [value.slice(0, -2)] : []),
+    ...(value.endsWith("s") && value.length > 3 ? [value.slice(0, -1)] : []),
+  ]);
+}
+
 export function candidatePageForSearch(search, options = {}) {
   let candidates = search.offers.filter((offer) => !isLlmSelection(offer));
   if (options.provider) candidates = candidates.filter((offer) => offer.provider === options.provider);
@@ -451,7 +477,11 @@ export function candidatePageForSearch(search, options = {}) {
     candidates = candidates.filter((offer) => {
       const text = `${offer.merchant?.name ?? ""} ${offer.item?.name ?? ""} ${offer.item?.description ?? ""} ${offer.item?.category ?? ""}`
         .normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-      return terms.every((term) => text.includes(term));
+      const tokens = text.split(/[^a-z0-9]+/).filter(Boolean);
+      return terms.every((term) => {
+        const wanted = lexicalForms(term);
+        return tokens.some((token) => [...lexicalForms(token)].some((form) => wanted.has(form)));
+      });
     });
   }
   const offset = Math.max(0, Math.trunc(Number(options.offset ?? 0)) || 0);
@@ -589,6 +619,7 @@ export function resultsFor(search) {
   const attemptedProviders = statuses.filter(([, status]) => status.state !== "pending").map(([provider]) => provider);
   const completedProviders = statuses.filter(([, status]) => status.state === "complete" || status.state === "partial").map(([provider]) => provider);
   const failedProviders = statuses.filter(([, status]) => status.state === "error").map(([provider]) => provider);
+  const rateLimitedProviders = statuses.filter(([, status]) => status.errorCode === "RATE_LIMITED").map(([provider]) => provider);
   const partialProviders = statuses.filter(([, status]) => status.state === "partial").map(([provider]) => provider);
   const matchedProviders = [...new Set(rankingInputs.map((offer) => offer.provider))];
   const candidateProviders = [...new Set(candidates.map((offer) => offer.provider))];
@@ -609,6 +640,7 @@ export function resultsFor(search) {
     attemptedProviders,
     completedProviders,
     failedProviders,
+    rateLimitedProviders,
     matchedProviders,
     candidateProviders,
     availableProviders,
@@ -626,6 +658,7 @@ export function resultsFor(search) {
       ...(!ranking.exactPriceComparison && ranking.exactPriceCoverage.requiredProviders.length
         ? [`Exact checkout totals are still missing for: ${ranking.exactPriceCoverage.missingQuoteProviders.join(", ")}. Cheapest is provisional.`] : []),
       ...(!coverage.allConfiguredAttempted ? ["Not every configured provider has been attempted yet."] : []),
+      ...(rateLimitedProviders.length ? [`Provider search is temporarily rate-limited: ${rateLimitedProviders.join(", ")}. The saved login may still be valid; wait before retrying instead of re-authenticating.`] : []),
       ...(failedProviders.length ? [`Provider search failed: ${failedProviders.join(", ")}. It was attempted and was not silently omitted.`] : []),
       ...(partialProviders.length ? [`Provider catalog coverage was partial: ${partialProviders.join(", ")}. Empty results from failed catalog calls were not treated as proof of no match.`] : []),
       ...(pendingEligibility.length ? ["Some Glovo matches require the user to confirm legal age on Glovo before basket creation."] : []),

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { collectUberStores, createUberEatsBasket, normalizeUberSearch, quoteUberEatsBasket, searchUberEats, uberEatsInternals, uberEatsMe, uberEatsOrderConfirmation } from "../src/ubereats.js";
+import { collectUberStores, createUberEatsBasket, expandUberEatsCatalogs, normalizeUberSearch, quoteUberEatsBasket, searchUberEats, uberEatsInternals, uberEatsMe, uberEatsOrderConfirmation } from "../src/ubereats.js";
 
 test("Uber Eats login uses the current getUserV1 account contract", async () => {
   const account = await uberEatsMe({
@@ -34,6 +34,22 @@ test("Uber Eats mini-store search response becomes a normalized offer", () => {
   assert.equal(offers[0].membershipEligible, true);
   assert.equal(offers[0].source.sectionUuid, "s");
   assert.equal(uberEatsInternals.price(""), null);
+});
+
+test("Uber Eats treats every integer API price as minor units, including sub-euro catalog items", () => {
+  const payload = { feedItems: [{ miniStoreWithItems: {
+    store: { storeUuid: "store-1", title: "Super Test" },
+    items: [
+      { uuid: "water-90", title: "Water 1.5 L", price: 90 },
+      { uuid: "water-30", title: "Water 500 ml", price: 30 },
+      { uuid: "formatted", title: "Formatted water", price: "€0.85" },
+    ],
+  } }] };
+  const prices = normalizeUberSearch(payload).map((offer) => offer.item.unitPrice);
+  assert.deepEqual(prices, [0.9, 0.3, 0.85]);
+  assert.equal(uberEatsInternals.price(99), 0.99);
+  assert.equal(uberEatsInternals.price(2_550), 25.5);
+  assert.equal(uberEatsInternals.price(4.45), 4.45);
 });
 
 test("Uber Eats search retains discounted item prices and promotion metadata", () => {
@@ -77,6 +93,71 @@ test("Uber Eats expands store-only search results into matching menu offers", as
   assert.equal(result.offers.length, 1);
   assert.equal(result.offers[0].item.name, "Healthy Salmon Poke");
   assert.equal(result.offers[0].source.sectionUuid, "section");
+});
+
+test("Uber Eats reuses one store menu across independent agent catalog queries", async () => {
+  let menuRequests = 0;
+  const menuCache = new Map();
+  const fetchImpl = async (url) => {
+    const operation = String(url).split("/").at(-1);
+    if (operation === "getSearchFeedV1") return Response.json({ data: { feedItems: [{ store: {
+      storeUuid: "store-1", title: "Healthy Poke", actionUrl: "/store/healthy-poke/store-1",
+    } }] } });
+    menuRequests += 1;
+    return Response.json({ data: { title: "Healthy Poke", sections: [{ items: [
+      { uuid: "poke-1", title: "Salmon Poke", price: 1_300 },
+    ] }] } });
+  };
+  await searchUberEats("poke", { fetchImpl, cookieHeader: "sid=test", menuCache, storeLimit: 1 });
+  await searchUberEats("salmon", { fetchImpl, cookieHeader: "sid=test", menuCache, storeLimit: 1 });
+  assert.equal(menuRequests, 1);
+});
+
+test("Uber Eats scans each candidate store once for independent multi-item needs", async () => {
+  const menuCache = new Map([
+    ["complete-store", Promise.resolve({ isOpen: true, items: [
+      { uuid: "spf", title: "Protector solar SPF 50", description: "Farmacia", price: 5.84, rawPrice: 584 },
+      { uuid: "paste", title: "Pasta dental sensible", description: "Sensodyne", price: 5.25, rawPrice: 525 },
+      { uuid: "plasters", title: "Tiritas resistentes", description: "20 unidades", price: 3.45, rawPrice: 345 },
+    ] })],
+    ["partial-store", Promise.resolve({ isOpen: true, items: [
+      { uuid: "paste-only", title: "Pasta dental", price: 4, rawPrice: 400 },
+    ] })],
+  ]);
+  const result = await expandUberEatsCatalogs([
+    { id: "partial-store", name: "Partial Market", queryHits: 1, rating: 4.9 },
+    { id: "complete-store", name: "Complete Market", queryHits: 3, rating: 4.5 },
+  ], ["protector solar", "pasta dental", "tiritas"], { menuCache, storeLimit: 1 });
+  assert.equal(result.searchedStores, 1);
+  assert.equal(result.failedStores, 0);
+  assert.equal(result.rateLimitedStores, 0);
+  assert.deepEqual(result.offers.map((offer) => offer.item.id), ["spf", "paste", "plasters"]);
+  assert.ok(result.offers.every((offer) => offer.merchant.id === "complete-store"));
+});
+
+test("Uber Eats reports partial cross-catalog scans without discarding successful stores", async () => {
+  const limited = Object.assign(new Error("slow down"), { code: "RATE_LIMITED" });
+  const result = await expandUberEatsCatalogs([
+    { id: "good", name: "Good Market", queryHits: 2 },
+    { id: "limited", name: "Limited Market", queryHits: 1 },
+  ], ["water"], {
+    menuCache: new Map([
+      ["good", Promise.resolve({ isOpen: true, items: [{ uuid: "water", title: "Water", price: 1, rawPrice: 100 }] })],
+      ["limited", Promise.reject(limited)],
+    ]),
+    storeLimit: 2,
+  });
+  assert.equal(result.searchedStores, 1);
+  assert.equal(result.failedStores, 1);
+  assert.equal(result.rateLimitedStores, 1);
+  assert.equal(result.offers.length, 1);
+});
+
+test("Uber Eats distinguishes a 403 rate limit from an expired login", async () => {
+  await assert.rejects(() => searchUberEats("poke", {
+    cookieHeader: "sid=test",
+    fetchImpl: async () => Response.json({ status: "failure", data: { message: "bd.error.too_many_requests" } }, { status: 403 }),
+  }), { code: "RATE_LIMITED" });
 });
 
 test("Uber Eats basket prepare uses createDraftOrderV2 shape without mutation", async () => {

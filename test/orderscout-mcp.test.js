@@ -14,6 +14,8 @@ test("OrderScout MCP exposes direct login, basket, checkout, and guarded order t
   assert.match(ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_provider_auth_complete").description, /Automatically scan/);
   assert.match(ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_accounts_status").description, /Live-verify/);
   assert.deepEqual(ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_open_basket").command({ searchId: "search", offerId: "offer" }), ["basket", "open", "search", "offer", "--no-open", "--agent"]);
+  assert.deepEqual(ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_create_basket").command({ searchId: "search", offerId: "offer", allergenReviewed: true }), ["basket", "create", "search", "offer", "--allergen-reviewed", "true", "--agent"]);
+  assert.equal(ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_checkout_review_task").annotations.readOnlyHint, false);
   const placement = ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_place_order");
   assert.equal(placement.annotations.destructiveHint, true);
   const search = ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_search_begin");

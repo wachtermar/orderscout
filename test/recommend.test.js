@@ -44,9 +44,16 @@ test("parseIntent extracts quantity, budget, health, taste, and dietary needs", 
     dietary: {
       vegan: false,
       vegetarian: false,
+      pescatarian: false,
       halal: false,
+      kosher: false,
       glutenFree: false,
       lactoseFree: false,
+      dairyFree: false,
+      nutFree: false,
+      keto: false,
+      lowCarb: false,
+      noPork: false,
     },
   });
   const meal = parseIntent("healthy tasty vegan food under 18 EUR");
