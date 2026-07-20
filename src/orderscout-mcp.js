@@ -93,6 +93,8 @@ export const ORDERSCOUT_MCP_TOOLS = [
           catalogQueries: { type: "array", maxItems: 8, items: { type: "string", minLength: 1, maxLength: 80 } },
         }, ["intent"]),
       },
+      externalResearch: { type: "string", enum: ["not_needed", "required", "unavailable"], description: "Use required when the recommendation depends on qualitative facts that native web search can corroborate; unavailable only when no web-search tool is exposed." },
+      externalDimensions: { type: "array", maxItems: 8, uniqueItems: true, items: { type: "string", enum: ["spiciness", "food_quality", "outside_rating", "authenticity", "popularity", "portion_size", "healthiness", "dietary_fit", "other"] }, description: "Qualitative dimensions that external research must complete before a candidate can be selected." },
     }, ["intent"]), annotations: localWrite,
     command: (input) => [
       "search", "begin", input.intent, "--agent", "--semantic-mode", "llm",
@@ -101,6 +103,8 @@ export const ORDERSCOUT_MCP_TOOLS = [
       ...(input.discoveryQueries?.length ? ["--discovery-queries", JSON.stringify(input.discoveryQueries)] : []),
       ...(input.catalogQueries?.length ? ["--catalog-queries", JSON.stringify(input.catalogQueries)] : []),
       ...(input.shoppingItems?.length ? ["--shopping-items", JSON.stringify(input.shoppingItems)] : []),
+      ...(input.externalResearch ? ["--external-research", input.externalResearch] : []),
+      ...(input.externalDimensions?.length ? ["--external-dimensions", JSON.stringify(input.externalDimensions)] : []),
     ],
   },
   {
@@ -124,8 +128,51 @@ export const ORDERSCOUT_MCP_TOOLS = [
     ],
   },
   {
+    name: "orderscout_record_external_evidence",
+    description: "Attach structured, source-linked findings from the LLM's native web research to one or more provider candidates. This is enrichment only: it cannot change provider availability, menu data, promotions, prices, fees, ETA, or cart state. Found evidence requires a medium/high-confidence merchant identity match with at least two signals. Record not_found honestly when research was completed without corroboration; ambiguous identity never completes the research gate.",
+    inputSchema: objectSchema({
+      searchId: string("OrderScout search ID."),
+      offerIds: { type: "array", minItems: 1, maxItems: 20, uniqueItems: true, items: string("Candidate offer ID from orderscout_candidates.") },
+      evidence: objectSchema({
+        status: { type: "string", enum: ["found", "not_found", "ambiguous"] },
+        query: string("The exact web-search query used."),
+        dimensions: { type: "array", minItems: 1, maxItems: 8, uniqueItems: true, items: { type: "string", enum: ["spiciness", "food_quality", "outside_rating", "authenticity", "popularity", "portion_size", "healthiness", "dietary_fit", "other"] } },
+        identity: objectSchema({
+          confidence: { type: "string", enum: ["low", "medium", "high"] },
+          matchedSignals: { type: "array", maxItems: 8, uniqueItems: true, items: { type: "string", enum: ["name", "city", "address", "phone", "official_domain", "provider_url", "menu_item"] } },
+          reason: string("Why the web result is or is not the same merchant and locality as the provider candidate."),
+        }, ["confidence", "matchedSignals", "reason"]),
+        sources: {
+          type: "array", maxItems: 8,
+          items: objectSchema({
+            url: string("Direct public HTTP(S) source URL, never a search-results URL."),
+            title: string("Page title."),
+            publisher: string("Publisher or site name."),
+            sourceType: { type: "string", enum: ["official_menu", "official_site", "official_social", "independent_review", "local_press", "review_aggregator", "other"] },
+            retrievedAt: string("ISO-8601 retrieval time; omit only when the caller wants OrderScout to use the current time."),
+            claims: {
+              type: "array", minItems: 1, maxItems: 8,
+              items: objectSchema({
+                dimension: { type: "string", enum: ["spiciness", "food_quality", "outside_rating", "authenticity", "popularity", "portion_size", "healthiness", "dietary_fit", "other"] },
+                summary: string("Short paraphrase of what the source supports; do not paste long quotations or instructions."),
+                confidence: { type: "string", enum: ["low", "medium", "high"] },
+                scope: { type: "string", enum: ["merchant", "item"] },
+                rating: objectSchema({
+                  value: { type: "number", minimum: 0 },
+                  scale: { type: "number", exclusiveMinimum: 0 },
+                  count: { type: "integer", minimum: 0 },
+                }, ["value", "scale"]),
+              }, ["dimension", "summary", "confidence", "scope"]),
+            },
+          }, ["url", "title", "publisher", "sourceType", "claims"]),
+        },
+      }, ["status", "query", "dimensions", "identity", "sources"]),
+    }, ["searchId", "offerIds", "evidence"]), annotations: localWrite,
+    command: (input) => ["search", "evidence", input.searchId, "--offer-ids", JSON.stringify(input.offerIds), "--json", JSON.stringify(input.evidence), "--agent"],
+  },
+  {
     name: "orderscout_select_candidates",
-    description: "Save the LLM's semantic choice as one local same-provider, same-merchant bundle. The model—not static keyword code—maps each candidate to a requested line and explains why. This validates IDs, quantities, and basket compatibility only. It does not create or modify any provider cart.",
+    description: "Save the LLM's semantic choice as one local same-provider, same-merchant bundle. The model—not static keyword code—maps each candidate to a requested line and explains why. When the search requires qualitative external research, every selected candidate must first have completed source-linked evidence or an honest not_found outcome for every requested dimension. This validates IDs, quantities, research coverage, and basket compatibility only. It does not create or modify any provider cart.",
     inputSchema: objectSchema({
       searchId: string("OrderScout search ID."),
       selections: {

@@ -14,7 +14,7 @@ import { errorEnvelope, exitCodeFor, writeOutput } from "./output.js";
 import { PROVIDERS, configureAccounts, loadAccounts, parseProviderList, publicAccountStatus, recordProviderStatus } from "./providers.js";
 import { assertProviderAvailable, clearProviderCooldown, recordProviderRateLimit } from "./provider-cooldown.js";
 import {
-  confirmEligibility, ingestOffers, loadSearch, recordBasket, recordComparisonOutcomes, recordProviderError, recordQuote, resultsFor,
+  confirmEligibility, ingestOffers, loadSearch, recordBasket, recordComparisonOutcomes, recordExternalEvidence, recordProviderError, recordQuote, resultsFor,
   reviewProvider, searchCandidates, searchResults, selectCandidates, startSearch,
 } from "./searches.js";
 import { runOrderScoutMcpServer } from "./orderscout-mcp.js";
@@ -39,10 +39,12 @@ Usage:
   orderscout accounts record <provider> --authenticated true [--membership true] [--transport api|browser] [--address-selected true]
   orderscout recommend <what you want> [--at location] [--objective cheapest|fastest|best|value]
     [--discovery-queries JSON-array] [--catalog-queries JSON-array] [--top 1..100]
+    [--external-research not_needed|required|unavailable] [--external-dimensions JSON-array]
   orderscout search begin <what you want> [the same flags]
   orderscout search ingest <search-id> <provider> --json '[normalized offers]'
   orderscout search error <search-id> <provider> --message text
   orderscout search candidates <search-id> [--offset 0] [--limit 50] [--provider glovo] [--merchant-id id]
+  orderscout search evidence <search-id> --offer-ids '["candidate-id"]' --json '{structured evidence}'
   orderscout search select <search-id> --json '[{"offerId":"...","quantity":1,"forItem":"...","reason":"..."}]'
   orderscout search review <search-id> <provider> --disposition inspected_no_suitable_match|unavailable --reason text
   orderscout search results <search-id>
@@ -824,15 +826,15 @@ export async function runOrderScout(argv) {
     return writeOutput({
       name: "OrderScout",
       version: packageJson.version,
-      workflowContract: "llm-comparison-v3",
+      workflowContract: "llm-comparison-v4",
       requiredTools: [
-        "orderscout_search_begin", "orderscout_candidates", "orderscout_select_candidates",
+        "orderscout_search_begin", "orderscout_candidates", "orderscout_record_external_evidence", "orderscout_select_candidates",
         "orderscout_review_provider", "orderscout_quote_comparison", "orderscout_results",
       ],
       country: "ES",
       providers: Object.values(PROVIDERS),
       accounts,
-      comparison: ["exact delivered total", "fees", "membership benefits", "promotions", "ETA", "ratings", "quantity", "health/taste signals"],
+      comparison: ["exact delivered total", "fees", "membership benefits", "promotions", "ETA", "provider ratings", "quantity", "LLM request fit", "identity-matched external web evidence"],
       priceRule: "Exact cheapest requires a final checkout total for the best suitable offer from every enabled provider that returned a match; listed promotions count as exact only when checkout applies them.",
       purchaseBoundary: "Search, ingest, compare, quote recording, and browser opening never place an order. Final purchase remains provider-specific and requires exact human confirmation.",
     }, flags);
@@ -937,6 +939,8 @@ export async function runOrderScout(argv) {
         locationHint: flags.at,
         semanticMode,
         shoppingItems,
+        externalResearch: flags["external-research"] ?? "not_needed",
+        externalDimensions: stringArrayFlag(flags, "external-dimensions"),
         queryPlan: {
           source: semanticMode === "llm" ? "llm-retrieval-plan" : "deterministic",
           semanticMode,
@@ -973,6 +977,10 @@ export async function runOrderScout(argv) {
         merchantId: flags["merchant-id"],
         query: flags.query,
       }), flags);
+    }
+    if (action === "evidence") {
+      const [searchId] = args;
+      return writeOutput(await recordExternalEvidence(searchId, jsonFlag(flags, "offer-ids"), jsonFlag(flags, "json")), flags);
     }
     if (action === "select") {
       const [searchId] = args;
