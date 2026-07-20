@@ -2,6 +2,12 @@
 
 This project follows Semantic Versioning. It is currently pre-1.0; command and normalized response changes may occur between minor releases and will be listed here.
 
+## 0.1.16 - 2026-07-21
+
+- Reject immediate-delivery candidates that provider discovery already marks unavailable instead of letting the model select a closed merchant.
+- Treat a disabled Glovo `STANDARD` delivery selector as `CHECKOUT_UNAVAILABLE`, even when Glovo returns complete basket lines and a price-bearing checkout template.
+- Require a current place-order action and verified immediate-delivery selector before describing a Glovo checkout total as orderable.
+
 ## 0.1.15 - 2026-07-21
 
 - Request Uber Eats' official cart-item checkout payload and reject `INVALID_BASKET`, disabled-cart warnings, and unmet merchant minimums instead of presenting a price-bearing but unorderable response as an exact total.

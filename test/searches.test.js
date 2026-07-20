@@ -217,6 +217,21 @@ test("LLM selection rejects candidates that cannot share one merchant basket", (
   ]), { code: "SELECTION_BASKET_CONFLICT" });
 });
 
+test("LLM selection rejects currently unavailable candidates for immediate delivery", () => {
+  const closed = normalizeOffer("glovo", {
+    merchant: { id: "closed-shop", name: "Closed Shop" },
+    item: { id: "water", name: "Water", unitPrice: 1 },
+    available: false,
+    pricing: {},
+    source: { storeId: "closed-shop" },
+  });
+  assert.throws(() => buildLlmSelection({
+    semanticMode: "llm",
+    fulfilment: { mode: "now" },
+    offers: [closed],
+  }, [{ offerId: closed.id, forItem: "drink", reason: "It is inexpensive." }]), { code: "CANDIDATE_UNAVAILABLE" });
+});
+
 function externalSpiceEvidence(overrides = {}) {
   return normalizeExternalEvidence({
     status: "found",
