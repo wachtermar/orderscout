@@ -2,6 +2,10 @@
 
 This project follows Semantic Versioning. It is currently pre-1.0; command and normalized response changes may occur between minor releases and will be listed here.
 
+## 0.1.14 - 2026-07-21
+
+- Keep the ChatGPT Work plugin's suggested prompts within Codex's supported maximum of three entries and add a manifest contract test for the prompt count and length limits.
+
 ## 0.1.13 - 2026-07-20
 
 - Verify every Uber Eats draft line and scheduled delivery window against the remote cart, use the current two-step create/update scheduling contract, and distinguish provider payload rejection from expired authentication.
