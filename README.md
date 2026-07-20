@@ -64,11 +64,13 @@ Scheduled requests use the local Spain timezone and preserve the requested insta
 
 Provider-listed deals are retained: struck-through item prices and savings, percentage discounts, 2-for-1 listings, free delivery, merchant offers, and membership eligibility. Listed deals influence provisional value ranking, while only savings actually shown by checkout affect an exact comparison.
 
-Product matching is general. Quantity-aware helpers add extra understanding where useful—for example bottle sizes, multipacks, total litres, still versus sparkling, and price per litre for water. Multi-person meal results contain explicit distinct dish lines, or one item explicitly sold for sharing; OrderScout does not multiply one ordinary dish by the party size. Breakfast searches require prepared breakfast dishes rather than raw egg packs or a keyword found in an unrelated product. “Healthy” and “tasty” remain transparent ranking signals, not medical or nutritional claims.
+Product matching is general. OrderScout separates the required product from optional preferences, generates several short provider-appropriate queries, and applies one strict whole-token/concept relevance gate after every provider responds. A preference cannot qualify an unrelated product—`ice` does not match `rice`, and an iced drink is not a vape result. Quantity-aware helpers add extra understanding where useful—for example bottle sizes, multipacks, total litres, still versus sparkling, and price per litre for water. Multi-person meal results contain explicit distinct dish lines, or one item explicitly sold for sharing; OrderScout does not multiply one ordinary dish by the party size. Breakfast searches require prepared breakfast dishes rather than raw egg packs or a keyword found in an unrelated product. “Healthy” and “tasty” remain transparent ranking signals, not medical or nutritional claims.
 
 ## Will it accidentally order?
 
 Searching, opening a menu, creating a basket, reading checkout, and opening the official checkout page do not place an order.
+
+For age- or identity-restricted goods, OrderScout never bypasses provider eligibility checks. The user must satisfy every official provider control before checkout can continue.
 
 Programmatic placement has two locks:
 

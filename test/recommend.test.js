@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isHealthyBreakfastItem, isPreparedBreakfastItem, parseIntent, parsePackVolume, providerSearchQueries, recommend } from "../src/recommend.js";
+import {
+  isHealthyBreakfastItem, isPreparedBreakfastItem, parseIntent, parsePackVolume,
+  productIntentSpec, productRelevance, providerSearchQueries, recommend,
+} from "../src/recommend.js";
 
 test("parsePackVolume understands Spanish packs and metric units", () => {
   assert.deepEqual(parsePackVolume("Pack 6 unidades de 1,5L"), {
@@ -63,7 +66,47 @@ test("parseIntent extracts quantity, budget, health, taste, and dietary needs", 
   assert.equal(breakfast.scheduledAt, "2026-07-21T08:00:00.000Z");
   assert.deepEqual(providerSearchQueries(breakfast), ["desayuno saludable", "açaí", "tostada aguacate", "huevos"]);
   assert.deepEqual(providerSearchQueries("20 litres of water now"), ["agua"]);
-  assert.deepEqual(providerSearchQueries("Which pharmacy can deliver SPF 50 sunscreen fastest tonight?"), ["spf sunscreen"]);
+  assert.deepEqual(providerSearchQueries("Which pharmacy can deliver SPF 50 sunscreen fastest tonight?"), [
+    "spf sunscreen", "protector solar spf", "sunscreen spf", "protector solar", "sunscreen",
+  ]);
+});
+
+test("product search separates the requested product from preferences and generates bounded provider queries", () => {
+  const request = "I need some vape liquid, preferably something with ice";
+  const spec = productIntentSpec(request);
+  assert.equal(spec.concept.id, "vape");
+  assert.deepEqual(spec.coreTerms, []);
+  assert.deepEqual(spec.preferenceConcepts.map((entry) => entry.id), ["ice"]);
+  assert.deepEqual(providerSearchQueries(request), [
+    "vape liquid ice", "vape ice", "vape hielo", "vape liquid", "vape", "vaper",
+  ]);
+});
+
+test("product relevance requires a whole product anchor and treats preferences as ranking signals", () => {
+  const request = "I need some vape liquid, preferably something with ice";
+  for (const name of ["Plain rice", "Lipton Ice Tea", "Leche liquida entera", "Vanilla ice cream"]) {
+    assert.equal(productRelevance(request, { item: { name } }).relevant, false, name);
+  }
+  const icy = productRelevance(request, { item: { name: "Vape Lost Mary Peach Ice (1000)" } });
+  const mango = productRelevance(request, { item: { name: "Vape Lost Mary Triple Mango (1000)" } });
+  assert.equal(icy.relevant, true);
+  assert.equal(icy.preference, 100);
+  assert.equal(mango.relevant, true);
+  assert.equal(mango.preference, 0);
+  assert.equal(productRelevance(request, {
+    item: { name: "AROMA KING MINI - 700 SANDÍA HELADA", category: "VAPES DESECHABLES" },
+  }).preference, 100);
+});
+
+test("product relevance generalizes to exact product qualifiers", () => {
+  const request = "find AA batteries under €12";
+  assert.deepEqual(providerSearchQueries(request), ["aa batteries", "pilas aa", "baterias aa", "pilas", "baterias"]);
+  assert.equal(productRelevance(request, { item: { name: "Pilas AA 8 pack" } }).relevant, true);
+  assert.equal(productRelevance(request, { item: { name: "Pilas AAA 8 pack" } }).relevant, false);
+  assert.equal(productRelevance("phone charger with USB-C", { item: { name: "Cargador para teléfono USB-C" } }).preference, 100);
+  assert.equal(productRelevance("shampoo for curly hair", { item: { name: "Curly hair shampoo" } }).relevant, true);
+  assert.equal(productRelevance("shampoo for curly hair", { item: { name: "Plain rice" } }).relevant, false);
+  assert.equal(productIntentSpec("phone case preferably with a battery").concept, null);
 });
 
 test("prepared breakfast classification rejects raw groceries, pasta, and non-food egg matches", () => {
@@ -183,4 +226,38 @@ test("recommend finds arbitrary non-food products across all verticals", async (
   );
   assert.equal(requestedUrl.searchParams.get("vertical"), "all");
   assert.deepEqual(result.candidates.map((candidate) => candidate.item.id), ["batteries"]);
+});
+
+test("product discovery prioritizes a directly matching merchant even when it is closed and beyond the scan limit", async () => {
+  const ordinary = Array.from({ length: 35 }, (_, index) => restaurant({
+    id: `ordinary-${index}`,
+    name: `Restaurant ${index}`,
+    uniqueName: `restaurant-${index}`,
+  }));
+  const vapeStore = restaurant({
+    id: "croco", name: "Croco Vapes", uniqueName: "croco-vapes",
+    isOpenNowForDelivery: false, cuisines: [{ name: "Tiendas" }, { name: "Otros tipos" }],
+  });
+  const fetchImpl = async () => Response.json({ restaurants: [...ordinary, vapeStore], metaData: {} });
+  const result = await recommend(
+    { latitude: 36.5, longitude: -4.8, postcode: "29603" },
+    "vape liquid preferably ice",
+    {
+      fetchImpl,
+      fetchMenuImpl: async (slug) => slug === "croco-vapes" ? {
+        ...menuData([{ Id: "icy", Name: "AROMA KING MINI - 700 SANDÍA HELADA", Variations: [{ Id: "icy", BasePrice: 6.5 }] }], "Croco Vapes"),
+        manifest: {
+          ...menuData([], "Croco Vapes").manifest,
+          Menus: [{ MenuGroupId: "menu-group", ServiceTypes: ["delivery"], Categories: [{
+            Id: "category", Name: "VAPES DESECHABLES", ItemIds: ["icy"],
+          }] }],
+        },
+      } : menuData([{ Id: "rice", Name: "Plain rice", Variations: [{ Id: "rice", BasePrice: 3 }] }]),
+    },
+  );
+  assert.equal(result.scope.scannedStores, 30);
+  assert.equal(result.scope.availability, "includes preorder or currently closed stores");
+  assert.deepEqual(result.candidates.map((candidate) => candidate.item.id), ["icy"]);
+  assert.equal(result.candidates[0].restaurant.open, false);
+  assert.equal(result.candidates[0].ranking.preferenceScore, 100);
 });

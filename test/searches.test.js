@@ -57,6 +57,27 @@ test("search results prove coverage and never silently omit a failed provider", 
   assert.match(result.warnings.join(" "), /not silently omitted/);
 });
 
+test("coverage distinguishes currently available matches from unavailable catalog matches", () => {
+  const base = {
+    pricing: { exact: false, total: 10 }, merchant: { rating: 4, ratingCount: 20 },
+    signals: { health: 0, taste: 0, relevance: 100, preference: 0 },
+  };
+  const result = resultsFor({
+    id: "b".repeat(24), intent: "toothpaste", objective: "value", orchestration: "concurrent",
+    providers: ["justeat", "ubereats"], createdAt: "now", updatedAt: "now",
+    offers: [
+      { ...base, id: "available", provider: "justeat", available: true },
+      { ...base, id: "closed", provider: "ubereats", available: false },
+    ],
+    providerStatus: {
+      justeat: { state: "complete", error: null }, ubereats: { state: "complete", error: null },
+    },
+  });
+  assert.deepEqual(result.coverage.matchedProviders, ["justeat", "ubereats"]);
+  assert.deepEqual(result.coverage.availableProviders, ["justeat"]);
+  assert.deepEqual(result.coverage.unavailableOnlyProviders, ["ubereats"]);
+});
+
 test("taste-focused requests use the quality objective", () => {
   assert.equal(parseObjective("healthy but very tasty"), "best");
   assert.equal(parseObjective("best-rated healthy breakfast"), "best");
@@ -89,6 +110,33 @@ test("water intent computes packs and excludes sparkling water and soft drinks",
   assert.equal(offers[0].package.packCount, 6);
   assert.equal(offers[0].suppliedLiters, 27);
   assert.equal(offers[0].pricing.subtotal, 13.35);
+});
+
+test("generic product intent filters noisy provider results before normalization", () => {
+  const offers = applyIntent([
+    { merchant: { name: "Restaurant" }, item: { name: "Plain rice", unitPrice: 3 }, pricing: {} },
+    { merchant: { name: "Cafe" }, item: { name: "Lipton Ice Tea", unitPrice: 2 }, pricing: {} },
+    { merchant: { name: "Market" }, item: { name: "Leche liquida entera", unitPrice: 1.5 }, pricing: {} },
+    { merchant: { name: "DELIGO" }, item: { name: "Vape Lost Mary Triple Mango (1000)", unitPrice: 8 }, pricing: {} },
+    { merchant: { name: "DELIGO" }, item: { name: "Vape Lost Mary Peach Ice (1000)", unitPrice: 8 }, pricing: {} },
+  ], "I need some vape liquid, preferably something with ice");
+  assert.deepEqual(offers.map((offer) => offer.item.name), [
+    "Vape Lost Mary Triple Mango (1000)", "Vape Lost Mary Peach Ice (1000)",
+  ]);
+  assert.equal(offers[0].signals.preference, 0);
+  assert.equal(offers[1].signals.preference, 100);
+});
+
+test("product preference outranks otherwise equivalent relevant products", () => {
+  const base = {
+    provider: "ubereats", available: true, etaMinutes: 20,
+    merchant: { rating: 4.5, ratingCount: 100 }, pricing: { exact: false, total: 8 },
+  };
+  const result = rankOffers([
+    { ...base, id: "mango", signals: { relevance: 100, preference: 0, health: 0, taste: 0 } },
+    { ...base, id: "ice", signals: { relevance: 100, preference: 100, health: 0, taste: 0 } },
+  ], "vape liquid preferably ice", "value");
+  assert.equal(result.offers[0].id, "ice");
 });
 
 test("meal intent applies party size, total budget, and health signals", () => {

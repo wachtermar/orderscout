@@ -154,6 +154,188 @@ const EXPLICIT_MEAL_QUERIES = [
   ["vegetariano", /\b(?:vegetarian|vegetariano|vegetariana)\b/], ["halal", /\bhalal\b/],
 ];
 
+const PRODUCT_STOPWORDS = new Set([
+  "a", "an", "and", "are", "at", "be", "best", "below", "buy", "can", "cheap", "cheapest", "could",
+  "deliver", "delivered", "delivery", "do", "fast", "fastest", "find", "for", "from", "get", "give", "i", "in", "is", "it", "me",
+  "my", "need", "needed", "needs", "now", "of", "on", "order", "our", "please", "rated", "some",
+  "something", "that", "the", "this", "today", "tomorrow", "tonight", "under", "want", "where", "which",
+  "with", "would", "you",
+  "ahora", "algo", "barata", "barato", "buscar", "comprar", "con", "cual", "de", "del", "donde", "el",
+  "ella", "en", "entrega", "entregar", "esta", "este", "hoy", "la", "las", "lo", "los", "manana",
+  "me", "mejor", "menos", "mi", "mis", "necesito", "para", "pedir", "por", "que", "rapida", "rapido",
+  "su", "sus", "un", "una", "unas", "unos", "quiero",
+  "available", "disponible", "eat", "eats", "eur", "glovo", "just", "max", "maximum", "uber",
+]);
+
+const PRODUCT_CATEGORIES = new Set([
+  "farmacia", "pharmacy", "product", "producto", "shop", "store", "supermarket", "supermercado", "tienda",
+]);
+
+const PRODUCT_CONCEPTS = [
+  {
+    id: "vape",
+    triggers: ["vape", "vapes", "vaper", "vapers", "vapeador", "vapeadores", "e liquid", "eliquid", "e cig", "cigarrillo electronico"],
+    aliases: ["vape", "vapes", "vaper", "vapers", "vapeador", "vapeadores", "e liquid", "eliquid", "e cig", "cigarrillo electronico"],
+    genericTerms: ["liquid", "liquido", "juice"],
+    queryAliases: ["vape", "vaper"],
+  },
+  {
+    id: "battery",
+    triggers: ["battery", "batteries", "bateria", "baterias", "pila", "pilas"],
+    aliases: ["battery", "batteries", "bateria", "baterias", "pila", "pilas"],
+    genericTerms: [],
+    queryAliases: ["pilas", "baterias"],
+  },
+  {
+    id: "charger",
+    triggers: ["charger", "chargers", "cargador", "cargadores"],
+    aliases: ["charger", "chargers", "cargador", "cargadores"],
+    genericTerms: ["phone", "mobile", "telefono", "movil"],
+    queryAliases: ["cargador", "charger"],
+  },
+  {
+    id: "diaper",
+    triggers: ["diaper", "diapers", "nappy", "nappies", "panal", "panales"],
+    aliases: ["diaper", "diapers", "nappy", "nappies", "panal", "panales"],
+    genericTerms: [],
+    queryAliases: ["panales", "diapers"],
+  },
+  {
+    id: "toothpaste",
+    triggers: ["toothpaste", "dentifrico", "pasta dental"],
+    aliases: ["toothpaste", "dentifrico", "pasta dental"],
+    genericTerms: [],
+    queryAliases: ["pasta dental", "dentifrico"],
+  },
+  {
+    id: "sunscreen",
+    triggers: ["sunscreen", "sunblock", "protector solar", "crema solar"],
+    aliases: ["sunscreen", "sunblock", "protector solar", "crema solar"],
+    genericTerms: [],
+    queryAliases: ["protector solar", "sunscreen"],
+  },
+];
+
+const PRODUCT_PREFERENCES = [
+  {
+    id: "ice",
+    triggers: ["ice", "icy", "hielo", "helado", "helada", "menthol", "mentol"],
+    aliases: ["ice", "icy", "hielo", "helado", "helada", "menthol", "mentol", "frozen", "cool"],
+    queryAliases: ["ice", "hielo", "mentol"],
+  },
+];
+
+function productTokens(value) {
+  return normalizedText(value).split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+function singularToken(value) {
+  if (value.endsWith("ies") && value.length > 4) return `${value.slice(0, -3)}y`;
+  if (value.endsWith("es") && value.length > 5) return value.slice(0, -2);
+  if (value.endsWith("s") && value.length > 4) return value.slice(0, -1);
+  return value;
+}
+
+function phraseMatches(tokens, phrase) {
+  const wanted = productTokens(phrase);
+  if (!wanted.length || wanted.length > tokens.length) return false;
+  return tokens.some((_, start) => wanted.every((term, offset) => {
+    const actual = tokens[start + offset];
+    return actual !== undefined && (actual === term || singularToken(actual) === singularToken(term));
+  }));
+}
+
+function anyPhraseMatches(tokens, phrases) {
+  return phrases.some((phrase) => phraseMatches(tokens, phrase));
+}
+
+function meaningfulProductTerms(value) {
+  return productTokens(value).filter((term) => term.length > 1
+    && !PRODUCT_STOPWORDS.has(term) && !PRODUCT_CATEGORIES.has(term) && !/^\d+(?:eur)?$/.test(term));
+}
+
+function splitProductRequest(normalized) {
+  const marker = /\b(?:preferably|preferable|ideally|preferiblemente|preferible|a ser posible|if possible)\b/;
+  const marked = normalized.match(marker);
+  if (marked?.index !== undefined) {
+    return {
+      core: normalized.slice(0, marked.index),
+      preference: normalized.slice(marked.index + marked[0].length),
+    };
+  }
+  const connector = normalized.match(/\b(?:with|con)\b/);
+  if (connector?.index !== undefined && meaningfulProductTerms(normalized.slice(0, connector.index)).length) {
+    return {
+      core: normalized.slice(0, connector.index),
+      preference: normalized.slice(connector.index + connector[0].length),
+    };
+  }
+  return { core: normalized, preference: "" };
+}
+
+export function productIntentSpec(text) {
+  const intent = typeof text === "string" ? parseIntent(text) : text;
+  const split = splitProductRequest(intent.normalized);
+  let coreTerms = meaningfulProductTerms(split.core);
+  let preferenceTerms = meaningfulProductTerms(split.preference);
+  const coreTokens = productTokens(split.core);
+  const concept = PRODUCT_CONCEPTS.find((candidate) => anyPhraseMatches(coreTokens, candidate.triggers)) ?? null;
+  const preferenceConcepts = PRODUCT_PREFERENCES.filter((candidate) => anyPhraseMatches(
+    productTokens(split.preference || intent.normalized), candidate.triggers,
+  ));
+  if (concept) {
+    const conceptTerms = new Set([...concept.triggers, ...concept.genericTerms].flatMap(productTokens));
+    coreTerms = coreTerms.filter((term) => !conceptTerms.has(term));
+  }
+  if (preferenceConcepts.length) {
+    const knownPreferenceTerms = new Set(preferenceConcepts.flatMap((candidate) => candidate.triggers).flatMap(productTokens));
+    coreTerms = coreTerms.filter((term) => !knownPreferenceTerms.has(term));
+    preferenceTerms = preferenceTerms.filter((term) => !knownPreferenceTerms.has(term));
+  }
+  return {
+    coreText: meaningfulProductTerms(split.core).join(" "),
+    preferenceText: meaningfulProductTerms(split.preference).join(" "),
+    coreTerms,
+    preferenceTerms,
+    concept,
+    preferenceConcepts,
+  };
+}
+
+function productInputText(input) {
+  return [
+    input.item?.name, input.itemName, input.item?.description, input.item?.category, input.category,
+    input.merchant?.name, input.merchantName, input.merchant?.categories, input.merchant?.cuisines,
+  ].flatMap((value) => Array.isArray(value) ? value : [value]).filter(Boolean).join(" ");
+}
+
+export function productRelevance(text, input) {
+  const spec = text?.coreTerms ? text : productIntentSpec(text);
+  const tokens = productTokens(productInputText(input));
+  const conceptMatched = spec.concept ? anyPhraseMatches(tokens, spec.concept.aliases) : false;
+  const matchedCore = spec.coreTerms.filter((term) => phraseMatches(tokens, term));
+  const minimumCoreMatches = spec.coreTerms.length <= 2 ? spec.coreTerms.length : Math.ceil(spec.coreTerms.length * 0.6);
+  const relevant = spec.concept
+    ? conceptMatched && matchedCore.length === spec.coreTerms.length
+    : spec.coreTerms.length > 0 && matchedCore.length >= minimumCoreMatches;
+  if (!relevant) return { relevant: false, relevance: 0, preference: 0, matchedCore: [], matchedPreference: [] };
+  const matchedPreference = [
+    ...spec.preferenceConcepts.filter((candidate) => anyPhraseMatches(tokens, candidate.aliases)).map((candidate) => candidate.id),
+    ...spec.preferenceTerms.filter((term) => phraseMatches(tokens, term)),
+  ];
+  const requestedPreferences = spec.preferenceConcepts.length + spec.preferenceTerms.length;
+  const preference = requestedPreferences ? Math.round((new Set(matchedPreference).size / requestedPreferences) * 100) : 0;
+  const coreDenominator = Math.max(1, spec.coreTerms.length + (spec.concept ? 1 : 0));
+  const relevance = Math.round(((matchedCore.length + (conceptMatched ? 1 : 0)) / coreDenominator) * 100);
+  return {
+    relevant: true,
+    relevance,
+    preference,
+    matchedCore: [...(conceptMatched ? [spec.concept.id] : []), ...matchedCore],
+    matchedPreference: [...new Set(matchedPreference)],
+  };
+}
+
 export function providerSearchQueries(text) {
   const intent = typeof text === "string" ? parseIntent(text) : text;
   if (intent.kind === "water") return ["agua"];
@@ -171,20 +353,20 @@ export function providerSearchQueries(text) {
         : intent.dietary.halal ? ["halal"] : [];
     return [...new Set([...explicit, ...dietary, ...healthy, ...(explicit.length || healthy.length || dietary.length ? [] : ["comida"])])].slice(0, 4);
   }
-  const ignored = new Set([
-    "find", "get", "buy", "order", "deliver", "delivery", "cheap", "cheapest", "fast", "fastest", "best", "rated",
-    "buscar", "comprar", "pedir", "entregar", "entrega", "barato", "barata", "mejor", "rapido", "rapida",
-    "under", "below", "hasta", "menos", "para", "with", "con", "from", "the", "and", "que", "eur", "max",
-    "just", "eat", "glovo", "uber", "eats", "now", "ahora", "please", "quiero", "want",
-    "which", "where", "can", "could", "need", "needs", "needed", "me", "my", "our", "for", "this", "that",
-    "today", "tonight", "manana", "tomorrow", "available", "disponible", "quieres", "necesito",
-  ]);
-  let terms = intent.normalized.split(/[^a-z0-9áéíóúüñ]+/)
-    .filter((term) => term.length > 1 && !ignored.has(term) && !/^\d/.test(term));
-  const categories = new Set(["pharmacy", "farmacia", "supermarket", "supermercado", "store", "tienda", "shop", "product", "producto"]);
-  const specific = terms.filter((term) => !categories.has(term));
-  if (specific.length) terms = specific;
-  return [terms.slice(0, 5).join(" ") || intent.normalized];
+  const spec = productIntentSpec(intent);
+  const core = spec.coreText || spec.coreTerms.join(" ") || intent.normalized;
+  const preference = spec.preferenceText;
+  const conceptQueries = spec.concept?.queryAliases ?? [];
+  const preferenceQueries = spec.preferenceConcepts.flatMap((entry) => entry.queryAliases);
+  const primaryAnchor = conceptQueries[0] ?? core;
+  const qualifier = spec.coreTerms.join(" ");
+  return [...new Set([
+    preference ? `${core} ${preference}` : null,
+    ...(preferenceQueries.length ? preferenceQueries.slice(0, 2).map((term) => `${primaryAnchor} ${term}`) : []),
+    core,
+    ...(qualifier ? conceptQueries.map((query) => `${query} ${qualifier}`) : []),
+    ...conceptQueries,
+  ].filter(Boolean).map((query) => query.trim()).filter(Boolean))].slice(0, 6);
 }
 
 export function parsePackVolume(value) {
@@ -358,19 +540,15 @@ function mealCandidates(restaurant, menuData, menu, intent) {
 }
 
 function productCandidates(restaurant, menuData, menu, intent) {
-  const ignored = new Set([
-    "find", "get", "buy", "order", "deliver", "delivery", "cheap", "cheapest", "fast", "fastest", "best", "rated",
-    "buscar", "comprar", "pedir", "entregar", "entrega", "barato", "barata", "mejor", "rapido", "rapida",
-    "under", "below", "hasta", "menos", "para", "with", "con", "from", "the", "and", "que", "mis", "apps",
-    "just", "eat", "glovo", "uber", "eats", "eur", "max",
-  ]);
-  const terms = intent.normalized.split(/[^a-z0-9áéíóúüñ]+/).filter((term) => term.length > 2 && !ignored.has(term) && !/^\d/.test(term));
+  const spec = productIntentSpec(intent);
   const candidates = [];
   for (const category of menu.categories) {
     for (const item of category.items) {
-      const text = normalizedText(`${category.name} ${item.name} ${item.description ?? ""}`);
-      const matched = terms.filter((term) => text.includes(term));
-      if (terms.length && !matched.length) continue;
+      const fit = productRelevance(spec, {
+        merchant: { name: restaurant.name, cuisines: restaurant.cuisines?.map((entry) => entry.name) },
+        item: { name: item.name, description: item.description, category: category.name },
+      });
+      if (!fit.relevant) continue;
       for (const variation of item.variations) {
         const price = Number(variation.price);
         if (!Number.isFinite(price) || (intent.budget !== null && price > intent.budget)) continue;
@@ -382,10 +560,15 @@ function productCandidates(restaurant, menuData, menu, intent) {
           itemTotal: price,
           estimatedDeliveredTotal: null,
           ranking: {
-            score: Math.round((merchantScore + valueScore) * 10) / 10,
+            score: Math.round((merchantScore + valueScore + fit.relevance + fit.preference * 2) * 10) / 10,
             tasteScore: merchantScore,
+            relevanceScore: fit.relevance,
+            preferenceScore: fit.preference,
+            matchedCore: fit.matchedCore,
+            matchedPreference: fit.matchedPreference,
             reasons: [
-              ...(matched.length ? [`matched: ${matched.slice(0, 4).join(", ")}`] : []),
+              ...(fit.matchedCore.length ? [`matched product: ${fit.matchedCore.slice(0, 4).join(", ")}`] : []),
+              ...(fit.matchedPreference.length ? [`matched preference: ${fit.matchedPreference.slice(0, 4).join(", ")}`] : []),
               restaurant.rating?.starRating ? `merchant rating ${restaurant.rating.starRating}/5` : "merchant is unrated",
               `item price €${price.toFixed(2)} before delivery and service fees`,
             ],
@@ -427,7 +610,7 @@ export async function recommend(location, text, options = {}) {
     vertical,
     token: options.token,
   }, options.fetchImpl);
-  const storeLimit = Number(options.stores ?? (intent.kind === "meal" ? 12 : 20));
+  const storeLimit = Number(options.stores ?? (intent.kind === "meal" ? 12 : intent.kind === "product" ? 30 : 20));
   if (!Number.isInteger(storeLimit) || storeLimit < 1 || storeLimit > 50) {
     throw new CliError("--stores must be an integer between 1 and 50");
   }
@@ -436,6 +619,22 @@ export async function recommend(location, text, options = {}) {
   const openRestaurants = eligibleRestaurants.filter((restaurant) => restaurant.isOpenNowForDelivery);
   const shouldRequireOpen = options.open || (intent.deliveryTime === "now" && !options.includeClosed);
   let restaurants = shouldRequireOpen && openRestaurants.length ? openRestaurants : eligibleRestaurants;
+  if (intent.kind === "product") {
+    const spec = productIntentSpec(intent);
+    const merchantFit = (restaurant) => productRelevance(spec, {
+      item: { name: restaurant.name, category: restaurant.cuisines?.map((entry) => entry.name) },
+      merchant: { name: restaurant.name, cuisines: restaurant.cuisines?.map((entry) => entry.name) },
+    }).relevant;
+    const retail = (restaurant) => /\b(tienda|store|shop|supermerc|alimentacion|convenience|farmacia|pharmacy|retail|otros tipos)\b/
+      .test(normalizedText(`${restaurant.name} ${restaurant.cuisines?.map((entry) => entry.name).join(" ")}`));
+    const directlyRelevant = eligibleRestaurants.filter((restaurant) => merchantFit(restaurant)
+      && (!options.open || restaurant.isOpenNowForDelivery));
+    restaurants = [...new Map([
+      ...directlyRelevant,
+      ...restaurants.filter(retail),
+      ...restaurants,
+    ].map((restaurant) => [restaurant.id, restaurant])).values()];
+  }
   restaurants = restaurants.slice(0, storeLimit);
   const scanned = await mapConcurrent(restaurants, Number(options.concurrency ?? 4), async (restaurant) => {
     const menuData = await (options.fetchMenuImpl ?? fetchMenu)(restaurant.uniqueName, options.fetchImpl);
@@ -493,7 +692,7 @@ export async function recommend(location, text, options = {}) {
       discoveredStores: discovery.restaurants?.length ?? 0,
       scannedStores: restaurants.length,
       failedMenus: scanned.filter((entry) => entry?.error).length,
-      availability: shouldRequireOpen && openRestaurants.length
+      availability: restaurants.every((restaurant) => restaurant.isOpenNowForDelivery)
         ? "open for delivery now"
         : "includes preorder or currently closed stores",
     },

@@ -6,7 +6,9 @@ import {
   providerPaths, publicAccountStatus, searchId,
 } from "./providers.js";
 import { normalizeOffer, parseObjective, rankOffers } from "./ranking.js";
-import { isHealthyBreakfastItem, isPreparedBreakfastItem, parseIntent, parsePackVolume } from "./recommend.js";
+import {
+  isHealthyBreakfastItem, isPreparedBreakfastItem, parseIntent, parsePackVolume, productIntentSpec, productRelevance,
+} from "./recommend.js";
 
 const searchPath = (id) => join(providerPaths.searchesDirectory, `${validateId(id)}.json`);
 
@@ -149,7 +151,28 @@ export function applyIntent(inputs, text) {
     });
     return (intent.people ?? 1) > 1 ? composeMealBundles(eligible, intent) : eligible;
   }
-  if (intent.kind !== "water") return inputs;
+  if (intent.kind === "product") {
+    const spec = productIntentSpec(intent);
+    return inputs.flatMap((input) => {
+      const fit = productRelevance(spec, input);
+      if (!fit.relevant) return [];
+      const quantity = Math.max(1, Number(input.quantity ?? 1));
+      const unitPrice = Number(input.item?.unitPrice ?? input.unitPrice);
+      const subtotal = Number.isFinite(unitPrice) ? Math.round(unitPrice * quantity * 100) / 100 : null;
+      if (intent.budget !== null && subtotal !== null && subtotal > intent.budget) return [];
+      return [{
+        ...input,
+        pricing: { ...input.pricing, subtotal, total: input.pricing?.exact ? input.pricing?.total ?? null : null },
+        signals: {
+          ...input.signals,
+          relevance: fit.relevance,
+          preference: fit.preference,
+          matchedCore: fit.matchedCore,
+          matchedPreference: fit.matchedPreference,
+        },
+      }];
+    });
+  }
   return inputs.flatMap((input) => {
     const itemText = `${input.item?.name ?? input.itemName ?? ""} ${input.item?.description ?? ""}`;
     const normalized = itemText.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
@@ -362,6 +385,8 @@ export function resultsFor(search) {
   const completedProviders = statuses.filter(([, status]) => status.state === "complete" || status.state === "partial").map(([provider]) => provider);
   const failedProviders = statuses.filter(([, status]) => status.state === "error").map(([provider]) => provider);
   const matchedProviders = [...new Set(search.offers.map((offer) => offer.provider))];
+  const availableProviders = [...new Set(search.offers.filter((offer) => offer.available).map((offer) => offer.provider))];
+  const unavailableOnlyProviders = matchedProviders.filter((provider) => !availableProviders.includes(provider));
   const coverage = {
     mode: search.orchestration ?? "legacy",
     configuredProviders: search.providers,
@@ -369,6 +394,8 @@ export function resultsFor(search) {
     completedProviders,
     failedProviders,
     matchedProviders,
+    availableProviders,
+    unavailableOnlyProviders,
     allConfiguredAttempted: attemptedProviders.length === search.providers.length,
     allConfiguredCompleted: completedProviders.length === search.providers.length,
   };

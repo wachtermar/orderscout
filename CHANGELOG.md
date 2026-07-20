@@ -2,6 +2,13 @@
 
 This project follows Semantic Versioning. It is currently pre-1.0; command and normalized response changes may occur between minor releases and will be listed here.
 
+## 0.1.5 - 2026-07-20
+
+- Split arbitrary-product requests into required product concepts and optional preferences, then generate several bounded provider queries so decisive terms are not truncated.
+- Replace substring matching with whole-token, bilingual concept matching and filter noisy Just Eat, Glovo, and Uber Eats responses through the same relevance gate.
+- Prioritize product-relevant and retail merchants during Just Eat menu discovery, including a directly matching closed merchant beyond the normal open-store window.
+- Expose available and unavailable-only provider coverage separately and rank preference matches only after product relevance is established.
+
 ## 0.1.4 - 2026-07-20
 
 - Import Glovo's long-lived web refresh credential and stable device identity from the verified native Chrome profile.

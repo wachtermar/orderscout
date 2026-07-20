@@ -72,7 +72,7 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_search_begin",
-    description: "Directly and concurrently search every provider enabled in OrderScout account settings—never a caller-selected subset—then rank any deliverable item. Natural-language dates such as tomorrow at 10am become a timezone-aware requestedAt timestamp and meal occasions such as breakfast constrain both provider queries and dishes. Deals and memberships are retained. Multi-person meals contain distinct dish lines or a genuine sharing item. It never creates a basket.",
+    description: "Directly and concurrently search every provider enabled in OrderScout account settings—never a caller-selected subset—then rank any deliverable item. Product requests are expanded into bounded provider queries, filtered by whole product concepts instead of substrings, and ranked by optional preferences; noisy provider results never qualify on a preference alone. Natural-language dates such as tomorrow at 10am become a timezone-aware requestedAt timestamp and meal occasions such as breakfast constrain both provider queries and dishes. Deals and memberships are retained. Multi-person meals contain distinct dish lines or a genuine sharing item. It never creates a basket.",
     inputSchema: objectSchema({
       intent: string("Complete natural-language request including quantity, budget, dietary needs, and cheapest/fastest/best preference."),
       objective: { type: "string", enum: ["cheapest", "fastest", "best", "value"] },
@@ -174,7 +174,7 @@ export function placementEnvironment(name, input = {}, base = {}) {
 
 export async function handleOrderScoutMcpMessage(message) {
   const id = message.id ?? null;
-  if (message.method === "initialize") return { jsonrpc: "2.0", id, result: { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "orderscout", version: "0.1.4" } } };
+  if (message.method === "initialize") return { jsonrpc: "2.0", id, result: { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "orderscout", version: "0.1.5" } } };
   if (message.method === "notifications/initialized") return null;
   if (message.method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: ORDERSCOUT_MCP_TOOLS.map(({ command, ...tool }) => tool) } };
   if (message.method === "tools/call") {

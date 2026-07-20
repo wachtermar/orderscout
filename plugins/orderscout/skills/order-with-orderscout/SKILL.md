@@ -26,6 +26,8 @@ Never ask for account credentials in chat. Never expose saved session material.
 3. Inspect `coverage`. Do not present a cross-provider result until `allConfiguredAttempted` is true. State any provider in `failedProviders`; never silently omit it or replace it with browser search.
 4. Call `orderscout_results` and always show Just Eat, Glovo, and Uber Eats status explicitly: matched, no suitable match, failed, disabled, or not authenticated. Never describe “all apps” while omitting a configured provider.
 
+For arbitrary products, pass the user's complete wording unchanged. The CLI separates required product concepts from optional preferences, expands bounded provider queries, and filters every provider through one whole-token/concept relevance gate. Trust this normalized filtering; never supplement it with browser search. Treat `coverage.availableProviders` as currently orderable matches and `coverage.unavailableOnlyProviders` as relevant catalog matches that cannot be ordered now. A preference match never proves product relevance. State the actual product form shown by the offer—for example, do not call a disposable vape “e-liquid.”
+
 Preserve quantity, budget, timing, diet, taste, health, and still/sparkling constraints. For water, parse the entire pack expression and meet or exceed requested litres. For meals, describe health and taste as ranking signals, not medical facts.
 
 For two or more people, prefer offers with `composition.kind: distinct-dishes` and show every line. A valid result contains different mains with quantity 1 each, or one item explicitly sold for that party size. Never silently turn a single ordinary dish into quantity N. Do not present sides, sauces, drinks, or appetizers as a complete meal. If no complete composition is available from a merchant, omit it instead of improvising.
@@ -82,4 +84,4 @@ Never retry an ambiguous submit. Check official active orders instead. If the us
 
 ## Safety
 
-Do not infer allergen safety from menu text. If an allergy is mentioned, stop basket work until the merchant confirms it. Treat pharmacy results as availability, not medical advice. Do not bypass CAPTCHA, bot protection, rate limits, account controls, or provider security checks.
+Do not infer allergen safety from menu text. If an allergy is mentioned, stop basket work until the merchant confirms it. Treat pharmacy results as availability, not medical advice. For age- or identity-restricted goods, do not infer eligibility, bypass provider checks, or proceed when official verification fails. Do not bypass CAPTCHA, bot protection, rate limits, account controls, or provider security checks.

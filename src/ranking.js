@@ -111,6 +111,7 @@ export function normalizeOffer(provider, input, context = {}) {
       id: input.item?.id ?? null,
       name: itemName,
       description: input.item?.description ?? null,
+      category: input.item?.category ?? input.category ?? null,
       unitPrice: money(unitPrice),
     },
     quantity,
@@ -139,6 +140,10 @@ export function normalizeOffer(provider, input, context = {}) {
     signals: {
       health: numberOrNull(input.signals?.health) ?? 0,
       taste: numberOrNull(input.signals?.taste) ?? 0,
+      relevance: numberOrNull(input.signals?.relevance) ?? 0,
+      preference: numberOrNull(input.signals?.preference) ?? 0,
+      matchedCore: stringList(input.signals?.matchedCore, false),
+      matchedPreference: stringList(input.signals?.matchedPreference, false),
     },
     collectedAt: input.collectedAt ?? new Date().toISOString(),
   };
@@ -171,17 +176,19 @@ function scoreOffer(offer, objective, parsed) {
   const eta = offer.etaMinutes ?? 120;
   const rating = ratingScore(offer);
   const healthTaste = offer.signals.health * 0.7 + offer.signals.taste * 0.6;
+  const productFit = parsed.kind === "product"
+    ? offer.signals.relevance * 0.8 + offer.signals.preference * 1.5 : 0;
   const dealSignal = Math.min(12, Number(offer.pricing.itemSavings ?? 0) * 2)
     + (offer.promotion?.types?.length ? 2 : 0)
     + (offer.membership?.active && offer.membership?.eligible ? 2 : 0);
   if (!offer.available) return -1_000_000;
-  if (objective === "cheapest") return -price * 20 - eta * 0.08 + rating * 0.08;
-  if (objective === "fastest") return -eta * 8 - price * 0.35 + rating * 0.08;
+  if (objective === "cheapest") return -price * 20 - eta * 0.08 + rating * 0.08 + productFit * 0.25;
+  if (objective === "fastest") return -eta * 8 - price * 0.35 + rating * 0.08 + productFit * 0.25;
   if (objective === "best") {
     const ratingWeight = /\b(best[ -]rated|highest[ -]rated|mejor valorad)\b/.test(parsed.normalized) ? 20 : 2;
-    return rating * ratingWeight + healthTaste + dealSignal * 0.35 - price * 0.8 - eta * 0.12;
+    return rating * ratingWeight + healthTaste + productFit + dealSignal * 0.35 - price * 0.8 - eta * 0.12;
   }
-  return rating + healthTaste + dealSignal - price * 2.4 - eta * 0.45;
+  return rating + healthTaste + productFit + dealSignal - price * 2.4 - eta * 0.45;
 }
 
 export function rankOffers(offers, intent, objective = parseObjective(intent), options = {}) {
@@ -217,6 +224,7 @@ export function rankOffers(offers, intent, objective = parseObjective(intent), o
     if ((offer.promotion?.types?.length || offer.promotion?.descriptions?.length)
       && !offer.ranking.badges.some((badge) => /listed .*deal|listed free delivery/.test(badge))) offer.ranking.badges.push("listed provider deal—validate checkout");
     if (offer.membership?.active && offer.membership?.eligible) offer.ranking.badges.push(`${offer.membership.name ?? "membership"} eligible`);
+    if (offer.signals.matchedPreference?.length) offer.ranking.badges.push(`matches preference: ${offer.signals.matchedPreference.join(", ")}`);
     if (!offer.pricing.exact) offer.ranking.badges.push("estimate—validate checkout");
     if (parsed.deliveryTime === "scheduled" && !offer.ranking.scheduleVerified) offer.ranking.badges.push("requested time not verified");
   }

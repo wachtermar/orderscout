@@ -96,6 +96,7 @@ function justEatOffers(result) {
       id: candidate.item?.variationId ?? candidate.item?.id,
       name: candidate.item?.name,
       description: candidate.item?.description,
+      category: candidate.item?.category,
       unitPrice: candidate.item?.unitPrice,
     },
     quantity: candidate.quantity,
@@ -120,6 +121,10 @@ function justEatOffers(result) {
     signals: {
       health: candidate.ranking?.healthScore,
       taste: candidate.ranking?.tasteScore,
+      relevance: candidate.ranking?.relevanceScore,
+      preference: candidate.ranking?.preferenceScore,
+      matchedCore: candidate.ranking?.matchedCore,
+      matchedPreference: candidate.ranking?.matchedPreference,
     },
     url: candidate.restaurant?.slug ? `https://www.just-eat.es/restaurants-${candidate.restaurant.slug}/menu` : null,
     source: { planId: result.planId, candidateIndex: index, addressIndex: result.location?.addressIndex ?? 0, adapter: "justeat-api" },
