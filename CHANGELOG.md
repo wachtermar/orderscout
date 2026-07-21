@@ -2,6 +2,12 @@
 
 This project follows Semantic Versioning. It is currently pre-1.0; command and normalized response changes may occur between minor releases and will be listed here.
 
+## 0.1.17 - 2026-07-21
+
+- Replace Uber Eats' 12–48-query synonym fan-out with a rate-aware representative plan that keeps at least one focused query per shopping line.
+- Reduce the default Uber full-menu expansion from 60 stores to an adaptive 12–24, run search queries sequentially, and stagger menu requests instead of bursting them four at a time.
+- Expose the selected query budget and deferred vocabulary in provider metadata, with deterministic coverage tests for two-line and six-line shopping requests.
+
 ## 0.1.16 - 2026-07-21
 
 - Reject immediate-delivery candidates that provider discovery already marks unavailable instead of letting the model select a closed merchant.

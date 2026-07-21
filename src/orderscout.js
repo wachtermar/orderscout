@@ -116,6 +116,37 @@ function mergedQueries(primary, fallback, limit = 8) {
     .map((entry) => String(entry ?? "").trim()).filter(Boolean))].slice(0, limit);
 }
 
+export function uberEatsRetrievalQueries(flags = {}, fallbackQueries = []) {
+  const discoveryQueries = flags.retrievalPlan?.discovery?.queries?.length
+    ? flags.retrievalPlan.discovery.queries
+    : mergedQueries(flags.discoveryQueries, fallbackQueries, 24);
+  const catalogQueries = flags.retrievalPlan?.catalog?.queries?.length
+    ? flags.retrievalPlan.catalog.queries
+    : mergedQueries(flags.catalogQueries, fallbackQueries, 24);
+  const shoppingItems = Array.isArray(flags.shoppingItems) ? flags.shoppingItems : [];
+  const representativeQueries = [
+    ...shoppingItems.map((item) => item.discoveryQueries?.[0]),
+    ...shoppingItems.map((item) => item.catalogQueries?.[0]),
+  ];
+  const maximumQueries = shoppingItems.length
+    ? Math.min(14, Math.max(4, shoppingItems.length + 2))
+    : 6;
+  const queries = mergedQueries(representativeQueries, [...discoveryQueries, ...catalogQueries], maximumQueries);
+  const vocabulary = mergedQueries([
+    ...discoveryQueries,
+    ...catalogQueries,
+    ...shoppingItems.flatMap((item) => item.discoveryQueries ?? []),
+    ...shoppingItems.flatMap((item) => item.catalogQueries ?? []),
+  ], [], 96);
+  return {
+    queries,
+    discoveryQueries,
+    catalogQueries,
+    maximumQueries,
+    omittedQueries: vocabulary.filter((query) => !queries.includes(query)).length,
+  };
+}
+
 export function assertAllergenReview(search, flags) {
   const intent = search.parsedIntent ?? parseIntent(search.intent);
   if (intent.allergyMentioned && booleanFlag(flags, "allergen-reviewed") !== true) {
@@ -663,24 +694,28 @@ async function collectGlovo(intent, flags) {
 
 async function collectUberEats(intent, flags) {
   const parsed = parseIntent(intent);
-  const discoveryQueries = flags.retrievalPlan?.discovery?.queries?.length
-    ? flags.retrievalPlan.discovery.queries
-    : mergedQueries(flags.discoveryQueries, providerSearchQueries(parsed), 24);
-  const catalogQueries = flags.retrievalPlan?.catalog?.queries?.length
-    ? flags.retrievalPlan.catalog.queries : mergedQueries(flags.catalogQueries, providerSearchQueries(parsed), 24);
-  const queries = mergedQueries(discoveryQueries, catalogQueries, 48);
+  const queryPlan = uberEatsRetrievalQueries(flags, providerSearchQueries(parsed));
+  const { queries, discoveryQueries, catalogQueries } = queryPlan;
+  const shoppingItemCount = Array.isArray(flags.shoppingItems) ? flags.shoppingItems.length : 0;
+  const requestedStoreLimit = Number(flags.stores);
+  const storeLimit = Number.isFinite(requestedStoreLimit) && requestedStoreLimit > 0
+    ? Math.max(1, Math.min(24, requestedStoreLimit))
+    : Math.min(24, Math.max(12, shoppingItemCount * 3));
   const menuCache = new Map();
   const storeCache = new Map();
-  const results = await settleConcurrent(queries, 2, (query) => searchUberEats(query, {
-    limit: flags.limit,
-    scheduledAt: parsed.scheduledAt,
-    timeZone: parsed.timeZone,
-    storeLimit: Math.max(1, Math.min(60, Number(flags.stores ?? 60))),
-    concurrency: 2,
-    expandStores: false,
-    menuCache,
-    storeCache,
-  }));
+  const results = await settleConcurrent(queries, 1, async (query, index) => {
+    if (index > 0) await new Promise((resolveDelay) => setTimeout(resolveDelay, 350));
+    return searchUberEats(query, {
+      limit: flags.limit,
+      scheduledAt: parsed.scheduledAt,
+      timeZone: parsed.timeZone,
+      storeLimit,
+      concurrency: 1,
+      expandStores: false,
+      menuCache,
+      storeCache,
+    });
+  });
   const fulfilled = results.filter((result) => result.status === "fulfilled");
   if (!fulfilled.length) throw results[0].reason;
   const failures = results.filter((result) => result.status === "rejected");
@@ -693,8 +728,9 @@ async function collectUberEats(intent, flags) {
         .map((offer) => offer.merchant?.id).filter(Boolean);
       crossCatalog = await expandUberEatsCatalogs(storeCache.values(), [""], {
         menuCache,
-        storeLimit: Math.max(1, Math.min(60, Number(flags.stores ?? 60))),
-        concurrency: 4,
+        storeLimit,
+        concurrency: 2,
+        requestDelayMs: 250,
         scheduledAt: parsed.scheduledAt,
         timeZone: parsed.timeZone,
         priorityStoreIds,
@@ -712,8 +748,10 @@ async function collectUberEats(intent, flags) {
   return {
     offers,
     providerMeta: {
-      strategy: "complete-planned-search-and-prioritized-full-menu-expansion",
+      strategy: "rate-aware-representative-search-and-prioritized-full-menu-expansion",
       queries,
+      queryBudget: queryPlan.maximumQueries,
+      omittedQueries: queryPlan.omittedQueries,
       completedQueries: fulfilled.length,
       failedQueries: failures.length,
       rateLimitedQueries: failures.filter((result) => result.reason?.code === "RATE_LIMITED").length
@@ -881,7 +919,7 @@ export async function runOrderScout(argv) {
     return writeOutput({
       name: "OrderScout",
       version: packageJson.version,
-      workflowContract: "llm-comparison-v6",
+      workflowContract: "llm-comparison-v7",
       requiredTools: [
         "orderscout_search_begin", "orderscout_candidates", "orderscout_record_external_evidence", "orderscout_select_candidates",
         "orderscout_review_provider", "orderscout_quote_comparison", "orderscout_results",

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   assertAllergenReview, checkoutFulfilment, completedSearchResponse, justEatLineModifierSelections,
-  providerDiverseOffers, runConcurrentProviderTasks,
+  providerDiverseOffers, runConcurrentProviderTasks, uberEatsRetrievalQueries,
 } from "../src/orderscout.js";
 import {
   applyIntent, buildLlmSelection, candidatePageForSearch, normalizeExternalEvidence, normalizeExternalResearchPlan,
@@ -26,6 +26,32 @@ test("provider tasks start concurrently and preserve provider-labelled outcomes"
   const outcomes = await pending;
   assert.deepEqual(outcomes.map((outcome) => outcome.provider), ["justeat", "glovo", "ubereats"]);
   assert.deepEqual(outcomes.map((outcome) => outcome.value[0]), ["justeat-offer", "glovo-offer", "ubereats-offer"]);
+});
+
+test("Uber Eats retrieval uses one representative query per shopping line instead of the full Cartesian vocabulary", () => {
+  const plan = uberEatsRetrievalQueries({
+    discoveryQueries: ["agua", "bebidas", "snacks", "dulces", "supermercado", "tienda"],
+    catalogQueries: ["agua", "agua mineral", "chocolate", "galleta", "muffin", "dulce"],
+    shoppingItems: [
+      { discoveryQueries: ["agua", "bebidas", "supermercado"], catalogQueries: ["agua", "agua mineral", "bebida fría"] },
+      { discoveryQueries: ["snacks", "dulces", "tienda"], catalogQueries: ["chocolate", "galleta", "muffin", "dulce"] },
+    ],
+  });
+  assert.deepEqual(plan.queries, ["agua", "snacks", "chocolate", "bebidas"]);
+  assert.equal(plan.maximumQueries, 4);
+  assert.equal(plan.omittedQueries, 8);
+});
+
+test("Uber Eats retrieval preserves at least one focused query for every line in larger shopping lists", () => {
+  const itemNames = ["huevos", "leche de avena", "pan", "platanos", "tomates", "pechuga de pollo"];
+  const plan = uberEatsRetrievalQueries({
+    discoveryQueries: ["supermercado", "groceries", "alimentacion"],
+    catalogQueries: itemNames,
+    shoppingItems: itemNames.map((name) => ({ discoveryQueries: ["supermercado"], catalogQueries: [name] })),
+  });
+  assert.equal(plan.maximumQueries, 8);
+  assert.ok(itemNames.every((name) => plan.queries.includes(name)));
+  assert.ok(plan.queries.length <= 8);
 });
 
 test("checkout-verified fulfilment overrides stale search and basket state", () => {
