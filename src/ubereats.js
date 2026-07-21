@@ -393,7 +393,7 @@ async function mapConcurrentOutcomes(values, concurrency, mapper) {
   async function worker() {
     while (index < values.length) {
       const current = index++;
-      try { results[current] = { status: "fulfilled", value: await mapper(values[current]) }; }
+      try { results[current] = { status: "fulfilled", value: await mapper(values[current], current) }; }
       catch (reason) { results[current] = { status: "rejected", reason }; }
     }
   }
@@ -413,7 +413,11 @@ export async function expandUberEatsCatalogs(stores, queries, options = {}) {
       || Number(right.queryHits ?? 0) - Number(left.queryHits ?? 0)
       || Number(right.rating ?? 0) - Number(left.rating ?? 0))
     .slice(0, Math.max(1, Number(options.storeLimit ?? 3)));
-  const outcomes = await mapConcurrentOutcomes(selected, Number(options.concurrency ?? 2), async (store) => {
+  const outcomes = await mapConcurrentOutcomes(selected, Number(options.concurrency ?? 2), async (store, index) => {
+    const requestDelayMs = Math.max(0, Number(options.requestDelayMs ?? 0));
+    if (requestDelayMs > 0 && index > 0) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, Math.min(2_000, index * requestDelayMs)));
+    }
     let menuPromise = options.menuCache?.get(store.id);
     if (!menuPromise) {
       menuPromise = uberEatsMenu(store.id, options);
