@@ -49,6 +49,8 @@ The current plugin is local to ChatGPT Work/Codex on desktop. It is not an ordin
 
 Every provider enabled for your household is searched concurrently on every request. Provider selection lives in account settings, so an agent cannot quietly search a convenient subset. For example, if you enable Just Eat and Uber Eats with Uber One, both are always attempted and Glovo is excluded. Failed sessions are shown in provider coverage instead of being silently omitted.
 
+Just Eat saved addresses may include apartment, building, or door details that its official address autocomplete does not accept. OrderScout first tries the complete saved address and, only when Just Eat rejects that lookup, retries the same official endpoint with street, postcode, and city. This preserves the provider-resolved delivery coordinates without exposing the address or substituting a third-party geocoder.
+
 Glovo renews and persists its own session automatically before its short-lived access token expires. Uber Eats, and a legacy Glovo session imported before this support existed, make one safe automatic attempt to refresh from a verified native Chrome profile. A new Glovo login is required only when the provider revokes or expires the long-lived refresh credential. If a provider still cannot be verified, it remains an explicit failure; OrderScout never falls back to browser search.
 
 | Goal | How it is ranked |
