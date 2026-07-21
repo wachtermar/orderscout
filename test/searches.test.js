@@ -5,7 +5,7 @@ import {
   providerDiverseOffers, runConcurrentProviderTasks, shouldExpandGlovoRestrictedCatalog, uberEatsRetrievalQueries,
 } from "../src/orderscout.js";
 import {
-  applyIntent, buildLlmSelection, candidatePageForSearch, normalizeExternalEvidence, normalizeExternalResearchPlan,
+  applyIntent, buildLlmSelection, candidateInspectionForSearch, candidatePageForSearch, normalizeExternalEvidence, normalizeExternalResearchPlan,
   offerWithRecordedQuote, providerRoutes, resultsFor, reusableCompletedSearch, searchRequestFingerprint, semanticInputsForSearch,
 } from "../src/searches.js";
 import { defaultAccounts, publicAccountStatus } from "../src/providers.js";
@@ -262,6 +262,38 @@ test("LLM-mode retrieval never requires one product to satisfy every shopping li
   assert.equal(selection.composition.kind, "llm-shopping-list");
 });
 
+test("batched candidate inspection groups lexical aliases without making semantic choices", () => {
+  const candidates = [
+    normalizeOffer("glovo", {
+      merchant: { id: "dia", name: "Supermercado DIA", rating: 4.7 },
+      item: { id: "pepper", name: "Pimiento Verde Unidad", unitPrice: 0.55 },
+      pricing: {}, source: { catalogQueriesMatched: ["pimiento"] },
+    }),
+    normalizeOffer("glovo", {
+      merchant: { id: "dia", name: "Supermercado DIA", rating: 4.7 },
+      item: { id: "mint", name: "Hierbabuena Fresca", description: "Manojo", unitPrice: 1.2 },
+      pricing: {}, source: { catalogQueriesMatched: ["hierbabuena"] },
+    }),
+    normalizeOffer("ubereats", {
+      merchant: { id: "other", name: "Other Market" },
+      item: { id: "pepper", name: "Pimiento Verde", unitPrice: 0.7 }, pricing: {},
+    }),
+  ];
+  const search = {
+    id: "f".repeat(24), semanticMode: "llm", providers: ["glovo", "ubereats"], offers: candidates,
+  };
+  const result = candidateInspectionForSearch(search, [
+    { forItem: "green_peppers", queries: ["pimiento verde", "green pepper"], provider: "glovo", merchantId: "dia" },
+    { forItem: "mint", queries: ["menta", "hierbabuena"], provider: "glovo", merchantId: "dia" },
+  ]);
+  assert.equal(result.inspections.length, 2);
+  assert.equal(result.inspections[0].uniqueMatches, 1);
+  assert.equal(result.inspections[0].candidates[0].item.name, "Pimiento Verde Unidad");
+  assert.deepEqual(result.inspections[0].candidates[0].matchedQueries, ["pimiento verde"]);
+  assert.equal(result.inspections[1].candidates[0].item.name, "Hierbabuena Fresca");
+  assert.equal(result.inspections[0].candidates[0].source, undefined);
+});
+
 test("LLM selection rejects candidates that cannot share one merchant basket", () => {
   const offers = ["one", "two"].map((id) => normalizeOffer("glovo", {
     merchant: { id, name: id }, item: { id, name: id, unitPrice: 1 }, pricing: {}, source: { storeId: id },
@@ -310,6 +342,31 @@ test("an inspected partial grocery basket records exact missing lines and cannot
   assert.throws(() => buildLlmSelection(search, [{
     offerId: bread.id, quantity: 1, forItem: "bread", reason: "Exact bread match.",
   }], { missingItems: [{ forItem: "bread", reason: "Contradicts the selected line." }] }), { code: "INVALID_MISSING_ITEMS" });
+});
+
+test("an unavailable optional recipe garnish does not make a cookable basket partial", () => {
+  const eggs = normalizeOffer("glovo", {
+    merchant: { id: "market", name: "Market" },
+    item: { id: "eggs", name: "12 large eggs", unitPrice: 3 }, available: true, pricing: {},
+  });
+  const search = {
+    id: "d".repeat(24), semanticMode: "llm", intent: "shakshuka groceries now",
+    parsedIntent: { kind: "product", people: 4 }, fulfilment: { mode: "now" },
+    objective: "value", providers: ["glovo"], offers: [eggs],
+    shoppingItems: [
+      { id: "eggs", intent: "one pack covering six recipe eggs and household basics", quantity: 1, required: true },
+      { id: "mint", intent: "optional fresh mint garnish", quantity: 1, required: false },
+    ],
+  };
+  const selection = buildLlmSelection(search, [{
+    offerId: eggs.id, quantity: 1, forItem: "eggs", reason: "One 12-pack covers the recipe and leaves six eggs as basics.",
+  }]);
+  assert.equal(selection.composition.complete, true);
+  assert.equal(selection.composition.requestedItems, 1);
+  assert.deepEqual(selection.composition.missingItems, []);
+  assert.throws(() => buildLlmSelection(search, [{
+    offerId: eggs.id, quantity: 1, forItem: "eggs", reason: "Exact eggs.",
+  }], { missingItems: [{ forItem: "mint", reason: "Optional garnish was unavailable." }] }), { code: "INVALID_MISSING_ITEMS" });
 });
 
 test("LLM selection rejects currently unavailable candidates for immediate delivery", () => {

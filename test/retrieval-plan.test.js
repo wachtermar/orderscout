@@ -155,6 +155,7 @@ test("human CLI shopping lines get conservative per-item catalog fallbacks", () 
   });
   assert.deepEqual(items[0].catalogQueries, ["eggs"]);
   assert.deepEqual(items[1].catalogQueries, ["pan rústico"]);
+  assert.equal(items[0].required, true);
   const plan = planProviderRetrieval({ discoveryQueries: ["supermercado"], shoppingItems: items, catalogBudget: 8 });
   assert.equal(plan.complete, true);
   assert.deepEqual(plan.catalog.itemCoverage.map((entry) => entry.status), ["complete", "complete"]);
