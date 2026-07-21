@@ -2,7 +2,7 @@
   "mcpServers": {
     "orderscout": {
       "command": "npx",
-      "args": ["--yes", "--package", "github:wachtermar/orderscout#v0.1.19", "orderscout", "mcp"],
+      "args": ["--yes", "--package", "github:wachtermar/orderscout#v0.1.20", "orderscout", "mcp"],
       "note": "Spain-wide direct CLI adapters for Just Eat, Glovo, and Uber Eats. Native Chrome login is auto-discovered and live-verified; Glovo refreshes its saved session persistently; the in-app browser is reserved for optional visual checkout review. No final purchase without exact human confirmation."
     }
   }

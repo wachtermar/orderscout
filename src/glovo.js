@@ -1,16 +1,28 @@
 import { createHash, randomUUID } from "node:crypto";
 import { CliError } from "./lib.js";
 import { loadBrowserSession, persistBrowserSession, withBrowserSessionLock } from "./browser-session.js";
+import { cachedProviderRead } from "./provider-cache.js";
 
 const API = "https://api.glovoapp.com";
 const WEB = "https://glovoapp.com";
 const APP_VERSION = "v1.2483.0";
 const REFRESH_LEEWAY_MS = 90_000;
+const DISCOVERY_CACHE_TTL_MS = 2 * 60_000;
+const MENU_CACHE_TTL_MS = 15 * 60_000;
+const CATALOG_QUERY_CACHE_TTL_MS = 5 * 60_000;
+const DISCOVERY_STALE_IF_ERROR_MS = 15 * 60_000;
+const MENU_STALE_IF_ERROR_MS = 30 * 60_000;
+const CATALOG_STALE_IF_ERROR_MS = 15 * 60_000;
 const refreshes = new Map();
 
 function slug(value) {
   return String(value ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+function cacheText(value) {
+  return String(value ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .trim().replace(/\s+/g, " ").toLowerCase();
 }
 
 function cookieValue(header, name) {
@@ -192,7 +204,10 @@ function shouldRefresh(session, token, now = Date.now()) {
   return expiresAt ? Date.parse(expiresAt) - now <= REFRESH_LEEWAY_MS : false;
 }
 
-async function request(path, { method = "GET", body, location, auth = false, retryAuth = method === "GET", fetchImpl = fetch, cookieHeader, session: providedSession } = {}) {
+async function request(path, {
+  method = "GET", body, location, auth = false, retryAuth = method === "GET",
+  retryNetwork = method === "GET", fetchImpl = fetch, cookieHeader, session: providedSession,
+} = {}) {
   let session = providedSession ?? (cookieHeader ? { cookieHeader, source: "verification" } : await loadBrowserSession("glovo"));
   const persistRefresh = !providedSession && !cookieHeader;
   let token = accessToken(session);
@@ -201,16 +216,29 @@ async function request(path, { method = "GET", body, location, auth = false, ret
     token = accessToken(session);
   }
   if (auth && !token) throw new CliError("Sign in with `orderscout auth login glovo` first", "AUTH_REQUIRED");
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const response = await fetchImpl(new URL(path, API), {
-      method,
-      headers: headers(location, token, session),
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      signal: AbortSignal.timeout(20_000),
-    });
+  for (let authAttempt = 0; authAttempt < 2; authAttempt += 1) {
+    let response;
+    const networkAttempts = retryNetwork ? 2 : 1;
+    for (let networkAttempt = 0; networkAttempt < networkAttempts; networkAttempt += 1) {
+      try {
+        response = await fetchImpl(new URL(path, API), {
+          method,
+          headers: headers(location, token, session),
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          signal: AbortSignal.timeout(20_000),
+        });
+        break;
+      } catch (error) {
+        if (networkAttempt + 1 < networkAttempts) {
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
+          continue;
+        }
+        throw new CliError("Could not reach Glovo", "NETWORK_ERROR", { path, cause: error?.name ?? "Error" });
+      }
+    }
     const payload = await responsePayload(response);
     if (response.ok) return payload;
-    if (response.status === 401 && attempt === 0 && retryAuth && session?.refreshToken) {
+    if (response.status === 401 && authAttempt === 0 && retryAuth && session?.refreshToken) {
       session = await refreshGlovoSession(session, { fetchImpl, persist: persistRefresh });
       token = accessToken(session);
       continue;
@@ -410,26 +438,43 @@ function offersFromSearch(payload, location) {
 }
 
 export async function searchGlovo(query, location, options = {}) {
-  const knownCitySlug = location.citySlug ?? slug(location.city ?? location.matched?.split(",").at(-1) ?? "");
-  const resolved = location.cityCode && knownCitySlug
-    ? { ...location, citySlug: knownCitySlug }
-    : await glovoLocation(location, options.fetchImpl);
-  const payload = await request(`/v1/web/store_wall/search?searchQuery=${encodeURIComponent(query)}`, {
-    method: "POST",
-    body: { searchContext: { searchId: randomUUID() } },
-    location: resolved,
-    retryAuth: true,
-    fetchImpl: options.fetchImpl,
-    cookieHeader: options.cookieHeader,
-    session: options.session,
-  });
   const limit = Math.max(1, Number(options.limit ?? 60));
-  return {
-    location: resolved,
-    stores: storesFromSearch(payload, resolved).slice(0, Math.max(1, Number(options.storeLimit ?? 24))),
-    offers: offersFromSearch(payload, resolved).slice(0, limit),
-    raw: options.raw ? payload : undefined,
+  const storeLimit = Math.max(1, Number(options.storeLimit ?? 24));
+  const cacheKey = {
+    query: cacheText(query),
+    latitude: Number(Number(location.latitude).toFixed(5)),
+    longitude: Number(Number(location.longitude).toFixed(5)),
+    cityCode: location.cityCode ?? null,
+    limit,
+    storeLimit,
   };
+  const { value, cache } = await cachedProviderRead("glovo-discovery", cacheKey, async () => {
+    const knownCitySlug = location.citySlug ?? slug(location.city ?? location.matched?.split(",").at(-1) ?? "");
+    const resolved = location.cityCode && knownCitySlug
+      ? { ...location, citySlug: knownCitySlug }
+      : await glovoLocation(location, options.fetchImpl);
+    const payload = await request(`/v1/web/store_wall/search?searchQuery=${encodeURIComponent(query)}`, {
+      method: "POST",
+      body: { searchContext: { searchId: randomUUID() } },
+      location: resolved,
+      retryAuth: true,
+      retryNetwork: true,
+      fetchImpl: options.fetchImpl,
+      cookieHeader: options.cookieHeader,
+      session: options.session,
+    });
+    return {
+      location: resolved,
+      stores: storesFromSearch(payload, resolved).slice(0, storeLimit),
+      offers: offersFromSearch(payload, resolved).slice(0, limit),
+      raw: options.raw ? payload : undefined,
+    };
+  }, {
+    ttlMs: DISCOVERY_CACHE_TTL_MS,
+    staleIfErrorMs: DISCOVERY_STALE_IF_ERROR_MS,
+    enabled: (options.fetchImpl ?? fetch) === fetch && !options.raw,
+  });
+  return { ...value, cache };
 }
 
 function nextFlightText(html) {
@@ -459,29 +504,47 @@ function objectsOfType(text, type) {
 export async function glovoMenu(url, fetchImpl = fetch) {
   const parsed = new URL(url);
   if (parsed.origin !== WEB || !parsed.pathname.includes("/stores/")) throw new CliError("A trusted Glovo store URL is required", "INVALID_URL");
-  const response = await fetchImpl(parsed, { headers: { "accept-language": "es-ES" } });
-  if (!response.ok) throw new CliError(`Glovo store page returned HTTP ${response.status}`, "GLOVO_HTTP_ERROR");
-  const flight = nextFlightText(await response.text());
-  const storeRoute = flight.match(/\/v\d+\/stores\/([^/"?]+)\/addresses\/([^/"?]+)\//);
-  const products = ["PRODUCT_ROW", "PRODUCT_TILE"].flatMap((type) => objectsOfType(flight, type)).map(({ data }) => ({
-    id: data.id, externalId: data.externalId, storeProductId: data.storeProductId, name: data.name,
-    description: data.description ?? null, price: data.promotion?.priceInfo?.amount ?? data.promotion?.price ?? data.priceInfo?.amount ?? data.price,
-    currency: data.priceInfo?.currencyCode ?? data.promotion?.priceInfo?.currencyCode ?? "EUR",
-    requiresCustomizations: Boolean(data.attributeGroups?.length), attributeGroups: data.attributeGroups ?? [], available: true,
-  }));
-  const restricted = objectsOfType(flight, "RESTRICTED_PRODUCT_TILE");
-  const collections = objectsOfType(flight, "COLLECTION_TILE").map(({ data }) => ({
-    name: data.title ?? null,
-    slug: data.slug ?? null,
-    restricted: data.action?.type === "POPUP" && data.action?.data?.id === "RESTRICTIONS",
-  }));
-  return {
-    url: parsed.toString(),
-    store: storeRoute ? { id: storeRoute[1], addressId: storeRoute[2] } : null,
-    products: [...new Map(products.filter((item) => item.id && item.name).map((item) => [`${item.storeProductId ?? item.externalId ?? item.id}`, item])).values()],
-    restrictionsDetected: restricted.length > 0 || collections.some((collection) => collection.restricted),
-    collections,
-  };
+  const { value, cache } = await cachedProviderRead("glovo-menu", { url: parsed.toString() }, async () => {
+    let response;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        response = await fetchImpl(parsed, { headers: { "accept-language": "es-ES" } });
+        break;
+      } catch (error) {
+        if (attempt === 0) {
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
+          continue;
+        }
+        throw new CliError("Could not reach Glovo", "NETWORK_ERROR", { url: parsed.toString(), cause: error?.name ?? "Error" });
+      }
+    }
+    if (!response.ok) throw new CliError(`Glovo store page returned HTTP ${response.status}`, response.status === 429 ? "RATE_LIMITED" : "GLOVO_HTTP_ERROR", {
+      status: response.status,
+      retryAfter: response.headers.get("retry-after") ?? null,
+    });
+    const flight = nextFlightText(await response.text());
+    const storeRoute = flight.match(/\/v\d+\/stores\/([^/"?]+)\/addresses\/([^/"?]+)\//);
+    const products = ["PRODUCT_ROW", "PRODUCT_TILE"].flatMap((type) => objectsOfType(flight, type)).map(({ data }) => ({
+      id: data.id, externalId: data.externalId, storeProductId: data.storeProductId, name: data.name,
+      description: data.description ?? null, price: data.promotion?.priceInfo?.amount ?? data.promotion?.price ?? data.priceInfo?.amount ?? data.price,
+      currency: data.priceInfo?.currencyCode ?? data.promotion?.priceInfo?.currencyCode ?? "EUR",
+      requiresCustomizations: Boolean(data.attributeGroups?.length), attributeGroups: data.attributeGroups ?? [], available: true,
+    }));
+    const restricted = objectsOfType(flight, "RESTRICTED_PRODUCT_TILE");
+    const collections = objectsOfType(flight, "COLLECTION_TILE").map(({ data }) => ({
+      name: data.title ?? null,
+      slug: data.slug ?? null,
+      restricted: data.action?.type === "POPUP" && data.action?.data?.id === "RESTRICTIONS",
+    }));
+    return {
+      url: parsed.toString(),
+      store: storeRoute ? { id: storeRoute[1], addressId: storeRoute[2] } : null,
+      products: [...new Map(products.filter((item) => item.id && item.name).map((item) => [`${item.storeProductId ?? item.externalId ?? item.id}`, item])).values()],
+      restrictionsDetected: restricted.length > 0 || collections.some((collection) => collection.restricted),
+      collections,
+    };
+  }, { ttlMs: MENU_CACHE_TTL_MS, staleIfErrorMs: MENU_STALE_IF_ERROR_MS, enabled: fetchImpl === fetch });
+  return { ...value, cache };
 }
 
 function catalogMenuSummary(menu) {
@@ -614,9 +677,11 @@ export async function glovoStoreCatalog(store, queries, location, options = {}) 
   if (!store?.id || !store?.addressId) throw new CliError("Glovo store identifiers are required", "SOURCE_PLAN_MISSING");
   const catalogQueries = [...new Set((Array.isArray(queries) ? queries : [queries])
     .map((value) => String(value ?? "").trim()).filter(Boolean))].slice(0, Math.max(1, Number(options.queryLimit ?? 8)));
-  const menu = await request(`/v3/stores/${encodeURIComponent(store.id)}/addresses/${encodeURIComponent(store.addressId)}/node/store_menu`, {
+  const cacheEnabled = (options.fetchImpl ?? fetch) === fetch;
+  const menuRead = await cachedProviderRead("glovo-catalog-menu", { storeId: store.id, addressId: store.addressId }, () => request(`/v3/stores/${encodeURIComponent(store.id)}/addresses/${encodeURIComponent(store.addressId)}/node/store_menu`, {
     location, fetchImpl: options.fetchImpl, session: options.session,
-  });
+  }), { ttlMs: MENU_CACHE_TTL_MS, staleIfErrorMs: MENU_STALE_IF_ERROR_MS, enabled: cacheEnabled });
+  const menu = menuRead.value;
   const summary = catalogMenuSummary(menu);
   let restrictions = null;
   if (summary.restrictionsDetected) {
@@ -634,20 +699,25 @@ export async function glovoStoreCatalog(store, queries, location, options = {}) 
     providerActionUrl: store.url,
   } : null;
   const searched = await mapConcurrent(catalogQueries, Number(options.concurrency ?? 2), async (query) => {
-    let lastError;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      try {
-        const payload = await request(`/v3/stores/${encodeURIComponent(store.id)}/addresses/${encodeURIComponent(store.addressId)}/search?query=${encodeURIComponent(query)}&searchId=${randomUUID()}`, {
-          location, fetchImpl: options.fetchImpl, session: options.session,
-        });
-        return { query, products: (payload?.results ?? []).flatMap((result) => result?.products ?? []) };
-      } catch (error) {
-        lastError = error;
-        if (error?.details?.status !== 429 || attempt === 2) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 300 * (2 ** attempt)));
-      }
-    }
-    throw lastError;
+    const result = await cachedProviderRead("glovo-catalog-query", {
+      storeId: store.id,
+      addressId: store.addressId,
+      query: cacheText(query),
+      latitude: Number(Number(location.latitude).toFixed(5)),
+      longitude: Number(Number(location.longitude).toFixed(5)),
+    }, async () => {
+      const payload = await request(`/v3/stores/${encodeURIComponent(store.id)}/addresses/${encodeURIComponent(store.addressId)}/search?query=${encodeURIComponent(query)}&searchId=${randomUUID()}`, {
+        location, fetchImpl: options.fetchImpl, session: options.session,
+      });
+      return (payload?.results ?? []).flatMap((entry) => entry?.products ?? []);
+    }, { ttlMs: CATALOG_QUERY_CACHE_TTL_MS, staleIfErrorMs: CATALOG_STALE_IF_ERROR_MS, enabled: cacheEnabled });
+    return {
+      query,
+      products: result.value,
+      cacheHit: result.cache.hit,
+      cacheStale: result.cache.stale === true,
+      fallbackErrorCode: result.cache.fallbackErrorCode ?? null,
+    };
   });
   if (searched.length && searched.every((entry) => entry?.error)) throw searched[0].error;
   const productsById = new Map();
@@ -672,6 +742,15 @@ export async function glovoStoreCatalog(store, queries, location, options = {}) 
     products,
     offers: products.map((product) => glovoCatalogOffer(store, product, { eligibility })).filter(Boolean),
     failedQueries: searched.filter((entry) => entry?.error).length,
+    rateLimitedQueries: searched.filter((entry) => entry?.error?.code === "RATE_LIMITED"
+      || entry?.fallbackErrorCode === "RATE_LIMITED").length,
+    cache: {
+      menuHit: menuRead.cache.hit,
+      menuStale: menuRead.cache.stale === true,
+      queryHits: searched.filter((entry) => entry?.cacheHit).length,
+      queryStale: searched.filter((entry) => entry?.cacheStale).length,
+      liveQueries: searched.filter((entry) => entry && !entry.error && !entry.cacheHit).length,
+    },
   };
 }
 

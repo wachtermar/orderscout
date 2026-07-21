@@ -79,6 +79,7 @@ export function planRoundRobinQueries({
   shoppingItems = [],
   queryField = "catalogQueries",
   budget = 8,
+  globalCoversUnspecifiedItems = false,
 } = {}) {
   if (!Number.isInteger(budget) || budget < 0) {
     throw new RangeError("Query budget must be a non-negative integer");
@@ -152,9 +153,13 @@ export function planRoundRobinQueries({
 
   const selectedEntries = selectedKeys.map((key) => entries.get(key));
   const omittedEntries = [...entries.values()].filter((entry) => !selected.has(entry.key));
+  const selectedGlobalQueries = selectedEntries.filter((entry) => entry.global).map((entry) => entry.query);
   const itemCoverage = itemQueues.map((item) => {
     const planned = item.keys.filter((key) => selected.has(key)).map((key) => entries.get(key).query);
     const omitted = item.keys.filter((key) => !selected.has(key)).map((key) => entries.get(key).query);
+    if (!item.keys.length && globalCoversUnspecifiedItems && selectedGlobalQueries.length) {
+      return { itemId: item.id, plannedQueries: selectedGlobalQueries, omittedQueries: [], status: "complete" };
+    }
     return {
       itemId: item.id,
       plannedQueries: planned,
@@ -189,6 +194,7 @@ export function planProviderRetrieval({
     shoppingItems,
     queryField: "discoveryQueries",
     budget: discoveryBudget,
+    globalCoversUnspecifiedItems: true,
   });
   const catalog = planRoundRobinQueries({
     globalQueries: catalogQueries,

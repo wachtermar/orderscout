@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   assertAllergenReview, checkoutFulfilment, completedSearchResponse, justEatLineModifierSelections,
-  providerDiverseOffers, runConcurrentProviderTasks, uberEatsRetrievalQueries,
+  providerDiverseOffers, runConcurrentProviderTasks, shouldExpandGlovoRestrictedCatalog, uberEatsRetrievalQueries,
 } from "../src/orderscout.js";
 import {
   applyIntent, buildLlmSelection, candidatePageForSearch, normalizeExternalEvidence, normalizeExternalResearchPlan,
-  offerWithRecordedQuote, providerRoutes, resultsFor, semanticInputsForSearch,
+  offerWithRecordedQuote, providerRoutes, resultsFor, reusableCompletedSearch, searchRequestFingerprint, semanticInputsForSearch,
 } from "../src/searches.js";
 import { defaultAccounts, publicAccountStatus } from "../src/providers.js";
 import { normalizeOffer, parseObjective, rankOffers } from "../src/ranking.js";
@@ -28,7 +28,37 @@ test("provider tasks start concurrently and preserve provider-labelled outcomes"
   assert.deepEqual(outcomes.map((outcome) => outcome.value[0]), ["justeat-offer", "glovo-offer", "ubereats-offer"]);
 });
 
-test("Uber Eats retrieval uses one representative query per shopping line instead of the full Cartesian vocabulary", () => {
+test("ordinary grocery searches never fan out into restricted Glovo catalog endpoints", () => {
+  assert.equal(shouldExpandGlovoRestrictedCatalog(false), false);
+  assert.equal(shouldExpandGlovoRestrictedCatalog(true), true);
+});
+
+test("an identical completed search is reused briefly instead of repeating provider fan-out", () => {
+  const options = {
+    objective: "value", semanticMode: "llm", externalResearch: "not_needed",
+    shoppingItems: [{ id: "eggs", intent: "six eggs", quantity: 1, discoveryQueries: ["supermercado"], catalogQueries: ["huevos"] }],
+    queryPlan: { discoveryQueries: ["supermercado"], catalogQueries: ["huevos"] },
+  };
+  const fingerprint = searchRequestFingerprint("Shakshuka ingredients", options, ["glovo", "ubereats"]);
+  const search = {
+    id: "a".repeat(24), requestFingerprint: fingerprint,
+    createdAt: "2026-07-21T10:00:00.000Z", updatedAt: "2026-07-21T10:00:30.000Z",
+    providerStatus: { glovo: { state: "complete" }, ubereats: { state: "partial" } },
+    offers: [{ id: "candidate", pricing: { exact: false } }], selections: [],
+  };
+  assert.equal(reusableCompletedSearch([search], fingerprint, { now: Date.parse("2026-07-21T10:01:00Z") }), search);
+  assert.equal(reusableCompletedSearch([search], fingerprint, { now: Date.parse("2026-07-21T10:03:00Z") }), null);
+  assert.equal(reusableCompletedSearch([{ ...search, selections: [{ offerId: "candidate" }] }], fingerprint, { now: Date.parse("2026-07-21T10:01:00Z") }), null);
+});
+
+test("search reuse fingerprints ignore query order but preserve request meaning", () => {
+  const base = { semanticMode: "llm", queryPlan: { discoveryQueries: ["grocery", "supermercado"], catalogQueries: ["pan", "huevos"] } };
+  const reversed = { semanticMode: "llm", queryPlan: { discoveryQueries: ["supermercado", "grocery"], catalogQueries: ["huevos", "pan"] } };
+  assert.equal(searchRequestFingerprint("  Grocery basics ", base, ["glovo", "justeat"]), searchRequestFingerprint("grocery basics", reversed, ["justeat", "glovo"]));
+  assert.notEqual(searchRequestFingerprint("grocery basics", base, ["glovo", "justeat"]), searchRequestFingerprint("Greek shakshuka", base, ["glovo", "justeat"]));
+});
+
+test("Uber Eats retrieval prioritizes merchant discovery and stays within a strict six-call search budget", () => {
   const plan = uberEatsRetrievalQueries({
     discoveryQueries: ["agua", "bebidas", "snacks", "dulces", "supermercado", "tienda"],
     catalogQueries: ["agua", "agua mineral", "chocolate", "galleta", "muffin", "dulce"],
@@ -37,21 +67,20 @@ test("Uber Eats retrieval uses one representative query per shopping line instea
       { discoveryQueries: ["snacks", "dulces", "tienda"], catalogQueries: ["chocolate", "galleta", "muffin", "dulce"] },
     ],
   });
-  assert.deepEqual(plan.queries, ["agua", "snacks", "chocolate", "bebidas"]);
-  assert.equal(plan.maximumQueries, 4);
-  assert.equal(plan.omittedQueries, 8);
+  assert.deepEqual(plan.queries, ["agua", "bebidas", "snacks", "chocolate", "agua mineral", "galleta"]);
+  assert.equal(plan.maximumQueries, 6);
+  assert.equal(plan.omittedQueries, 6);
 });
 
-test("Uber Eats retrieval preserves at least one focused query for every line in larger shopping lists", () => {
+test("Uber Eats retrieval bounds large shopping lists because complete store menus provide catalog coverage", () => {
   const itemNames = ["huevos", "leche de avena", "pan", "platanos", "tomates", "pechuga de pollo"];
   const plan = uberEatsRetrievalQueries({
     discoveryQueries: ["supermercado", "groceries", "alimentacion"],
     catalogQueries: itemNames,
     shoppingItems: itemNames.map((name) => ({ discoveryQueries: ["supermercado"], catalogQueries: [name] })),
   });
-  assert.equal(plan.maximumQueries, 8);
-  assert.ok(itemNames.every((name) => plan.queries.includes(name)));
-  assert.ok(plan.queries.length <= 8);
+  assert.equal(plan.maximumQueries, 6);
+  assert.deepEqual(plan.queries, ["supermercado", "groceries", "alimentacion", "huevos", "leche de avena", "pan"]);
 });
 
 test("checkout-verified fulfilment overrides stale search and basket state", () => {

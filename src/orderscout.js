@@ -87,7 +87,7 @@ function stringArrayFlag(flags, key) {
   return [...new Set(value.map((entry) => entry.trim()).filter(Boolean))].slice(0, 8);
 }
 
-function shoppingItemsFlag(flags) {
+export function shoppingItemsFlag(flags) {
   const value = jsonFlag(flags, "shopping-items", []);
   if (!Array.isArray(value) || value.length > 12) throw new CliError("--shopping-items must be a JSON array with at most 12 items", "INVALID_SHOPPING_ITEMS");
   return value.map((item, index) => {
@@ -101,13 +101,20 @@ function shoppingItemsFlag(flags) {
       if (!Array.isArray(values) || values.some((entry) => typeof entry !== "string")) throw new CliError(`Shopping item ${index + 1} ${key} must be strings`, "INVALID_SHOPPING_ITEMS");
       return [...new Set(values.map((entry) => entry.trim()).filter(Boolean))].slice(0, 8);
     };
+    const intent = item.intent.trim();
+    const catalogQueries = queries("catalogQueries");
     return {
       id: String(item.id ?? `item-${index + 1}`),
-      label: String(item.label ?? item.intent).trim(),
-      intent: item.intent.trim(),
+      label: String(item.label ?? intent).trim(),
+      intent,
       quantity,
       discoveryQueries: queries("discoveryQueries"),
-      catalogQueries: queries("catalogQueries"),
+      // Chat agents should supply focused vocabulary. The public CLI remains
+      // usable when a human only lists shopping lines: each line's own wording
+      // becomes its conservative catalog fallback instead of a false partial.
+      catalogQueries: catalogQueries.length
+        ? catalogQueries
+        : providerSearchQueries(parseIntent(intent)).slice(0, 8),
     };
   });
 }
@@ -125,14 +132,15 @@ export function uberEatsRetrievalQueries(flags = {}, fallbackQueries = []) {
     ? flags.retrievalPlan.catalog.queries
     : mergedQueries(flags.catalogQueries, fallbackQueries, 24);
   const shoppingItems = Array.isArray(flags.shoppingItems) ? flags.shoppingItems : [];
+  const maximumQueries = 6;
+  // Broad merchant discovery gets priority because every eligible store's full
+  // menu is expanded below. A few representative item terms remain useful for
+  // provider indexes that only surface a shop when a product name is searched.
   const representativeQueries = [
-    ...shoppingItems.map((item) => item.discoveryQueries?.[0]),
+    ...discoveryQueries.slice(0, 3),
     ...shoppingItems.map((item) => item.catalogQueries?.[0]),
   ];
-  const maximumQueries = shoppingItems.length
-    ? Math.min(14, Math.max(4, shoppingItems.length + 2))
-    : 6;
-  const queries = mergedQueries(representativeQueries, [...discoveryQueries, ...catalogQueries], maximumQueries);
+  const queries = mergedQueries(representativeQueries, [...catalogQueries, ...discoveryQueries], maximumQueries);
   const vocabulary = mergedQueries([
     ...discoveryQueries,
     ...catalogQueries,
@@ -525,6 +533,13 @@ export function providerDiverseOffers(offers, limit) {
   return [...selected.values()].sort((left, right) => positions.get(left.id) - positions.get(right.id));
 }
 
+// Restricted catalog endpoints are only relevant when the user's request is
+// itself age-gated. A restricted shop discovered during an ordinary grocery or
+// meal search must not receive every unrelated catalog query.
+export function shouldExpandGlovoRestrictedCatalog(requireEligibility) {
+  return requireEligibility === true;
+}
+
 export function completedSearchResponse(started, finalResults) {
   return {
     ...started,
@@ -568,6 +583,9 @@ async function collectJustEat(intent, flags) {
       candidateStores: result.scope?.candidateStores ?? null,
       searchedStores: result.scope?.scannedStores ?? null,
       failedMenus: result.scope?.failedMenus ?? 0,
+      cachedMenus: result.scope?.cachedMenus ?? 0,
+      staleMenus: result.scope?.staleMenus ?? 0,
+      liveMenus: result.scope?.liveMenus ?? null,
       deliveryLocation: result.location ? {
         latitude: result.location.latitude,
         longitude: result.location.longitude,
@@ -575,7 +593,7 @@ async function collectJustEat(intent, flags) {
         city: result.location.city ?? null,
         source: "justeat-saved-address",
       } : null,
-      partial: Number(result.scope?.failedMenus ?? 0) > 0
+      partial: Number(result.scope?.failedMenus ?? 0) > 0 || Number(result.scope?.staleMenus ?? 0) > 0
         || (Number.isFinite(Number(result.scope?.candidateStores))
           && Number(result.scope.candidateStores) > Number(result.scope?.scannedStores ?? 0)),
     },
@@ -619,7 +637,7 @@ async function collectGlovo(intent, flags) {
   const menuOutcomes = await settleConcurrent(stores, 4, async (store) => {
     const menu = await glovoMenu(store.url);
     let catalog = null;
-    if (requireEligibility || menu.restrictionsDetected) {
+    if (shouldExpandGlovoRestrictedCatalog(requireEligibility)) {
       catalog = await glovoStoreCatalog(store, catalogQueries, location, {
         requireEligibility,
         queryLimit: Math.max(1, catalogQueries.length),
@@ -668,16 +686,27 @@ async function collectGlovo(intent, flags) {
       strategy: "merchant-discovery-then-complete-menu-scan",
       discoveryQueries,
       failedDiscoveryQueries: discoveryFailures.length,
-      rateLimitedDiscoveryQueries: discoveryFailures.filter((result) => result.reason?.code === "RATE_LIMITED").length,
+      rateLimitedDiscoveryQueries: discoveryFailures.filter((result) => result.reason?.code === "RATE_LIMITED").length
+        + fulfilled.filter((result) => result.value.cache?.fallbackErrorCode === "RATE_LIMITED").length,
+      cachedDiscoveryQueries: fulfilled.filter((result) => result.value.cache?.hit).length,
+      staleDiscoveryQueries: fulfilled.filter((result) => result.value.cache?.stale).length,
+      liveDiscoveryQueries: fulfilled.filter((result) => !result.value.cache?.hit).length,
       catalogQueries,
       discoveredStores: allStores.length,
       eligibleStores: fulfilmentStores.length,
       excludedUnavailableStores: allStores.length - fulfilmentStores.length,
       searchedStores: fullMenus.length,
       catalogProducts: menuOffers.length,
+      cachedMenus: fullMenus.filter(({ menu }) => menu.cache?.hit).length,
+      staleMenus: fullMenus.filter(({ menu }) => menu.cache?.stale).length,
+      liveMenus: fullMenus.filter(({ menu }) => !menu.cache?.hit).length,
+      cachedCatalogQueries: catalogs.reduce((sum, catalog) => sum + Number(catalog.cache?.queryHits ?? 0), 0),
+      staleCatalogQueries: catalogs.reduce((sum, catalog) => sum + Number(catalog.cache?.queryStale ?? 0), 0),
+      liveCatalogQueries: catalogs.reduce((sum, catalog) => sum + Number(catalog.cache?.liveQueries ?? 0), 0),
       failedCatalogs,
       rateLimitedCatalogs: catalogErrors.filter((error) => error?.code === "RATE_LIMITED").length,
       failedCatalogQueries: catalogs.reduce((sum, catalog) => sum + catalog.failedQueries, 0),
+      rateLimitedCatalogQueries: catalogs.reduce((sum, catalog) => sum + Number(catalog.rateLimitedQueries ?? 0), 0),
       retrievalPlan: flags.retrievalPlan ?? null,
       deliveryLocation: {
         latitude: location.latitude,
@@ -687,7 +716,10 @@ async function collectGlovo(intent, flags) {
         source: "glovo-saved-address",
       },
       partial: discoveryFailures.length > 0 || failedCatalogs > 0 || stores.length < fulfilmentStores.length
-        || flags.retrievalPlan?.complete === false || catalogs.some((catalog) => catalog.failedQueries > 0),
+        || flags.retrievalPlan?.complete === false || catalogs.some((catalog) => catalog.failedQueries > 0)
+        || fulfilled.some((result) => result.value.cache?.stale)
+        || fullMenus.some(({ menu }) => menu.cache?.stale)
+        || catalogs.some((catalog) => catalog.cache?.menuStale || catalog.cache?.queryStale > 0),
       eligibilityRequired: catalogs.filter((catalog) => catalog.eligibility).map((catalog) => ({
         merchantId: catalog.store.id,
         merchantName: catalog.store.name,
@@ -768,6 +800,9 @@ async function collectUberEats(intent, flags) {
       crossCatalogFailedStores: crossCatalog.failedStores,
       crossCatalogRateLimitedStores: crossCatalog.rateLimitedStores,
       crossCatalogOffers: crossCatalog.offers.length,
+      cachedCatalogs: crossCatalog.cachedStores ?? 0,
+      staleCatalogs: crossCatalog.staleStores ?? 0,
+      liveCatalogs: crossCatalog.liveStores ?? crossCatalog.searchedStores,
       crossCatalogError: crossCatalogError?.code ?? null,
       discoveredStores: storeCache.size,
       eligibleStores: fulfilmentStores.length,
@@ -777,6 +812,7 @@ async function collectUberEats(intent, flags) {
       retrievalPlan: flags.retrievalPlan ?? null,
       deliveryLocation,
       partial: failures.length > 0 || crossCatalog.failedStores > 0 || Boolean(crossCatalogError)
+        || Number(crossCatalog.staleStores ?? 0) > 0
         || flags.retrievalPlan?.complete === false,
     },
   };
@@ -1050,12 +1086,15 @@ export async function runOrderScout(argv) {
           catalogQueries,
           retrievalPlan,
         },
+        fresh: booleanFlag(flags, "fresh") === true,
       });
       let result = started;
       if (!flags["skip-api"]) {
-        await collectAllProviders(started.search.id, started.apiProviders, intent, {
-          ...flags, discoveryQueries, catalogQueries, shoppingItems, semanticMode, retrievalPlan,
-        });
+        if (!started.reused) {
+          await collectAllProviders(started.search.id, started.apiProviders, intent, {
+            ...flags, discoveryQueries, catalogQueries, shoppingItems, semanticMode, retrievalPlan,
+          });
+        }
         const finalResults = compactSearchResult(await searchResults(started.search.id), flags);
         result = completedSearchResponse(started, finalResults);
       }

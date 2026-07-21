@@ -74,7 +74,7 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_search_begin",
-    description: "Directly and concurrently retrieve normalized candidates from every enabled provider. Supply broad merchant-discovery terms and focused catalog queries. In agent mode OrderScout does not apply semantic product or meal filters: the LLM must inspect the candidate pages and choose meaningfully. Glovo discovers merchants before searching their catalogs; store-only results are never treated as no match. Legal-age gates remain explicit and deals and memberships are retained. Never creates a basket.",
+    description: "Directly and concurrently retrieve normalized candidates from every enabled provider. Call exactly once per user request and keep the returned searchId; paging, selection, and quoting must reuse it. Accidental identical completed calls within two minutes are idempotently reused, and fresh private menu caches prevent repeat catalog downloads. Supply broad merchant-discovery terms and focused catalog queries. In agent mode OrderScout does not apply semantic product or meal filters: the LLM must inspect the candidate pages and choose meaningfully. Glovo discovers merchants before searching their catalogs; store-only results are never treated as no match. Legal-age gates remain explicit and deals and memberships are retained. Never creates a basket.",
     inputSchema: objectSchema({
       intent: string("Complete natural-language request including quantity, budget, dietary needs, and cheapest/fastest/best preference."),
       objective: { type: "string", enum: ["cheapest", "fastest", "best", "value"] },

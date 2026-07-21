@@ -1,5 +1,8 @@
+import { cachedProviderRead } from "./provider-cache.js";
+
 const API_BASE = "https://i18n.api.just-eat.io";
 const MENU_CDN = "https://menu-globalmenucdn.justeat-int.com";
+const MENU_CACHE_TTL_MS = 15 * 60_000;
 
 export class CliError extends Error {
   constructor(message, code = "USAGE_ERROR", details) {
@@ -111,7 +114,7 @@ export async function requestJson(url, options = {}, fetchImpl = fetch) {
       } catch {
         responseBody = null;
       }
-      if ((response.status === 429 || response.status >= 500) && attempt < maxAttempts - 1) {
+      if (response.status >= 500 && attempt < maxAttempts - 1) {
         const retryAfter = Number(response.headers.get("retry-after"));
         const delay = Number.isFinite(retryAfter)
           ? Math.min(retryAfter * 1_000, 5_000)
@@ -281,31 +284,34 @@ export function normalizeSlug(value) {
 
 export async function fetchMenu(slugInput, fetchImpl = fetch) {
   const slug = normalizeSlug(slugInput);
-  let manifest;
-  let manifestPath;
-  for (const candidate of [`v2_2/${slug}_es_manifest.json`, `${slug}_es_manifest.json`]) {
-    try {
-      manifest = await requestJson(`${MENU_CDN}/${candidate}`, {}, fetchImpl);
-      manifestPath = candidate;
-      break;
-    } catch (error) {
-      if (error.details?.status !== 404) throw error;
+  const { value, cache } = await cachedProviderRead("justeat-menu", { country: "es", slug }, async () => {
+    let manifest;
+    let manifestPath;
+    for (const candidate of [`v2_2/${slug}_es_manifest.json`, `${slug}_es_manifest.json`]) {
+      try {
+        manifest = await requestJson(`${MENU_CDN}/${candidate}`, {}, fetchImpl);
+        manifestPath = candidate;
+        break;
+      } catch (error) {
+        if (error.details?.status !== 404) throw error;
+      }
     }
-  }
-  if (!manifest) throw new CliError(`Restaurant menu not found: ${slug}`, "MENU_NOT_FOUND");
-  const manifestDirectory = manifestPath.includes("/")
-    ? manifestPath.slice(0, manifestPath.lastIndexOf("/") + 1)
-    : "";
-  const resolveCdnPath = (value, fallback) => {
-    const selected = value || fallback;
-    if (/^https?:\/\//i.test(selected)) return selected;
-    return `${MENU_CDN}/${selected.startsWith("/") ? selected.slice(1) : selected}`;
-  };
-  const [items, details] = await Promise.all([
-    requestJson(resolveCdnPath(manifest.ItemsUrl, `${manifestDirectory}${slug}_es_items.json`), {}, fetchImpl),
-    requestJson(resolveCdnPath(manifest.ItemDetailsUrl, `${manifestDirectory}${slug}_es_itemDetails.json`), {}, fetchImpl),
-  ]);
-  return { slug, manifest, items, details };
+    if (!manifest) throw new CliError(`Restaurant menu not found: ${slug}`, "MENU_NOT_FOUND");
+    const manifestDirectory = manifestPath.includes("/")
+      ? manifestPath.slice(0, manifestPath.lastIndexOf("/") + 1)
+      : "";
+    const resolveCdnPath = (entry, fallback) => {
+      const selected = entry || fallback;
+      if (/^https?:\/\//i.test(selected)) return selected;
+      return `${MENU_CDN}/${selected.startsWith("/") ? selected.slice(1) : selected}`;
+    };
+    const [items, details] = await Promise.all([
+      requestJson(resolveCdnPath(manifest.ItemsUrl, `${manifestDirectory}${slug}_es_items.json`), {}, fetchImpl),
+      requestJson(resolveCdnPath(manifest.ItemDetailsUrl, `${manifestDirectory}${slug}_es_itemDetails.json`), {}, fetchImpl),
+    ]);
+    return { slug, manifest, items, details };
+  }, { ttlMs: MENU_CACHE_TTL_MS, staleIfErrorMs: 30 * 60_000, enabled: fetchImpl === fetch });
+  return { ...value, cache };
 }
 
 export function normalizeMenu(menuData) {

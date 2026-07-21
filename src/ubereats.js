@@ -2,8 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { offerAvailableForFulfilment, storesForFulfilment } from "./availability.js";
 import { CliError } from "./lib.js";
 import { loadBrowserSession } from "./browser-session.js";
+import { cachedProviderRead } from "./provider-cache.js";
 
 const BASE = "https://www.ubereats.com";
+const MENU_CACHE_TTL_MS = 15 * 60_000;
 const CHECKOUT_PAYLOAD_TYPES = [
   "cartItems", "basketSize", "subtotal", "paymentBarPayload", "total", "fareBreakdown", "upfrontTipping", "promotion",
   "requestUtensilPayload", "promoAndMembershipSavingBannerPayloadCheckout", "deliveryOptInInfo",
@@ -448,15 +450,22 @@ export async function expandUberEatsCatalogs(stores, queries, options = {}) {
       if (options.menuCache?.get(store.id) === menuPromise) options.menuCache.delete(store.id);
       throw error;
     }
-    return queries.flatMap((query) => uberEatsMenuOffers(store, menu, query));
+    const cacheHit = menu.cache?.hit === true;
+    const cacheStale = menu.cache?.stale === true;
+    if (cacheHit && store.orderable !== false) menu = { ...menu, isOpen: true };
+    return { offers: queries.flatMap((query) => uberEatsMenuOffers(store, menu, query)), cacheHit, cacheStale };
   });
-  const offers = outcomes.filter((outcome) => outcome.status === "fulfilled").flatMap((outcome) => outcome.value);
+  const fulfilled = outcomes.filter((outcome) => outcome.status === "fulfilled");
+  const offers = fulfilled.flatMap((outcome) => outcome.value.offers);
   const failures = outcomes.filter((outcome) => outcome.status === "rejected");
   return {
     offers: [...new Map(offers.map((offer) => [`${offer.merchant.id}:${offer.item.id}`, offer])).values()],
     searchedStores: outcomes.length - failures.length,
     failedStores: failures.length,
     rateLimitedStores: failures.filter((outcome) => outcome.reason?.code === "RATE_LIMITED").length,
+    cachedStores: fulfilled.filter((outcome) => outcome.value.cacheHit).length,
+    staleStores: fulfilled.filter((outcome) => outcome.value.cacheStale).length,
+    liveStores: fulfilled.filter((outcome) => !outcome.value.cacheHit).length,
   };
 }
 
@@ -570,26 +579,40 @@ export async function uberEatsMenu(storeUuid, options = {}) {
   const requestedAt = options.scheduledAt ? new Date(options.scheduledAt) : null;
   const scheduled = requestedAt && !Number.isNaN(requestedAt.getTime());
   const target = scheduled ? localScheduleParts(requestedAt, options.timeZone, options.windowMinutes) : null;
-  const payload = await request("getStoreV1", {
-    storeUuid,
-    sfNuggetCount: 0,
-    diningMode: "DELIVERY",
-    ...(target ? { time: target, cbType: "EATER_ENDORSED" } : {}),
-  }, options);
-  const unavailableMessage = /(?:delivery |currently |not )?unavailable|no disponible|cerrad|closed/i.test(String(payload.closedMessage ?? ""));
-  const scheduledRanges = target ? payload.adaptedDeliveryHoursInfos?.timeRanges?.[target.date] : null;
-  const scheduledSlotAvailable = !target || !Array.isArray(scheduledRanges)
-    || scheduledRanges.some((range) => Number(range.startTime) <= target.startTime && Number(range.endTime) >= target.endTime);
-  return {
-    storeUuid,
-    title: payload.title ?? payload.store?.title ?? "",
-    isOpen: payload.isOpen !== false && payload.isWithinDeliveryRange !== false
-      && !unavailableMessage && scheduledSlotAvailable,
-    closedMessage: payload.closedMessage ?? null,
-    scheduledSlotAvailable,
-    items: collectCatalog(payload),
-    raw: options.raw ? payload : undefined,
-  };
+  const session = options.cookieHeader ? { cookieHeader: options.cookieHeader } : await loadBrowserSession("ubereats");
+  const location = uberEatsDeliveryAddressFromCookies(session?.cookieHeader);
+  const locationKey = location ? {
+    latitude: Number(Number(location.latitude).toFixed(5)),
+    longitude: Number(Number(location.longitude).toFixed(5)),
+  } : null;
+  const requestOptions = session?.cookieHeader ? { ...options, cookieHeader: session.cookieHeader } : options;
+  const { value, cache } = await cachedProviderRead("ubereats-menu", { storeUuid, target, location: locationKey }, async () => {
+    const payload = await request("getStoreV1", {
+      storeUuid,
+      sfNuggetCount: 0,
+      diningMode: "DELIVERY",
+      ...(target ? { time: target, cbType: "EATER_ENDORSED" } : {}),
+    }, requestOptions);
+    const unavailableMessage = /(?:delivery |currently |not )?unavailable|no disponible|cerrad|closed/i.test(String(payload.closedMessage ?? ""));
+    const scheduledRanges = target ? payload.adaptedDeliveryHoursInfos?.timeRanges?.[target.date] : null;
+    const scheduledSlotAvailable = !target || !Array.isArray(scheduledRanges)
+      || scheduledRanges.some((range) => Number(range.startTime) <= target.startTime && Number(range.endTime) >= target.endTime);
+    return {
+      storeUuid,
+      title: payload.title ?? payload.store?.title ?? "",
+      isOpen: payload.isOpen !== false && payload.isWithinDeliveryRange !== false
+        && !unavailableMessage && scheduledSlotAvailable,
+      closedMessage: payload.closedMessage ?? null,
+      scheduledSlotAvailable,
+      items: collectCatalog(payload),
+      raw: options.raw ? payload : undefined,
+    };
+  }, {
+    ttlMs: MENU_CACHE_TTL_MS,
+    staleIfErrorMs: 30 * 60_000,
+    enabled: (options.fetchImpl ?? fetch) === fetch && !options.raw,
+  });
+  return { ...value, cache };
 }
 
 export async function uberEatsItem(source, options = {}) {
