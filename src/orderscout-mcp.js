@@ -286,7 +286,7 @@ export const ORDERSCOUT_MCP_TOOLS = [
   },
   {
     name: "orderscout_open_basket",
-    description: "Return the official browser handoff for the already-created basket without opening an external browser. Direct provider checkouts return a URL; Uber Eats returns a structured multicart selection target because its generic checkout URL can open a different cart. In ChatGPT Work, follow the returned handoff and verify the merchant and every line. Never presses the final purchase button.",
+    description: "Return the safe handoff for an already-created basket without opening an external browser. Glovo returns api_checkout_review because its authenticated CLI session cannot be transferred into ChatGPT's protected in-app Browser; do not open that URL or claim the account is logged out, and use orderscout_checkout_review_task instead. Uber Eats returns a structured multicart selection target because its generic checkout URL can open a different cart. Never presses the final purchase button.",
     inputSchema: objectSchema({ searchId: string("OrderScout search ID."), offerId: string("Offer ID.") }, ["searchId", "offerId"]), annotations: remoteWrite,
     command: (input) => ["basket", "open", input.searchId, input.offerId, "--no-open", "--agent"],
   },
