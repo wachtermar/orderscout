@@ -89,6 +89,7 @@ export const ORDERSCOUT_MCP_TOOLS = [
           label: string("Human-readable requested line."),
           intent: string("The complete semantic requirement for this one line."),
           quantity: { type: "integer", minimum: 1, maximum: 99 },
+          required: { type: "boolean", description: "False only for a genuinely optional recipe garnish or add-on. Optional lines are searched and may be selected, but do not make an otherwise cookable basket incomplete." },
           discoveryQueries: { type: "array", maxItems: 8, items: { type: "string", minLength: 1, maxLength: 80 } },
           catalogQueries: { type: "array", maxItems: 8, items: { type: "string", minLength: 1, maxLength: 80 } },
         }, ["intent"]),
@@ -126,6 +127,24 @@ export const ORDERSCOUT_MCP_TOOLS = [
       ...(input.merchantId ? ["--merchant-id", input.merchantId] : []),
       ...(input.query ? ["--query", input.query] : []),
     ],
+  },
+  {
+    name: "orderscout_inspect_candidates",
+    description: "Efficiently inspect up to 24 independent shopping lines in one local call after search_begin. Each line accepts several lexical aliases which are ORed for candidate retrieval, while multi-word aliases remain AND queries. Results stay grouped by requested line and contain compact provider evidence for the LLM to judge semantically. Prefer this over dozens of separate candidate calls; use orderscout_candidates only for follow-up pagination or complete-catalog verification. This never calls provider APIs or changes a basket.",
+    inputSchema: objectSchema({
+      searchId: string("OrderScout search ID."),
+      requests: {
+        type: "array", minItems: 1, maxItems: 24,
+        items: objectSchema({
+          forItem: string("Shopping-item ID or stable line label."),
+          queries: { type: "array", minItems: 1, maxItems: 8, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 80 } },
+          provider: { type: "string", enum: ["justeat", "glovo", "ubereats"] },
+          merchantId: string("Optional merchant ID for one-store basket inspection."),
+          limit: { type: "integer", minimum: 1, maximum: 20, description: "Maximum compact matches returned for this line; defaults to 20 so broad grocery terms retain distinct product forms." },
+        }, ["forItem", "queries"]),
+      },
+    }, ["searchId", "requests"]), annotations: readOnly,
+    command: (input) => ["search", "inspect", input.searchId, "--json", JSON.stringify(input.requests), "--agent"],
   },
   {
     name: "orderscout_record_external_evidence",

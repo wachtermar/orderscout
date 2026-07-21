@@ -45,6 +45,7 @@ export function searchRequestFingerprint(intent, options, providers) {
     id: String(item.id ?? ""),
     intent: String(item.intent ?? "").trim().replace(/\s+/g, " ").toLowerCase(),
     quantity: Number(item.quantity ?? 1),
+    required: item.required !== false,
     discoveryQueries: normalizedQueryList(item.discoveryQueries),
     catalogQueries: normalizedQueryList(item.catalogQueries),
   })).sort((left, right) => left.id.localeCompare(right.id));
@@ -714,6 +715,91 @@ export async function searchCandidates(id, options = {}) {
   return candidatePageForSearch(await loadSearch(id), options);
 }
 
+function compactInspectionCandidate(offer, matchedQueries) {
+  return {
+    offerId: offer.id,
+    provider: offer.provider,
+    available: offer.available,
+    merchant: offer.merchant,
+    item: offer.item,
+    quantity: offer.quantity,
+    servesPeople: offer.servesPeople,
+    package: offer.package,
+    suppliedLiters: offer.suppliedLiters,
+    etaMinutes: offer.etaMinutes,
+    fulfilment: offer.fulfilment,
+    pricing: offer.pricing,
+    promotion: offer.promotion,
+    membership: offer.membership,
+    eligibility: offer.source?.eligibility ?? null,
+    catalogQueriesMatched: offer.source?.catalogQueriesMatched ?? [],
+    matchedQueries,
+    url: offer.url,
+  };
+}
+
+export function candidateInspectionForSearch(search, requests = []) {
+  if (!Array.isArray(requests) || requests.length < 1 || requests.length > 24) {
+    throw new CliError("Candidate inspection requires 1..24 shopping-line requests", "INVALID_CANDIDATE_INSPECTION");
+  }
+  const inspections = requests.map((input, index) => {
+    if (!input || typeof input !== "object") {
+      throw new CliError(`Candidate inspection ${index + 1} must be an object`, "INVALID_CANDIDATE_INSPECTION");
+    }
+    const forItem = String(input.forItem ?? "").trim();
+    if (!forItem || forItem.length > 100) {
+      throw new CliError(`Candidate inspection ${index + 1} needs a short forItem`, "INVALID_CANDIDATE_INSPECTION");
+    }
+    const queries = [...new Set((input.queries ?? []).map((value) => String(value ?? "").trim()).filter(Boolean))];
+    if (queries.length < 1 || queries.length > 8 || queries.some((query) => query.length > 80)) {
+      throw new CliError(`Candidate inspection ${forItem} requires 1..8 short lexical queries`, "INVALID_CANDIDATE_INSPECTION");
+    }
+    const limit = Math.max(1, Math.min(20, Math.trunc(Number(input.limit ?? 20)) || 20));
+    const matched = new Map();
+    const queryCoverage = queries.map((query) => {
+      const page = candidatePageForSearch(search, {
+        provider: input.provider,
+        merchantId: input.merchantId,
+        query,
+        limit: 100,
+      });
+      for (const offer of page.candidates) {
+        const existing = matched.get(offer.id) ?? { offer, queries: [] };
+        existing.queries.push(query);
+        matched.set(offer.id, existing);
+      }
+      return { query, total: page.total, inspected: page.candidates.length, truncated: page.hasMore };
+    });
+    const scoped = candidatePageForSearch(search, {
+      provider: input.provider,
+      merchantId: input.merchantId,
+      limit: 1,
+    });
+    const candidates = [...matched.values()].slice(0, limit)
+      .map(({ offer, queries: matchedQueries }) => compactInspectionCandidate(offer, matchedQueries));
+    return {
+      forItem,
+      provider: input.provider ?? null,
+      merchantId: input.merchantId ?? null,
+      scopedCandidateCount: scoped.total,
+      uniqueMatches: matched.size,
+      returnedMatches: candidates.length,
+      truncated: matched.size > candidates.length || queryCoverage.some((entry) => entry.truncated),
+      queryCoverage,
+      candidates,
+    };
+  });
+  return {
+    searchId: search.id,
+    semanticMode: search.semanticMode ?? "deterministic",
+    inspections,
+  };
+}
+
+export async function inspectSearchCandidates(id, requests = []) {
+  return candidateInspectionForSearch(await loadSearch(id), requests);
+}
+
 function boundedText(value, label, maximum, required = true) {
   const text = String(value ?? "").trim();
   if (required && !text) throw new CliError(`${label} is required`, "INVALID_EXTERNAL_EVIDENCE");
@@ -948,13 +1034,14 @@ export function buildLlmSelection(search, requestedSelections, options = {}) {
   const parsed = search.parsedIntent ?? parseIntent(search.intent ?? "");
   let missingItems = [];
   if (shoppingItems.length) {
-    const required = new Map(shoppingItems.map((item, index) => {
+    const allItems = new Set(shoppingItems.map((item, index) => String(item?.id ?? `item-${index + 1}`).trim()));
+    const required = new Map(shoppingItems.flatMap((item, index) => {
       const id = String(item?.id ?? `item-${index + 1}`).trim();
-      return [id, Math.max(1, Number(item?.quantity ?? 1))];
+      return item?.required === false ? [] : [[id, Math.max(1, Number(item?.quantity ?? 1))]];
     }));
     const covered = new Map();
     for (const line of lines) {
-      if (!required.has(line.forItem)) {
+      if (!allItems.has(line.forItem)) {
         throw new CliError(`Selection line references unknown shopping item ${line.forItem}`, "INVALID_SELECTION");
       }
       const current = covered.get(line.forItem) ?? { quantity: 0, lines: [] };
@@ -988,7 +1075,8 @@ export function buildLlmSelection(search, requestedSelections, options = {}) {
       if (!entry || typeof entry !== "object") throw new CliError(`Missing item ${index + 1} must be an object`, "INVALID_MISSING_ITEMS");
       const forItem = String(entry.forItem ?? "").trim();
       const reason = String(entry.reason ?? "").trim();
-      if (!required.has(forItem)) throw new CliError(`Missing item references unknown shopping item ${forItem}`, "INVALID_MISSING_ITEMS");
+      if (!allItems.has(forItem)) throw new CliError(`Missing item references unknown shopping item ${forItem}`, "INVALID_MISSING_ITEMS");
+      if (!required.has(forItem)) throw new CliError(`Optional shopping item ${forItem} must not make the basket incomplete`, "INVALID_MISSING_ITEMS");
       if (seenMissing.has(forItem)) throw new CliError(`Missing shopping item ${forItem} was recorded more than once`, "INVALID_MISSING_ITEMS");
       seenMissing.add(forItem);
       const unfilled = remaining.get(forItem) ?? 0;
@@ -1046,7 +1134,7 @@ export function buildLlmSelection(search, requestedSelections, options = {}) {
     composition: {
       kind: lines.length > 1 ? "llm-shopping-list" : "llm-selection",
       complete: missingItems.length === 0,
-      requestedItems: shoppingItems.length || lines.length,
+      requestedItems: shoppingItems.filter((item) => item?.required !== false).length || lines.length,
       distinctItems: new Set(lines.map((line) => line.item.id ?? line.item.name)).size,
       missingItems,
     },

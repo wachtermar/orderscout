@@ -16,7 +16,7 @@ import { PROVIDERS, configureAccounts, loadAccounts, parseProviderList, publicAc
 import { assertProviderAvailable, clearProviderCooldown, recordProviderRateLimit } from "./provider-cooldown.js";
 import {
   confirmEligibility, ingestOffers, loadSearch, recordBasket, recordComparisonOutcomes, recordExternalEvidence, recordProviderError, recordQuote, resultsFor,
-  reviewProvider, searchCandidates, searchResults, selectCandidates, startSearch,
+  inspectSearchCandidates, reviewProvider, searchCandidates, searchResults, selectCandidates, startSearch,
 } from "./searches.js";
 import { runOrderScoutMcpServer } from "./orderscout-mcp.js";
 import {
@@ -46,6 +46,7 @@ Usage:
   orderscout search ingest <search-id> <provider> --json '[normalized offers]'
   orderscout search error <search-id> <provider> --message text
   orderscout search candidates <search-id> [--offset 0] [--limit 50] [--provider glovo] [--merchant-id id]
+  orderscout search inspect <search-id> --json '[{"forItem":"eggs","queries":["huevos","eggs"],"provider":"glovo","merchantId":"..."}]'
   orderscout search evidence <search-id> --offer-ids '["candidate-id"]' --json '{structured evidence}'
   orderscout search select <search-id> --json '[{"offerId":"...","quantity":1,"forItem":"...","reason":"..."}]'
   orderscout search review <search-id> <provider> --disposition inspected_no_suitable_match|unavailable --reason text
@@ -108,6 +109,7 @@ export function shoppingItemsFlag(flags) {
       label: String(item.label ?? intent).trim(),
       intent,
       quantity,
+      required: item.required !== false,
       discoveryQueries: queries("discoveryQueries"),
       // Chat agents should supply focused vocabulary. The public CLI remains
       // usable when a human only lists shopping lines: each line's own wording
@@ -1003,9 +1005,9 @@ export async function runOrderScout(argv) {
     return writeOutput({
       name: "OrderScout",
       version: packageJson.version,
-      workflowContract: "llm-comparison-v9",
+      workflowContract: "llm-comparison-v10",
       requiredTools: [
-        "orderscout_search_begin", "orderscout_candidates", "orderscout_record_external_evidence", "orderscout_select_candidates",
+        "orderscout_search_begin", "orderscout_candidates", "orderscout_inspect_candidates", "orderscout_record_external_evidence", "orderscout_select_candidates",
         "orderscout_review_provider", "orderscout_quote_comparison", "orderscout_results",
       ],
       country: "ES",
@@ -1158,6 +1160,10 @@ export async function runOrderScout(argv) {
         merchantId: flags["merchant-id"],
         query: flags.query,
       }), flags);
+    }
+    if (action === "inspect") {
+      const [searchId] = args;
+      return writeOutput(await inspectSearchCandidates(searchId, jsonFlag(flags, "json")), flags);
     }
     if (action === "evidence") {
       const [searchId] = args;

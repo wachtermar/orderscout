@@ -2,6 +2,13 @@
 
 This project follows Semantic Versioning. It is currently pre-1.0; command and normalized response changes may occur between minor releases and will be listed here.
 
+## 0.1.23 - 2026-07-21
+
+- Add compact batched LLM candidate inspection for up to 24 shopping lines, avoiding dozens of local tool calls and multi-megabyte catalog dumps while leaving semantic selection with the model.
+- Consolidate overlapping household and recipe needs so one sufficiently large product—such as a 12-pack of eggs—can satisfy both instead of being bought twice.
+- Mark recipe-source optional garnishes and additions as non-blocking; missing optional lines no longer turn an otherwise cookable basket into an unusable partial selection.
+- Add regression coverage for batched alias inspection, package-aware recipe quantities, optional ingredients, and the public MCP contract.
+
 ## 0.1.22 - 2026-07-21
 
 - Treat phrases such as “ingredients to cook lunch later” as immediate grocery requests; only explicit delivery timing schedules fulfilment.
