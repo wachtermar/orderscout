@@ -647,6 +647,10 @@ function isLlmSelection(offer) {
   return offer.source?.llmSelected === true;
 }
 
+function isCompleteLlmSelection(offer) {
+  return isLlmSelection(offer) && offer.composition?.complete !== false;
+}
+
 function merchantKey(offer) {
   return `${offer.provider}:${offer.merchant?.id ?? offer.merchant?.name ?? ""}`;
 }
@@ -867,10 +871,10 @@ export async function recordExternalEvidence(id, offerIds, input) {
   };
 }
 
-export function buildLlmSelection(search, requestedSelections) {
+export function buildLlmSelection(search, requestedSelections, options = {}) {
   if (search.semanticMode !== "llm") throw new CliError("LLM selection is only available for LLM-mode searches", "LLM_SELECTION_NOT_AVAILABLE");
-  if (!Array.isArray(requestedSelections) || !requestedSelections.length || requestedSelections.length > 20) {
-    throw new CliError("Selections must be a non-empty array with at most 20 lines", "INVALID_SELECTION");
+  if (!Array.isArray(requestedSelections) || !requestedSelections.length || requestedSelections.length > 24) {
+    throw new CliError("Selections must be a non-empty array with at most 24 lines", "INVALID_SELECTION");
   }
   const candidates = new Map(search.offers.filter((offer) => !isLlmSelection(offer)).map((offer) => [offer.id, offer]));
   const seen = new Set();
@@ -942,6 +946,7 @@ export function buildLlmSelection(search, requestedSelections) {
   }
   const shoppingItems = Array.isArray(search.shoppingItems) ? search.shoppingItems : [];
   const parsed = search.parsedIntent ?? parseIntent(search.intent ?? "");
+  let missingItems = [];
   if (shoppingItems.length) {
     const required = new Map(shoppingItems.map((item, index) => {
       const id = String(item?.id ?? `item-${index + 1}`).trim();
@@ -957,26 +962,66 @@ export function buildLlmSelection(search, requestedSelections) {
       current.lines.push(line);
       covered.set(line.forItem, current);
     }
-    const missing = [...required].filter(([id, quantity]) => {
+    const remaining = new Map([...required].map(([id, quantity]) => {
       const itemLines = covered.get(id);
-      if (!itemLines) return true;
-      if (parsed.kind !== "meal") return itemLines.quantity < quantity;
-      const selectedForItem = itemLines.lines.map((line) => candidates.get(line.candidateId));
-      const explicitCapacity = Math.max(...selectedForItem.map((offer) => Number(offer.servesPeople ?? 0)), 0);
-      const distinctItems = new Set(itemLines.lines.map((line) => line.item.id ?? line.item.name)).size;
-      return Math.max(explicitCapacity, distinctItems) < quantity;
-    }).map(([id]) => id);
-    if (missing.length) {
-      throw new CliError(`Selection does not cover every requested shopping item: ${missing.join(", ")}`, "INCOMPLETE_SELECTION");
+      if (!itemLines) return [id, quantity];
+      // A single shopping line may represent a prepared meal for the party.
+      // Multi-line grocery lists use literal cart quantities even when words
+      // such as "lunch" or "shakshuka" make the broad intent look meal-like.
+      if (shoppingItems.length === 1 && parsed.kind === "meal") {
+        const selectedForItem = itemLines.lines.map((line) => candidates.get(line.candidateId));
+        const servingCapacity = selectedForItem.reduce((sum, offer, index) => {
+          const lineQuantity = itemLines.lines[index].quantity;
+          const servesPeople = Number(offer.servesPeople ?? 0);
+          return sum + (servesPeople > 0 ? servesPeople * lineQuantity : lineQuantity);
+        }, 0);
+        return [id, Math.max(0, quantity - servingCapacity)];
+      }
+      return [id, Math.max(0, quantity - itemLines.quantity)];
+    }));
+    const requestedMissing = options.missingItems ?? [];
+    if (!Array.isArray(requestedMissing) || requestedMissing.length > 24) {
+      throw new CliError("missingItems must be an array with at most 24 lines", "INVALID_MISSING_ITEMS");
     }
+    const seenMissing = new Set();
+    missingItems = requestedMissing.map((entry, index) => {
+      if (!entry || typeof entry !== "object") throw new CliError(`Missing item ${index + 1} must be an object`, "INVALID_MISSING_ITEMS");
+      const forItem = String(entry.forItem ?? "").trim();
+      const reason = String(entry.reason ?? "").trim();
+      if (!required.has(forItem)) throw new CliError(`Missing item references unknown shopping item ${forItem}`, "INVALID_MISSING_ITEMS");
+      if (seenMissing.has(forItem)) throw new CliError(`Missing shopping item ${forItem} was recorded more than once`, "INVALID_MISSING_ITEMS");
+      seenMissing.add(forItem);
+      const unfilled = remaining.get(forItem) ?? 0;
+      if (unfilled < 1) throw new CliError(`Shopping item ${forItem} is already fully covered by selected candidates`, "INVALID_MISSING_ITEMS");
+      const quantity = Number(entry.quantity ?? unfilled);
+      if (!Number.isInteger(quantity) || quantity !== unfilled) {
+        throw new CliError(`Missing item ${forItem} must record its exact unfilled quantity (${unfilled})`, "INVALID_MISSING_ITEMS");
+      }
+      if (!reason || reason.length > 500) throw new CliError(`Missing item ${index + 1} requires a short grounded reason`, "INVALID_MISSING_ITEMS");
+      const evidence = entry.evidence ?? [];
+      if (!Array.isArray(evidence) || evidence.length > 8 || evidence.some((value) => typeof value !== "string" || !value.trim() || value.length > 300)) {
+        throw new CliError(`Missing item ${index + 1} evidence must contain at most 8 short strings`, "INVALID_MISSING_ITEMS");
+      }
+      remaining.set(forItem, 0);
+      return { forItem, quantity, reason, evidence: evidence.map((value) => value.trim()) };
+    });
+    const unresolved = [...remaining].filter(([, quantity]) => quantity > 0).map(([id]) => id);
+    if (unresolved.length) {
+      throw new CliError(`Selection does not cover every requested shopping item: ${unresolved.join(", ")}`, "INCOMPLETE_SELECTION");
+    }
+  } else if ((options.missingItems ?? []).length) {
+    throw new CliError("missingItems requires an explicit shoppingItems request", "INVALID_MISSING_ITEMS");
   }
-  if (shoppingItems.length && parsed.kind === "meal" && Number(parsed.people ?? 1) > 1) {
+  if (!missingItems.length && shoppingItems.length === 1 && parsed.kind === "meal" && Number(parsed.people ?? 1) > 1) {
     const people = Number(parsed.people);
-    const explicitCapacity = Math.max(...selectedOffers.map((offer) => Number(offer.servesPeople ?? 0)), 0);
-    const distinctItems = new Set(lines.map((line) => line.item.id ?? line.item.name)).size;
-    if (explicitCapacity < people && distinctItems < people) {
+    const servingCapacity = selectedOffers.reduce((sum, offer, index) => {
+      const lineQuantity = lines[index].quantity;
+      const servesPeople = Number(offer.servesPeople ?? 0);
+      return sum + (servesPeople > 0 ? servesPeople * lineQuantity : lineQuantity);
+    }, 0);
+    if (servingCapacity < people) {
       throw new CliError(
-        `A meal for ${people} requires ${people} distinct dishes or an item explicitly serving the party`,
+        `A meal for ${people} requires at least ${people} individual portions or explicit sharing capacity`,
         "INCOMPLETE_MEAL",
       );
     }
@@ -1000,9 +1045,10 @@ export function buildLlmSelection(search, requestedSelections) {
     quantity: 1,
     composition: {
       kind: lines.length > 1 ? "llm-shopping-list" : "llm-selection",
-      complete: true,
+      complete: missingItems.length === 0,
       requestedItems: shoppingItems.length || lines.length,
       distinctItems: new Set(lines.map((line) => line.item.id ?? line.item.name)).size,
+      missingItems,
     },
     lines,
     available: selectedOffers.every((offer) => offer.available !== false),
@@ -1013,15 +1059,18 @@ export function buildLlmSelection(search, requestedSelections) {
       subtotal,
       itemSavings: Math.round(lines.reduce((sum, line) => sum + Number(line.pricing?.itemSavings ?? 0), 0) * 100) / 100,
       discount: 0,
-      total: estimatedTotal,
+      total: missingItems.length ? null : estimatedTotal,
       exact: false,
-      missing: ["final checkout validation"],
+      missing: missingItems.length
+        ? [`requested items unavailable: ${missingItems.map((entry) => entry.forItem).join(", ")}`]
+        : ["final checkout validation"],
     },
     promotion: selectionPromotion(lines),
     source: {
       ...first.source,
       bundle: lines.length > 1,
       llmSelected: true,
+      partialSelection: missingItems.length > 0,
       selectedCandidateIds: lines.map((line) => line.candidateId),
     },
     semanticAssessment: lines.some((line) => line.semanticAssessment) ? {
@@ -1035,21 +1084,26 @@ export function buildLlmSelection(search, requestedSelections) {
   };
 }
 
-export async function selectCandidates(id, selections) {
+export async function selectCandidates(id, selections, options = {}) {
   const search = await loadSearch(id);
-  const selection = buildLlmSelection(search, selections);
+  const selection = buildLlmSelection(search, selections, options);
   search.offers.push(selection);
   search.selections = [...(search.selections ?? []), {
     id: selection.id,
     candidateIds: selection.source.selectedCandidateIds,
+    complete: selection.composition.complete,
+    missingItems: selection.composition.missingItems,
     createdAt: new Date().toISOString(),
   }];
   search.providerReviews = {
     ...(search.providerReviews ?? {}),
     [selection.provider]: {
-      disposition: "selected",
+      disposition: selection.composition.complete ? "selected" : "partial_selection",
       offerId: selection.id,
-      reason: selection.lines.map((line) => line.reason).join(" ").slice(0, 500),
+      reason: [
+        ...selection.lines.map((line) => line.reason),
+        ...selection.composition.missingItems.map((entry) => entry.reason),
+      ].join(" ").slice(0, 500),
       reviewedAt: new Date().toISOString(),
     },
   };
@@ -1088,14 +1142,22 @@ export function resultsFor(search) {
   const llmMode = search.semanticMode === "llm";
   const candidates = search.offers.filter((offer) => !isLlmSelection(offer));
   const allSelectedOffers = search.offers.filter(isLlmSelection);
+  const completeSelectedOffers = allSelectedOffers.filter(isCompleteLlmSelection);
+  const partialSelectedOffers = allSelectedOffers.filter((offer) => !isCompleteLlmSelection(offer));
   const legacySelectedReviews = Object.fromEntries(allSelectedOffers.map((offer) => [offer.provider, {
-    disposition: "selected", offerId: offer.id, reason: "Legacy model selection",
+    disposition: isCompleteLlmSelection(offer) ? "selected" : "partial_selection",
+    offerId: offer.id,
+    reason: "Legacy model selection",
   }]));
   const providerReviews = search.providerReviews ?? legacySelectedReviews;
   const selectedOffers = llmMode && Object.keys(providerReviews).length
-    ? allSelectedOffers.filter((offer) => providerReviews[offer.provider]?.disposition === "selected"
+    ? completeSelectedOffers.filter((offer) => providerReviews[offer.provider]?.disposition === "selected"
       && providerReviews[offer.provider]?.offerId === offer.id)
-    : allSelectedOffers;
+    : completeSelectedOffers;
+  const partialSelections = llmMode && Object.keys(providerReviews).length
+    ? partialSelectedOffers.filter((offer) => providerReviews[offer.provider]?.disposition === "partial_selection"
+      && providerReviews[offer.provider]?.offerId === offer.id)
+    : partialSelectedOffers;
   const rankingInputs = llmMode ? selectedOffers : search.offers;
   const rankingProviders = llmMode ? [...new Set(selectedOffers.map((offer) => offer.provider))] : search.providers;
   const baseRanking = rankOffers(rankingInputs, search.intent, search.objective, { providers: rankingProviders });
@@ -1152,6 +1214,14 @@ export function resultsFor(search) {
     providers: Object.fromEntries(search.providers.map((provider) => [provider, candidates.filter((offer) => offer.provider === provider).length])),
     merchants: new Set(candidates.map(merchantKey)).size,
     selectedBundles: selectedOffers.length,
+    partialBundles: partialSelections.map((offer) => ({
+      id: offer.id,
+      provider: offer.provider,
+      merchant: offer.merchant,
+      lines: offer.lines,
+      pricing: offer.pricing,
+      composition: offer.composition,
+    })),
     selectionRequired: unreviewedCandidateProviders.length > 0,
     reviewedProviders,
     unreviewedCandidateProviders,
@@ -1199,8 +1269,10 @@ export function resultsFor(search) {
       ...(failedProviders.length ? [`Provider search failed: ${failedProviders.join(", ")}. It was attempted and was not silently omitted.`] : []),
       ...(partialProviders.length ? [`Provider catalog coverage was partial: ${partialProviders.join(", ")}. Empty results from failed catalog calls were not treated as proof of no match.`] : []),
       ...(pendingEligibility.length ? ["Some Glovo matches require the user to confirm legal age on Glovo before basket creation."] : []),
-      ...(llmMode && selectedOffers.length === 0
+      ...(llmMode && selectedOffers.length === 0 && partialSelections.length === 0
         ? ["Candidate retrieval is complete enough to inspect, but semantic selection is still required. Page through candidates and let the LLM choose; do not report no match yet."] : []),
+      ...(partialSelections.length
+        ? [`${partialSelections.length} best partial basket(s) were recorded with explicit missing items; partial baskets cannot be quoted, added to a cart, or ordered.`] : []),
       ...(unreviewedCandidateProviders.length
         ? [`Provider review is still required for: ${unreviewedCandidateProviders.join(", ")}. No winner can be confirmed yet.`] : []),
       ...(unresolvedProviders.length

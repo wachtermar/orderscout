@@ -21,8 +21,8 @@ test("provider discovery alias expansion remains bounded and deduplicated", () =
   ]);
 });
 
-test("round-robin planning gives each of 1-12 shopping lines a first query", () => {
-  for (let size = 1; size <= 12; size += 1) {
+test("round-robin planning gives each of 1-24 shopping lines a first query", () => {
+  for (let size = 1; size <= 24; size += 1) {
     const shoppingItems = Array.from({ length: size }, (_, index) => ({
       id: `line-${index + 1}`,
       catalogQueries: [`primary ${index + 1}`, `secondary ${index + 1}`],
@@ -31,7 +31,8 @@ test("round-robin planning gives each of 1-12 shopping lines a first query", () 
     assert.deepEqual(plan.queries, shoppingItems.map((item) => item.catalogQueries[0]), `size ${size}`);
     assert.deepEqual(plan.omittedItems, [], `size ${size}`);
     assert.ok(plan.itemCoverage.every((item) => item.plannedQueries.length === 1), `size ${size}`);
-    assert.equal(plan.complete, false, `size ${size}`);
+    assert.equal(plan.complete, true, `size ${size}`);
+    assert.equal(plan.aliasCoverageComplete, false, `size ${size}`);
   }
 });
 
@@ -46,6 +47,8 @@ test("global terms are scheduled once after every line gets a first chance", () 
   });
   assert.deepEqual(plan.queries, ["leche", "huevos", "supermercado", "alimentación", "milk"]);
   assert.deepEqual(plan.omittedQueries, [{ query: "eggs", global: false, itemIds: ["eggs"] }]);
+  assert.equal(plan.complete, true);
+  assert.equal(plan.aliasCoverageComplete, false);
   assert.equal(plan.budgetExhausted, true);
 });
 
@@ -139,7 +142,7 @@ test("provider plans keep independent discovery and catalog budgets", () => {
   assert.deepEqual(plan.discovery.queries, ["estanco", "vaper", "vape"]);
   assert.deepEqual(plan.catalog.queries, ["Tappo", "líquido", "Lost Mary", "cartucho"]);
   assert.deepEqual(plan.catalog.omittedQueries, [{ query: "mentol", global: false, itemIds: ["liquid"] }]);
-  assert.equal(plan.complete, false);
+  assert.equal(plan.complete, true);
   assert.deepEqual(plan.omittedItems, []);
 });
 

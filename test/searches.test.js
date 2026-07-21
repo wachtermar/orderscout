@@ -272,6 +272,46 @@ test("LLM selection rejects candidates that cannot share one merchant basket", (
   ]), { code: "SELECTION_BASKET_CONFLICT" });
 });
 
+test("an inspected partial grocery basket records exact missing lines and cannot become a winner", () => {
+  const bread = normalizeOffer("glovo", {
+    merchant: { id: "market", name: "Market" },
+    item: { id: "bread", name: "Crusty bread", unitPrice: 2 },
+    available: true, pricing: {}, source: { storeId: "market" },
+  });
+  const search = {
+    id: "c".repeat(24), semanticMode: "llm", intent: "shakshuka groceries now",
+    parsedIntent: { kind: "product", people: null }, fulfilment: { mode: "now" },
+    objective: "value", providers: ["glovo"], offers: [bread],
+    shoppingItems: [
+      { id: "bread", intent: "crusty bread", quantity: 1 },
+      { id: "ground-coriander", intent: "ground coriander", quantity: 1 },
+    ],
+    providerStatus: { glovo: { state: "complete", error: null } }, createdAt: "now", updatedAt: "now",
+  };
+  const partial = buildLlmSelection(search, [{
+    offerId: bread.id, quantity: 1, forItem: "bread", reason: "Exact bread match.",
+  }], { missingItems: [{
+    forItem: "ground-coriander",
+    reason: "The complete store catalog contained fresh cilantro but no ground coriander.",
+    evidence: ["No ground coriander candidate was returned from the inspected catalog."],
+  }] });
+  assert.equal(partial.composition.complete, false);
+  assert.equal(partial.composition.missingItems[0].forItem, "ground-coriander");
+  assert.equal(partial.pricing.total, null);
+  const result = resultsFor({
+    ...search,
+    offers: [bread, partial],
+    providerReviews: { glovo: { disposition: "partial_selection", offerId: partial.id } },
+  });
+  assert.equal(result.comparison.offers.length, 0);
+  assert.equal(result.comparison.winnerReady, false);
+  assert.equal(result.candidatePool.partialBundles.length, 1);
+  assert.match(result.warnings.join(" "), /cannot be quoted, added to a cart, or ordered/i);
+  assert.throws(() => buildLlmSelection(search, [{
+    offerId: bread.id, quantity: 1, forItem: "bread", reason: "Exact bread match.",
+  }], { missingItems: [{ forItem: "bread", reason: "Contradicts the selected line." }] }), { code: "INVALID_MISSING_ITEMS" });
+});
+
 test("LLM selection rejects currently unavailable candidates for immediate delivery", () => {
   const closed = normalizeOffer("glovo", {
     merchant: { id: "closed-shop", name: "Closed Shop" },

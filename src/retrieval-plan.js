@@ -70,9 +70,10 @@ function publicEntry(entry) {
  * chance, shared queries cover every associated line, global queries follow,
  * and remaining per-line queries are selected round-robin.
  *
- * The function never claims full coverage when the budget truncates work. Its
- * omittedQueries and omittedItems fields are intended to flow directly into
- * provider coverage metadata.
+ * Completeness means every requested line received at least one targeted query.
+ * Omitted aliases remain visible separately, but do not turn a fully attempted
+ * 18-line recipe into a false provider failure. A line that receives no query
+ * still makes the plan incomplete and flows into omittedItems.
  */
 export function planRoundRobinQueries({
   globalQueries = [],
@@ -176,7 +177,10 @@ export function planRoundRobinQueries({
     omittedQueries: omittedEntries.map(publicEntry),
     omittedItems: itemCoverage.filter((item) => item.status === "omitted" || item.status === "no_queries").map((item) => item.itemId),
     itemCoverage,
-    complete: omittedEntries.length === 0 && itemCoverage.every((item) => item.status === "complete"),
+    complete: itemQueues.length
+      ? itemCoverage.every((item) => item.plannedQueries.length > 0)
+      : omittedEntries.length === 0,
+    aliasCoverageComplete: omittedEntries.length === 0,
     budgetExhausted: omittedEntries.length > 0 && selected.size >= budget,
   };
 }

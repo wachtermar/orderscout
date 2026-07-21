@@ -2,6 +2,15 @@
 
 This project follows Semantic Versioning. It is currently pre-1.0; command and normalized response changes may occur between minor releases and will be listed here.
 
+## 0.1.22 - 2026-07-21
+
+- Treat phrases such as “ingredients to cook lunch later” as immediate grocery requests; only explicit delivery timing schedules fulfilment.
+- Accept literal grocery quantities inside meal-related recipe requests instead of demanding distinct restaurant dishes for ingredients such as two green peppers.
+- Accept repeated individual portions when the user explicitly requests one prepared dish for several people, while keeping open-ended meal variety as an LLM decision.
+- Let the model record a best partial same-store basket with exact missing lines rather than inventing a substitute; partial baskets cannot be quoted, opened, created, or ordered.
+- Expose all 24 supported atomic shopping lines through the MCP schema and count every requested line as covered once at least one targeted query was attempted, while retaining omitted aliases as diagnostics.
+- Add regressions for the exact 18-line Greek shakshuka workflow and validate the corrected selector against the real 7,469-candidate search without changing any provider cart.
+
 ## 0.1.21 - 2026-07-21
 
 - Traverse every official Uber Eats grocery catalog page instead of treating the first approximately 50 products as a complete supermarket menu.

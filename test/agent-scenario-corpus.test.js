@@ -377,7 +377,7 @@ test("every corpus request produces a bounded LLM-owned retrieval plan without c
   const begin = tool("orderscout_search_begin");
   assert.deepEqual(begin.inputSchema.properties.objective.enum, ["cheapest", "fastest", "best", "value"]);
   assert.equal(begin.inputSchema.properties.providers, undefined);
-  assert.equal(begin.inputSchema.properties.shoppingItems.maxItems, 12);
+  assert.equal(begin.inputSchema.properties.shoppingItems.maxItems, 24);
   for (const scenario of AGENT_SCENARIO_CORPUS) {
     assert.ok(scenario.discoveryQueries.length >= 1 && scenario.discoveryQueries.length <= 8, scenario.id);
     assert.ok(scenario.catalogQueries.length >= 1 && scenario.catalogQueries.length <= 8, scenario.id);
@@ -411,7 +411,8 @@ test("MCP and Work-skill contracts expose provider disposition and all-provider 
   assert.match(SKILL_TEXT, /native web search/i);
   assert.match(SKILL_TEXT, /ambiguous same-name/i);
   assert.match(SKILL_TEXT, /externalEvidence\.complete/);
-  assert.match(SKILL_TEXT, /distinct suitable dishes/i);
+  assert.match(SKILL_TEXT, /sensible variety/i);
+  assert.match(SKILL_TEXT, /three shakshukas for three people/i);
   assert.match(SKILL_TEXT, /every provider/i);
   assert.match(SKILL_TEXT, /CHECKOUT_UNAVAILABLE/);
   assert.match(SKILL_TEXT, /next suitable same-merchant bundle/i);
@@ -512,13 +513,34 @@ test("a complete two-person meal accepts two distinct mains or one explicit shar
   assert.equal(sharingSelection.servesPeople, 2);
 });
 
-test("an ordinary dish multiplied by party size is rejected as an incomplete meal", () => {
+test("an explicitly requested individual dish can be multiplied by party size", () => {
   const dish = rawOffer("justeat", 1, { itemId: "ordinary", itemName: "Ordinary curry", merchantId: "curry-house" });
   const search = searchState([dish], {
     providers: ["justeat"], intent: "dinner for two",
     shoppingItems: [{ id: "meal", intent: "dinner for two", quantity: 2 }],
   });
-  assert.throws(() => buildLlmSelection(search, [selectionLine(dish, "meal", 2)]));
+  const selection = buildLlmSelection(search, [selectionLine(dish, "meal", 2)]);
+  assert.equal(selection.composition.complete, true);
+  assert.equal(selection.lines[0].quantity, 2);
+  assert.throws(() => buildLlmSelection(search, [selectionLine(dish, "meal", 1)]), { code: "INCOMPLETE_SELECTION" });
+});
+
+test("recipe ingredient quantities stay literal even when the request mentions a meal for four", () => {
+  const peppers = rawOffer("glovo", 1, { itemId: "green-pepper", itemName: "Pimiento verde", merchantId: "supermarket" });
+  const eggs = rawOffer("glovo", 2, { itemId: "eggs", itemName: "Huevos 6 ud", merchantId: "supermarket" });
+  const search = searchState([peppers, eggs], {
+    providers: ["glovo"], intent: "shakshuka ingredients to cook lunch later for four people",
+    shoppingItems: [
+      { id: "green-peppers", intent: "two green peppers", quantity: 2 },
+      { id: "eggs", intent: "six eggs", quantity: 1 },
+    ],
+  });
+  const selection = buildLlmSelection(search, [
+    selectionLine(peppers, "green-peppers", 2),
+    selectionLine(eggs, "eggs", 1),
+  ]);
+  assert.equal(selection.composition.complete, true);
+  assert.equal(selection.lines[0].quantity, 2);
 });
 
 test("every independent shopping line must be covered before a bundle is complete", () => {
