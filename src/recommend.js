@@ -223,12 +223,27 @@ function scheduledInstant(normalized, options = {}) {
   return result.toISOString();
 }
 
+function requestsScheduledDelivery(normalized, scheduledAt) {
+  if (scheduledAt) return true;
+  // A date without a clock still means the user wants scheduled fulfilment.
+  if (/\b(?:tomorrow|manana|day after tomorrow|pasado manana)\b/.test(normalized)
+    || /\b20\d{2}-\d{2}-\d{2}\b/.test(normalized)
+    || /\b\d{1,2}[\/.]\d{1,2}[\/.]20\d{2}\b/.test(normalized)
+    || /\b\d{1,2}\s+(?:january|enero|february|febrero|march|marzo|april|abril|may|mayo|june|junio|july|julio|august|agosto|september|septiembre|october|octubre|november|noviembre|december|diciembre)(?:\s+20\d{2})?\b/.test(normalized)
+    || /\b(?:next|this|el|este|esta|proximo|proxima)?\s*(?:sunday|domingo|monday|lunes|tuesday|martes|wednesday|miercoles|thursday|jueves|friday|viernes|saturday|sabado)\b/.test(normalized)) return true;
+  if (/\b(?:preorder|pre-order|schedule|scheduled|programar|programado|programada)\b/.test(normalized)) return true;
+  // "Later" can describe when food will be cooked or used. Treat it as a
+  // delivery time only when it is attached to ordering or fulfilment language.
+  return /\b(?:deliver|delivery|arrive|drop[ -]?off|entrega|entregar|recibir)\b.{0,32}\b(?:later|despues|mas tarde)\b/.test(normalized)
+    || /\b(?:later|despues|mas tarde)\b.{0,32}\b(?:delivery|deliver|entrega|entregar)\b/.test(normalized);
+}
+
 export function parseIntent(text, options = {}) {
   const normalized = normalizedText(text).replace(/,/g, ".");
   const water = /\b(?:agua|water)\b/.test(normalized)
     && !/\b(?:tonic|coconut|vitamin|flavou?red|saborizada)\s+(?:agua|water)\b/.test(normalized);
   const packagedMealProduct = /\b(?:pasta sauce|salsa (?:de|para) pasta|pasta dental|instant ramen|ramen instantaneo|frozen pizza|pizza congelada|pizza dough|masa de pizza|meal kit|kit de comida|dog food|cat food|pet food|comida para perro|comida para gato|pienso)\b/.test(normalized);
-  const productCollection = /\b(?:groceries|grocery shop|breakfast shop|supplies|birthday setup|movie night|lista de compra|hacer la compra|suministros)\b/.test(normalized);
+  const productCollection = /\b(?:grocer(?:y|ies)(?:\s+(?:shop|basics|list|items))?|supermarket shop|breakfast shop|supplies|birthday setup|movie night|lista de compra|hacer la compra|suministros)\b/.test(normalized);
   const meal = MEAL_PATTERN.test(normalized) && !packagedMealProduct && !productCollection;
   const people = partySize(normalized);
   const scheduledAt = scheduledInstant(normalized, options);
@@ -247,7 +262,7 @@ export function parseIntent(text, options = {}) {
     budget: budgetAmount(normalized),
     sparkling: /\b(?:sparkling|con gas|gaseosa)\b/.test(normalized),
     occasion,
-    deliveryTime: scheduledAt || /\b(?:tomorrow|manana|day after tomorrow|pasado manana|later|despues|preorder|programar|next|proximo|proxima)\b/.test(normalized) ? "scheduled" : "now",
+    deliveryTime: requestsScheduledDelivery(normalized, scheduledAt) ? "scheduled" : "now",
     scheduledAt,
     timeZone: options.timeZone ?? "Europe/Madrid",
     allergyMentioned: /\b(?:allergy|allergic|allergen|alergia|alergico|alergica|anaphyl)/.test(normalized),

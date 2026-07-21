@@ -236,18 +236,29 @@ test("scheduled-delivery matrix parses relative, weekday, ISO, named-month, and 
     assert.equal(intent.deliveryTime, "scheduled", query);
     assert.equal(intent.scheduledAt, iso, query);
   }
-  for (const query of ["breakfast tomorrow", "desayuno mañana", "preorder dinner later"]) {
+  for (const query of ["breakfast tomorrow", "desayuno mañana", "preorder dinner later", "deliver dinner later"]) {
     const intent = parseIntent(query, options);
     assert.equal(intent.deliveryTime, "scheduled", query);
     assert.equal(intent.scheduledAt, null, query);
   }
+  for (const query of [
+    "grocery basics and ingredients to cook a good lunch later for four people",
+    "buy shakshuka ingredients to use later",
+    "something I can cook for later",
+    "order groceries to cook later",
+  ]) {
+    const intent = parseIntent(query, options);
+    assert.equal(intent.deliveryTime, "now", query);
+    assert.equal(intent.scheduledAt, null, query);
+  }
+  assert.equal(parseIntent("grocery basics and ingredients to cook lunch later for four people", options).kind, "product");
   assert.equal(parseIntent("breakfast 31 February 2027 at 10am", options).scheduledAt, null);
 });
 
-test("LLM search tools preserve 1-12 independent shopping lines instead of combining their semantics", () => {
+test("LLM search tools preserve 1-24 independent shopping lines instead of combining their semantics", () => {
   const begin = ORDERSCOUT_MCP_TOOLS.find((tool) => tool.name === "orderscout_search_begin");
-  assert.equal(begin.inputSchema.properties.shoppingItems.maxItems, 12);
-  for (let size = 1; size <= 12; size += 1) {
+  assert.equal(begin.inputSchema.properties.shoppingItems.maxItems, 24);
+  for (let size = 1; size <= 24; size += 1) {
     const shoppingItems = Array.from({ length: size }, (_, index) => ({
       id: `line-${index + 1}`,
       intent: index % 2 ? `food requirement ${index + 1}` : `grocery requirement ${index + 1}`,

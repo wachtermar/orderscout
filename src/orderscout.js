@@ -1003,7 +1003,7 @@ export async function runOrderScout(argv) {
     return writeOutput({
       name: "OrderScout",
       version: packageJson.version,
-      workflowContract: "llm-comparison-v8",
+      workflowContract: "llm-comparison-v9",
       requiredTools: [
         "orderscout_search_begin", "orderscout_candidates", "orderscout_record_external_evidence", "orderscout_select_candidates",
         "orderscout_review_provider", "orderscout_quote_comparison", "orderscout_results",
@@ -1165,7 +1165,9 @@ export async function runOrderScout(argv) {
     }
     if (action === "select") {
       const [searchId] = args;
-      return writeOutput(await selectCandidates(searchId, jsonFlag(flags, "json")), flags);
+      return writeOutput(await selectCandidates(searchId, jsonFlag(flags, "json"), {
+        missingItems: jsonFlag(flags, "missing-items", []),
+      }), flags);
     }
     if (action === "review") {
       const [searchId, provider] = args;
@@ -1196,6 +1198,11 @@ export async function runOrderScout(argv) {
     const search = await loadSearch(searchId);
     const offer = search.offers.find((entry) => entry.id === offerId);
     if (!offer) throw new CliError("Offer not found", "OFFER_NOT_FOUND");
+    if (offer.source?.llmSelected === true && offer.composition?.complete === false) {
+      throw new CliError("This is an incomplete shopping basket and cannot be opened, prepared, created, or quoted", "PARTIAL_SELECTION", {
+        missingItems: offer.composition.missingItems ?? [],
+      });
+    }
     if (action === "open") {
       if (offer.provider === "justeat") {
         if (!offer.source?.planId) throw new CliError("Just Eat offer is missing its source plan", "SOURCE_PLAN_MISSING");
@@ -1307,6 +1314,11 @@ export async function runOrderScout(argv) {
     const search = await loadSearch(rest[1]);
     const offer = search.offers.find((entry) => entry.id === rest[2]);
     if (!offer) throw new CliError("Offer not found", "OFFER_NOT_FOUND");
+    if (offer.source?.llmSelected === true && offer.composition?.complete === false) {
+      throw new CliError("This is an incomplete shopping basket and cannot be ordered", "PARTIAL_SELECTION", {
+        missingItems: offer.composition.missingItems ?? [],
+      });
+    }
     assertAllergenReview(search, flags);
     if (offer.provider === "ubereats") {
       let id = offer.basket?.id;
