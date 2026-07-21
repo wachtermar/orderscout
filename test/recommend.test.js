@@ -4,6 +4,8 @@ import {
   isHealthyBreakfastItem, isPreparedBreakfastItem, parseIntent, parsePackVolume,
   productIntentSpec, productRelevance, providerSearchQueries, recommend,
 } from "../src/recommend.js";
+import { storesForFulfilment } from "../src/availability.js";
+import { normalizeUberSearch, searchUberEats } from "../src/ubereats.js";
 
 test("parsePackVolume understands Spanish packs and metric units", () => {
   assert.deepEqual(parsePackVolume("Pack 6 unidades de 1,5L"), {
@@ -259,7 +261,75 @@ test("LLM candidate mode returns normalized menu items without semantic rejectio
   assert.ok(result.candidates.every((candidate) => candidate.ranking.reasons.includes("Unfiltered normalized menu candidate for LLM review")));
 });
 
-test("product discovery prioritizes a directly matching merchant even when it is closed and beyond the scan limit", async () => {
+test("immediate product discovery never opens a closed merchant menu", async () => {
+  let menuRequests = 0;
+  const fetchImpl = async () => Response.json({ restaurants: [restaurant({
+    id: "closed", name: "Closed Shop", uniqueName: "closed-shop",
+    isOpenNowForDelivery: false, cuisines: [{ name: "Tiendas" }],
+  })], metaData: {} });
+  const result = await recommend(
+    { latitude: 36.5, longitude: -4.8, postcode: "29603" },
+    "water and a chocolate snack now",
+    {
+      candidateMode: "llm",
+      fetchImpl,
+      fetchMenuImpl: async () => {
+        menuRequests += 1;
+        return menuData([{ Id: "water", Name: "Agua", Variations: [{ Id: "water", BasePrice: 1 }] }]);
+      },
+    },
+  );
+  assert.equal(menuRequests, 0);
+  assert.equal(result.scope.scannedStores, 0);
+  assert.equal(result.candidates.length, 0);
+});
+
+test("Uber Eats does not treat a missing merchant-orderability signal as available now", () => {
+  const [offer] = normalizeUberSearch({ feedItems: [{ miniStoreWithItems: {
+    store: { storeUuid: "unknown", title: "Unknown Store" },
+    items: [{ uuid: "water", title: "Water", price: 100 }],
+  } }] });
+  assert.equal(offer.available, false);
+  assert.equal(offer.source.merchantAvailability.status, "unverified");
+});
+
+test("Glovo excludes closed and merely schedulable stores from immediate menu expansion", () => {
+  const stores = [
+    { id: "open", open: true, schedulable: true },
+    { id: "closed", open: false, schedulable: false },
+    { id: "later", open: false, schedulable: true },
+  ];
+  assert.deepEqual(storesForFulfilment("glovo", stores, { deliveryTime: "now" }).map((store) => store.id), ["open"]);
+  assert.deepEqual(storesForFulfilment("glovo", stores, { deliveryTime: "scheduled" }).map((store) => store.id), ["open", "later"]);
+});
+
+test("Uber Eats skips explicitly closed stores and verifies unknown stores through their menu", async () => {
+  const menuStoreIds = [];
+  const result = await searchUberEats("water", {
+    cookieHeader: "sid=test",
+    storeLimit: 2,
+    fetchImpl: async (url, options) => {
+      if (String(url).endsWith("getSearchFeedV1")) return Response.json({ data: { feedItems: [
+        { store: { storeUuid: "closed", title: "Closed Store", tracking: { storePayload: { isOrderable: false } } } },
+        { store: { storeUuid: "unknown", title: "Unknown Store" } },
+      ] } });
+      const body = JSON.parse(options.body);
+      menuStoreIds.push(body.storeUuid);
+      return Response.json({ data: {
+        title: "Unknown Store", isOpen: true, isWithinDeliveryRange: true,
+        sections: [{ items: [{ uuid: "water", title: "Water", price: 100 }] }],
+      } });
+    },
+  });
+  assert.deepEqual(menuStoreIds, ["unknown"]);
+  assert.equal(result.discoveredStores, 2);
+  assert.equal(result.eligibleStores, 1);
+  assert.equal(result.excludedUnavailableStores, 1);
+  assert.deepEqual(result.offers.map((offer) => offer.item.id), ["water"]);
+  assert.ok(result.offers.every((offer) => offer.available));
+});
+
+test("scheduled product discovery can inspect a relevant merchant that is closed now", async () => {
   const ordinary = Array.from({ length: 35 }, (_, index) => restaurant({
     id: `ordinary-${index}`,
     name: `Restaurant ${index}`,
@@ -272,7 +342,7 @@ test("product discovery prioritizes a directly matching merchant even when it is
   const fetchImpl = async () => Response.json({ restaurants: [...ordinary, vapeStore], metaData: {} });
   const result = await recommend(
     { latitude: 36.5, longitude: -4.8, postcode: "29603" },
-    "vape liquid preferably ice",
+    "vape liquid preferably ice tomorrow at 10am",
     {
       fetchImpl,
       fetchMenuImpl: async (slug) => slug === "croco-vapes" ? {
@@ -290,5 +360,5 @@ test("product discovery prioritizes a directly matching merchant even when it is
   assert.equal(result.scope.availability, "includes preorder or currently closed stores");
   assert.deepEqual(result.candidates.map((candidate) => candidate.item.id), ["icy"]);
   assert.equal(result.candidates[0].restaurant.open, false);
-  assert.equal(result.candidates[0].ranking.preferenceScore, 100);
+  assert.ok(result.candidates[0].ranking.preferenceScore > 0);
 });

@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { openSystemUrl } from "./auth.js";
+import { offersForFulfilment, storesForFulfilment } from "./availability.js";
 import { beginBrowserLogin, importChromeSession, loadBrowserSession, logoutBrowserSession } from "./browser-session.js";
 import {
   createGlovoBasket, glovoAddresses, glovoBaskets, glovoCheckoutUrl, glovoMe, glovoMenu, glovoMenuOffers, glovoStoreCatalog, placeGlovoOrder, quoteGlovoBasket, searchGlovo,
@@ -562,6 +563,8 @@ async function collectJustEat(intent, flags) {
       strategy: "complete-area-menu-scan",
       discoveredStores: result.scope?.discoveredStores ?? null,
       eligibleStores: result.scope?.eligibleStores ?? null,
+      availableStores: result.scope?.availableStores ?? null,
+      excludedUnavailableStores: result.scope?.excludedUnavailableStores ?? null,
       candidateStores: result.scope?.candidateStores ?? null,
       searchedStores: result.scope?.scannedStores ?? null,
       failedMenus: result.scope?.failedMenus ?? 0,
@@ -605,7 +608,8 @@ async function collectGlovo(intent, flags) {
     .map((store) => [`${store.id}:${store.addressId}`, store])).values()];
   const maxStores = Math.max(1, Math.min(MAX_GLOVO_DISCOVERED_STORES,
     Number(flags.stores ?? MAX_GLOVO_DISCOVERED_STORES)));
-  const stores = allStores.slice(0, maxStores);
+  const fulfilmentStores = storesForFulfilment("glovo", allStores, parsed);
+  const stores = fulfilmentStores.slice(0, maxStores);
   const requireEligibility = [parsed, ...(flags.shoppingItems ?? []).map((item) => parseIntent(item.intent))]
     .some((itemIntent) => productIntentSpec(itemIntent).concept?.id === "vape");
   const catalogs = [];
@@ -648,7 +652,7 @@ async function collectGlovo(intent, flags) {
   const directOffers = fulfilled.flatMap((result) => result.value.offers ?? []);
   const menuOffers = fullMenus.flatMap(({ store, menu }) => glovoMenuOffers(store, menu, { requireEligibility }));
   const allOffers = [...directOffers, ...menuOffers, ...catalogs.flatMap((catalog) => catalog.offers)];
-  const discovered = [...new Map(allOffers.map((offer) => [
+  const discovered = offersForFulfilment([...new Map(allOffers.map((offer) => [
     `${offer.merchant?.id}:${offer.source?.storeProductId ?? offer.source?.productExternalId ?? offer.item?.id}`,
     {
       ...offer,
@@ -657,7 +661,7 @@ async function collectGlovo(intent, flags) {
         : offer.available,
       ...(parsed.deliveryTime === "scheduled" ? { fulfilment: { requestedAt: parsed.scheduledAt, timeZone: parsed.timeZone, status: "unverified", source: "glovo-scheduled-search" } } : {}),
     },
-  ])).values()];
+  ])).values()], parsed);
   return {
     offers: discovered,
     providerMeta: {
@@ -667,6 +671,8 @@ async function collectGlovo(intent, flags) {
       rateLimitedDiscoveryQueries: discoveryFailures.filter((result) => result.reason?.code === "RATE_LIMITED").length,
       catalogQueries,
       discoveredStores: allStores.length,
+      eligibleStores: fulfilmentStores.length,
+      excludedUnavailableStores: allStores.length - fulfilmentStores.length,
       searchedStores: fullMenus.length,
       catalogProducts: menuOffers.length,
       failedCatalogs,
@@ -680,7 +686,7 @@ async function collectGlovo(intent, flags) {
         city: location.city ?? null,
         source: "glovo-saved-address",
       },
-      partial: discoveryFailures.length > 0 || failedCatalogs > 0 || stores.length < allStores.length
+      partial: discoveryFailures.length > 0 || failedCatalogs > 0 || stores.length < fulfilmentStores.length
         || flags.retrievalPlan?.complete === false || catalogs.some((catalog) => catalog.failedQueries > 0),
       eligibilityRequired: catalogs.filter((catalog) => catalog.eligibility).map((catalog) => ({
         merchantId: catalog.store.id,
@@ -737,11 +743,12 @@ async function collectUberEats(intent, flags) {
       });
     } catch (error) { crossCatalogError = error; }
   }
-  const offers = [...new Map([...fulfilled.flatMap((result) => result.value.offers), ...crossCatalog.offers]
+  const offers = offersForFulfilment([...new Map([...fulfilled.flatMap((result) => result.value.offers), ...crossCatalog.offers]
     .map((offer) => [`${offer.merchant?.id}:${offer.item?.id}`, {
       ...offer,
       ...(parsed.deliveryTime === "scheduled" ? { fulfilment: { requestedAt: parsed.scheduledAt, timeZone: parsed.timeZone, status: "candidate", source: "uber-scheduled-search" } } : {}),
-    }])).values()];
+    }])).values()], parsed);
+  const fulfilmentStores = storesForFulfilment("ubereats", [...storeCache.values()], parsed);
   let deliveryLocation = null;
   try { deliveryLocation = uberEatsDraftDeliveryLocation(await uberEatsCarts()); }
   catch { /* Search remains usable when there is no readable draft location. */ }
@@ -763,7 +770,9 @@ async function collectUberEats(intent, flags) {
       crossCatalogOffers: crossCatalog.offers.length,
       crossCatalogError: crossCatalogError?.code ?? null,
       discoveredStores: storeCache.size,
-      unexpandedStoreCards: Math.max(0, storeCache.size - crossCatalog.searchedStores),
+      eligibleStores: fulfilmentStores.length,
+      excludedUnavailableStores: storeCache.size - fulfilmentStores.length,
+      unexpandedStoreCards: Math.max(0, fulfilmentStores.length - crossCatalog.searchedStores),
       catalogQueries: crossCatalogQueries,
       retrievalPlan: flags.retrievalPlan ?? null,
       deliveryLocation,
@@ -919,7 +928,7 @@ export async function runOrderScout(argv) {
     return writeOutput({
       name: "OrderScout",
       version: packageJson.version,
-      workflowContract: "llm-comparison-v7",
+      workflowContract: "llm-comparison-v8",
       requiredTools: [
         "orderscout_search_begin", "orderscout_candidates", "orderscout_record_external_evidence", "orderscout_select_candidates",
         "orderscout_review_provider", "orderscout_quote_comparison", "orderscout_results",
