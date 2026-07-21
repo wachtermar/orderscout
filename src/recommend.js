@@ -1,4 +1,5 @@
 import { CliError, discoverRestaurants, fetchMenu, normalizeMenu } from "./lib.js";
+import { storesForFulfilment } from "./availability.js";
 
 const HEALTHY_TERMS = [
   "ensalada", "salad", "poke", "bowl", "plancha", "grilled", "verdura", "vegetable",
@@ -770,9 +771,11 @@ export async function recommend(location, text, options = {}) {
   }
   const eligibleRestaurants = (discovery.restaurants ?? []).filter((restaurant) =>
     restaurant.isDelivery && !restaurant.isTemporarilyOffline);
-  const openRestaurants = eligibleRestaurants.filter((restaurant) => restaurant.isOpenNowForDelivery);
   const shouldRequireOpen = options.open || (intent.deliveryTime === "now" && !options.includeClosed);
-  let restaurants = shouldRequireOpen && openRestaurants.length ? openRestaurants : eligibleRestaurants;
+  const fulfilmentRestaurants = shouldRequireOpen
+    ? storesForFulfilment("justeat", eligibleRestaurants, { deliveryTime: "now" })
+    : eligibleRestaurants;
+  let restaurants = fulfilmentRestaurants;
   if (intent.kind === "product" || llmMode) {
     const shoppingIntents = (options.shoppingIntents?.length ? options.shoppingIntents : [text])
       .map((shoppingIntent) => parseIntent(shoppingIntent));
@@ -786,8 +789,7 @@ export async function recommend(location, text, options = {}) {
     }).relevant);
     const retail = (restaurant) => /\b(tienda|store|shop|supermerc|alimentacion|convenience|farmacia|pharmacy|retail|otros tipos)\b/
       .test(normalizedText(`${restaurant.name} ${restaurant.cuisines?.map((entry) => entry.name).join(" ")}`));
-    const directlyRelevant = eligibleRestaurants.filter((restaurant) => merchantFit(restaurant)
-      && (!options.open || restaurant.isOpenNowForDelivery));
+    const directlyRelevant = fulfilmentRestaurants.filter((restaurant) => merchantFit(restaurant));
     restaurants = [...new Map([
       ...directlyRelevant,
       ...restaurants.filter(retail),
@@ -854,12 +856,16 @@ export async function recommend(location, text, options = {}) {
       semanticMode: llmMode ? "llm" : "deterministic",
       discoveredStores: discovery.restaurants?.length ?? 0,
       eligibleStores: eligibleRestaurants.length,
+      availableStores: shouldRequireOpen ? fulfilmentRestaurants.length : null,
+      excludedUnavailableStores: shouldRequireOpen ? eligibleRestaurants.length - fulfilmentRestaurants.length : 0,
       candidateStores: candidateStoreCount,
       scannedStores: restaurants.length,
       failedMenus: scanned.filter((entry) => entry?.error).length,
-      availability: restaurants.every((restaurant) => restaurant.isOpenNowForDelivery)
-        ? "open for delivery now"
-        : "includes preorder or currently closed stores",
+      availability: restaurants.length === 0 && shouldRequireOpen
+        ? "no stores open for delivery now"
+        : restaurants.every((restaurant) => restaurant.isOpenNowForDelivery)
+          ? "open for delivery now"
+          : "includes preorder or currently closed stores",
     },
     feeAccuracy: "Item totals exclude delivery, service, bag and small-order fees until `justeat order quote`.",
     allergenSafety: intent.allergyMentioned

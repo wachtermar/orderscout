@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { offerAvailableForFulfilment, storesForFulfilment } from "./availability.js";
 import { CliError } from "./lib.js";
 import { loadBrowserSession } from "./browser-session.js";
 
@@ -257,6 +258,9 @@ function storeValue(value) {
     savings: 0,
     source: "ubereats-search-card",
   } : null;
+  const rawOrderable = value.tracking?.storePayload?.isOrderable ?? value.isOrderable ?? value.orderable;
+  const orderable = rawOrderable === true || rawOrderable === "true"
+    ? true : rawOrderable === false || rawOrderable === "false" ? false : null;
   return {
     id: uuid,
     name,
@@ -269,7 +273,7 @@ function storeValue(value) {
     membershipEligible: Boolean(value.hasUberOneBenefits ?? value.uberOne ?? value.membershipBenefit
       ?? meta.some((entry) => entry.badgeType === "MembershipBenefit" || entry.badgeDataWithFallback?.membership?.brandingType === "UBER_ONE")),
     promotion,
-    orderable: value.tracking?.storePayload?.isOrderable !== false,
+    orderable,
     url: value.actionUrl ? new URL(value.actionUrl, BASE).toString() : value.slug ? `${BASE}/store/${value.slug}/${uuid}` : `${BASE}/search`,
   };
 }
@@ -295,7 +299,7 @@ export function normalizeUberSearch(payload) {
       item: { id, name: title, description: item.itemDescription ?? item.description ?? null, unitPrice },
       quantity: 1,
       etaMinutes: store.etaMinutes?.min ?? null,
-      available: store.orderable !== false && item.isSoldOut !== true && item.isAvailable !== false,
+      available: store.orderable === true && item.isSoldOut !== true && item.isAvailable !== false,
       pricing: {
         currency: "EUR",
         originalSubtotal: deal.originalPrice,
@@ -308,7 +312,15 @@ export function normalizeUberSearch(payload) {
       promotion: mergePromotions(storeWidePromotion(store.promotion), deal.promotion),
       membershipEligible: store.membershipEligible,
       url: store.url,
-      source: { adapter: "ubereats-api", storeUuid: store.id, itemUuid: id, sectionUuid: item.sectionUuid ?? "", subsectionUuid: item.subsectionUuid ?? "", rawPrice: item.price ?? item.itemPrice ?? (unitPrice === null ? null : Math.round(unitPrice * 100)), requiresCustomizations: Boolean(item.hasCustomizations ?? item.customizationsList?.length) },
+      source: {
+        adapter: "ubereats-api", storeUuid: store.id, itemUuid: id, sectionUuid: item.sectionUuid ?? "", subsectionUuid: item.subsectionUuid ?? "",
+        rawPrice: item.price ?? item.itemPrice ?? (unitPrice === null ? null : Math.round(unitPrice * 100)),
+        requiresCustomizations: Boolean(item.hasCustomizations ?? item.customizationsList?.length),
+        merchantAvailability: {
+          status: store.orderable === true ? "available" : store.orderable === false ? "unavailable" : "unverified",
+          source: "uber-search-card",
+        },
+      },
     });
   }
   function walk(value, inheritedStore = null) {
@@ -366,7 +378,7 @@ export function uberEatsMenuOffers(store, menu, query) {
     item: { id: item.uuid, name: item.title, description: item.description, unitPrice: item.price },
     quantity: 1,
     etaMinutes: store.etaMinutes?.min ?? null,
-    available: store.orderable !== false && menu.isOpen !== false && item.available !== false,
+    available: store.orderable !== false && menu.isOpen === true && item.available !== false,
     pricing: {
       currency: "EUR",
       originalSubtotal: item.originalPrice,
@@ -383,6 +395,10 @@ export function uberEatsMenuOffers(store, menu, query) {
       adapter: "ubereats-api", storeUuid: store.id, itemUuid: item.uuid,
       sectionUuid: item.sectionUuid ?? "", subsectionUuid: item.subsectionUuid ?? "",
       rawPrice: item.rawPrice, requiresCustomizations: item.hasCustomizations,
+      merchantAvailability: {
+        status: menu.isOpen === true ? "available" : menu.isOpen === false ? "unavailable" : "unverified",
+        source: "uber-store-menu",
+      },
     },
   }));
 }
@@ -408,7 +424,10 @@ async function mapConcurrent(values, concurrency, mapper) {
 
 export async function expandUberEatsCatalogs(stores, queries, options = {}) {
   const priorityStoreIds = new Set((options.priorityStoreIds ?? []).map(String));
-  const selected = [...stores]
+  const eligibleStores = storesForFulfilment("ubereats", [...stores], {
+    deliveryTime: options.scheduledAt ? "scheduled" : "now",
+  });
+  const selected = eligibleStores
     .sort((left, right) => Number(priorityStoreIds.has(String(right.id))) - Number(priorityStoreIds.has(String(left.id)))
       || Number(right.queryHits ?? 0) - Number(left.queryHits ?? 0)
       || Number(right.rating ?? 0) - Number(left.rating ?? 0))
@@ -467,13 +486,16 @@ export async function searchUberEats(query, options = {}) {
   const directOffers = normalizeUberSearch(payload);
   let expandedOffers = [];
   const allStores = collectUberStores(payload);
+  const fulfilment = { deliveryTime: scheduled ? "scheduled" : "now" };
+  const eligibleStores = storesForFulfilment("ubereats", allStores, fulfilment);
   for (const store of allStores) {
     const existing = options.storeCache?.get(store.id);
     options.storeCache?.set(store.id, { ...existing, ...store, queryHits: Number(existing?.queryHits ?? 0) + 1 });
   }
-  if (directOffers.length < Math.min(10, limit) && options.expandStores !== false) {
+  const availableDirectOffers = directOffers.filter((offer) => offerAvailableForFulfilment(offer, fulfilment));
+  if (availableDirectOffers.length < Math.min(10, limit) && options.expandStores !== false) {
     const terms = normalizedTerms(query);
-    const stores = allStores;
+    const stores = eligibleStores;
     const relevant = stores.filter((store) => {
       const name = store.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
       return terms.some((term) => name.includes(term));
@@ -495,12 +517,16 @@ export async function searchUberEats(query, options = {}) {
       return uberEatsMenuOffers(store, menu, query);
     });
   }
-  const offers = [...new Map([...directOffers, ...expandedOffers]
+  const offers = [...new Map([...availableDirectOffers, ...expandedOffers]
+    .filter((offer) => offerAvailableForFulfilment(offer, fulfilment))
     .map((offer) => [`${offer.merchant.id}:${offer.item.id}`, offer])).values()].slice(0, limit);
   return {
     offers,
     fulfilment: scheduled ? { requestedAt: requestedAt.toISOString(), date, startTime, endTime, status: offers.length ? "candidate" : "unavailable", source: "uber-scheduled-search" } : null,
-    searchedStores: allStores.length,
+    discoveredStores: allStores.length,
+    eligibleStores: eligibleStores.length,
+    excludedUnavailableStores: allStores.length - eligibleStores.length,
+    searchedStores: eligibleStores.length,
     expandedStores: expandedOffers.length ? new Set(expandedOffers.map((offer) => offer.merchant.id)).size : 0,
     raw: options.raw ? payload : undefined,
   };
