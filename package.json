@@ -1,6 +1,6 @@
 {
   "name": "orderscout-cli",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "description": "Compare Just Eat, Glovo, and Uber Eats in Spain from one agent-friendly CLI",
   "keywords": [
     "just-eat",
@@ -40,7 +40,7 @@
     "test:live": "node scripts/live-canary.mjs",
     "test:matrix": "node --test test/query-matrix.test.js",
     "test:coverage": "node --experimental-test-coverage --test",
-    "check": "node --check src/orderscout.js && node --check src/orderscout-mcp.js && node --check src/browser-session.js && node --check src/glovo.js && node --check src/ubereats.js && node --check src/provider-cooldown.js && node --check src/providers.js && node --check src/ranking.js && node --check src/cli.js && node --check src/lib.js && node --check src/auth.js && node --check src/doctor.js && node --check src/output.js && node --check src/recommend.js && node --check src/order.js && node --check src/mcp.js && node --check scripts/live-canary.mjs && node --test",
+    "check": "node --check src/orderscout.js && node --check src/orderscout-mcp.js && node --check src/browser-session.js && node --check src/glovo.js && node --check src/ubereats.js && node --check src/provider-cache.js && node --check src/provider-cooldown.js && node --check src/providers.js && node --check src/ranking.js && node --check src/cli.js && node --check src/lib.js && node --check src/auth.js && node --check src/doctor.js && node --check src/output.js && node --check src/recommend.js && node --check src/order.js && node --check src/mcp.js && node --check scripts/live-canary.mjs && node --test",
     "pack:check": "npm pack --dry-run"
   },
   "dependencies": {},

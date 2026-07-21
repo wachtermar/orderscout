@@ -1,4 +1,5 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, readdir, stat } from "node:fs/promises";
 import { isIP } from "node:net";
 import { join } from "node:path";
 import { CliError } from "./lib.js";
@@ -22,10 +23,81 @@ const EXTERNAL_CLAIM_DIMENSIONS = new Set([
   "spiciness", "food_quality", "outside_rating", "authenticity", "popularity", "portion_size", "healthiness", "dietary_fit", "other",
 ]);
 const EXTERNAL_IDENTITY_SIGNALS = new Set(["name", "city", "address", "phone", "official_domain", "provider_url", "menu_item"]);
+const SEARCH_REUSE_WINDOW_MS = 2 * 60_000;
 
 function validateId(id) {
   if (!/^[a-f0-9]{24}$/.test(String(id ?? ""))) throw new CliError("Invalid OrderScout search ID", "INVALID_SEARCH_ID");
   return id;
+}
+
+function stableValue(value) {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableValue(value[key])]));
+}
+
+function normalizedQueryList(values) {
+  return [...new Set((values ?? []).map((value) => String(value).trim().replace(/\s+/g, " ").toLowerCase()).filter(Boolean))].sort();
+}
+
+export function searchRequestFingerprint(intent, options, providers) {
+  const shoppingItems = (options.shoppingItems ?? []).map((item) => ({
+    id: String(item.id ?? ""),
+    intent: String(item.intent ?? "").trim().replace(/\s+/g, " ").toLowerCase(),
+    quantity: Number(item.quantity ?? 1),
+    discoveryQueries: normalizedQueryList(item.discoveryQueries),
+    catalogQueries: normalizedQueryList(item.catalogQueries),
+  })).sort((left, right) => left.id.localeCompare(right.id));
+  const value = stableValue({
+    intent: String(intent ?? "").trim().replace(/\s+/g, " ").toLowerCase(),
+    objective: options.objective ?? null,
+    locationHint: options.locationHint ?? null,
+    semanticMode: options.semanticMode === "llm" ? "llm" : "deterministic",
+    shoppingItems,
+    externalResearch: options.externalResearch ?? "not_needed",
+    externalDimensions: normalizedQueryList(options.externalDimensions),
+    discoveryQueries: normalizedQueryList(options.queryPlan?.discoveryQueries),
+    catalogQueries: normalizedQueryList(options.queryPlan?.catalogQueries),
+    providers: [...providers].sort(),
+  });
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+export function reusableCompletedSearch(searches, fingerprint, options = {}) {
+  const now = Number(options.now ?? Date.now());
+  const windowMs = Math.max(0, Number(options.windowMs ?? SEARCH_REUSE_WINDOW_MS));
+  return searches.filter((search) => {
+    const createdAt = Date.parse(search?.createdAt ?? "");
+    const statuses = Object.values(search?.providerStatus ?? {});
+    return search?.requestFingerprint === fingerprint
+      && Number.isFinite(createdAt) && now - createdAt >= 0 && now - createdAt <= windowMs
+      && statuses.length > 0 && statuses.every((status) => status.state !== "pending")
+      && !(search.selections?.length)
+      && !(search.offers ?? []).some((offer) => offer.basket || offer.pricing?.exact);
+  }).sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))[0] ?? null;
+}
+
+async function findReusableSearch(fingerprint, options = {}) {
+  const now = Number(options.now ?? Date.now());
+  const windowMs = Math.max(0, Number(options.windowMs ?? SEARCH_REUSE_WINDOW_MS));
+  let names;
+  try { names = await readdir(providerPaths.searchesDirectory); }
+  catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+  const candidates = names.filter((name) => /^[a-f0-9]{24}\.json$/.test(name));
+  const recentNames = (await Promise.all(candidates.map(async (name) => {
+    try {
+      const details = await stat(join(providerPaths.searchesDirectory, name));
+      return now - details.mtimeMs <= windowMs ? name : null;
+    } catch { return null; }
+  }))).filter(Boolean);
+  const recent = (await Promise.all(recentNames.map(async (name) => {
+    try { return JSON.parse(await readFile(join(providerPaths.searchesDirectory, name), "utf8")); }
+    catch { return null; }
+  }))).filter(Boolean);
+  return reusableCompletedSearch(recent, fingerprint, { ...options, now, windowMs });
 }
 
 export async function startSearch(intent, options = {}) {
@@ -36,10 +108,29 @@ export async function startSearch(intent, options = {}) {
   if (!enabled.length) throw new CliError("No enabled providers have an account", "NO_ENABLED_PROVIDERS");
   const parsedIntent = parseIntent(text, options);
   const externalResearch = normalizeExternalResearchPlan(options.externalResearch, options.externalDimensions);
+  const requestFingerprint = searchRequestFingerprint(text, options, enabled);
+  if (options.fresh !== true) {
+    const reusable = await findReusableSearch(requestFingerprint, { windowMs: options.reuseWithinMs });
+    if (reusable) {
+      const routes = providerRoutes(enabled, accounts);
+      return {
+        search: summarizeSearch(reusable),
+        accounts: publicAccountStatus(accounts),
+        ...routes,
+        reused: true,
+        reuse: {
+          reason: "identical-completed-search",
+          searchId: reusable.id,
+          ageSeconds: Math.max(0, Math.round((Date.now() - Date.parse(reusable.createdAt)) / 1_000)),
+        },
+      };
+    }
+  }
   const search = {
     id: searchId(),
     version: 2,
     intent: text,
+    requestFingerprint,
     parsedIntent,
     fulfilment: {
       mode: parsedIntent.deliveryTime,

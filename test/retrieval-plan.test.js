@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { expandProviderDiscoveryQueries, planProviderRetrieval, planRoundRobinQueries } from "../src/retrieval-plan.js";
+import { shoppingItemsFlag } from "../src/orderscout.js";
 
 test("Glovo discovery adds provider-index language aliases without changing catalog semantics", () => {
   assert.deepEqual(
@@ -91,6 +92,25 @@ test("items with no query vocabulary are visible instead of silently disappearin
   assert.equal(plan.budgetExhausted, false);
 });
 
+test("shared merchant discovery terms cover shopping lines without redundant per-line store queries", () => {
+  const plan = planProviderRetrieval({
+    discoveryQueries: ["supermercado", "grocery"],
+    catalogQueries: ["huevos", "pan"],
+    shoppingItems: [
+      { id: "eggs", catalogQueries: ["huevos"] },
+      { id: "bread", catalogQueries: ["pan"] },
+    ],
+    discoveryBudget: 4,
+    catalogBudget: 4,
+  });
+  assert.equal(plan.discovery.complete, true);
+  assert.deepEqual(plan.discovery.omittedItems, []);
+  assert.deepEqual(plan.discovery.itemCoverage.map((item) => item.plannedQueries), [
+    ["supermercado", "grocery"], ["supermercado", "grocery"],
+  ]);
+  assert.equal(plan.complete, true);
+});
+
 test("planner output is deterministic and does not mutate its inputs", () => {
   const input = {
     globalQueries: ["vape", "estanco"],
@@ -121,6 +141,20 @@ test("provider plans keep independent discovery and catalog budgets", () => {
   assert.deepEqual(plan.catalog.omittedQueries, [{ query: "mentol", global: false, itemIds: ["liquid"] }]);
   assert.equal(plan.complete, false);
   assert.deepEqual(plan.omittedItems, []);
+});
+
+test("human CLI shopping lines get conservative per-item catalog fallbacks", () => {
+  const items = shoppingItemsFlag({
+    "shopping-items": JSON.stringify([
+      { id: "eggs", intent: "eggs" },
+      { id: "bread", intent: "crusty bread", catalogQueries: ["pan rústico"] },
+    ]),
+  });
+  assert.deepEqual(items[0].catalogQueries, ["eggs"]);
+  assert.deepEqual(items[1].catalogQueries, ["pan rústico"]);
+  const plan = planProviderRetrieval({ discoveryQueries: ["supermercado"], shoppingItems: items, catalogBudget: 8 });
+  assert.equal(plan.complete, true);
+  assert.deepEqual(plan.catalog.itemCoverage.map((entry) => entry.status), ["complete", "complete"]);
 });
 
 test("query budgets are validated", () => {

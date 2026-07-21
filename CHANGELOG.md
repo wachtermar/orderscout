@@ -2,6 +2,16 @@
 
 This project follows Semantic Versioning. It is currently pre-1.0; command and normalized response changes may occur between minor releases and will be listed here.
 
+## 0.1.20 - 2026-07-21
+
+- Add owner-only persistent menu caching for Just Eat, Glovo, and Uber Eats, plus in-process coalescing for identical concurrent reads.
+- Reuse an identical completed search for two minutes so an accidental duplicate Work tool call cannot repeat the complete provider crawl.
+- Stop ordinary grocery and meal searches from querying unrelated age-restricted Glovo catalogs, and stop retrying Glovo 429 responses immediately.
+- Stop retrying Just Eat 429 responses, retry one transient Glovo read failure only, and allow recent cached catalogs to cover transient network/429/5xx failures while marking coverage partial.
+- Cap Uber Eats global discovery at six calls, prioritizing merchant discovery before representative product terms and bounded complete-menu expansion.
+- Expose menu and discovery cache hits in provider coverage metadata while keeping remote checkout authoritative for current availability and exact totals.
+- Derive a conservative per-line catalog query when a human CLI user supplies shopping items without agent-authored retrieval vocabulary.
+
 ## 0.1.17 - 2026-07-21
 
 - Replace Uber Eats' 12–48-query synonym fan-out with a rate-aware representative plan that keeps at least one focused query per shopping line.

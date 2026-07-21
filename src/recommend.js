@@ -803,6 +803,8 @@ export async function recommend(location, text, options = {}) {
     const menu = normalizeMenu(menuData);
     return {
       restaurant,
+      menuCacheHit: menuData.cache?.hit === true,
+      menuCacheStale: menuData.cache?.stale === true,
       candidates: llmMode
         ? llmMenuCandidates(restaurant, menuData, menu)
         : intent.kind === "water"
@@ -861,6 +863,9 @@ export async function recommend(location, text, options = {}) {
       candidateStores: candidateStoreCount,
       scannedStores: restaurants.length,
       failedMenus: scanned.filter((entry) => entry?.error).length,
+      cachedMenus: scanned.filter((entry) => entry?.menuCacheHit).length,
+      staleMenus: scanned.filter((entry) => entry?.menuCacheStale).length,
+      liveMenus: scanned.filter((entry) => entry && !entry.error && !entry.menuCacheHit).length,
       availability: restaurants.length === 0 && shouldRequireOpen
         ? "no stores open for delivery now"
         : restaurants.every((restaurant) => restaurant.isOpenNowForDelivery)

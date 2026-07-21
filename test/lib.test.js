@@ -122,6 +122,15 @@ test("requestJson never retries mutating requests automatically", async () => {
   assert.equal(calls, 1);
 });
 
+test("requestJson never retries a rate limit automatically", async () => {
+  let calls = 0;
+  await assert.rejects(() => requestJson("https://example.test/menu", {}, async () => {
+    calls += 1;
+    return Response.json({ message: "slow down" }, { status: 429 });
+  }), { code: "RATE_LIMITED" });
+  assert.equal(calls, 1);
+});
+
 test("requestJson exposes only useful sanitized Just Eat rejection fields", async () => {
   const fetchImpl = async () => Response.json({
     ErrorType: "RestaurantDoesNotDeliverToLocation",

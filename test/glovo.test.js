@@ -113,6 +113,36 @@ test("Glovo exposes provider throttling as a rate limit rather than an authentic
   });
 });
 
+test("Glovo retries one transient read failure and normalizes an exhausted network failure", async () => {
+  let attempts = 0;
+  const payload = await glovoInternals.request("/v3/stores/test/search", {
+    session: { source: "verification", cookieHeader: "" },
+    fetchImpl: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new TypeError("fetch failed");
+      return Response.json({ ok: true });
+    },
+  });
+  assert.deepEqual(payload, { ok: true });
+  assert.equal(attempts, 2);
+
+  await assert.rejects(() => glovoInternals.request("/v3/stores/test/search", {
+    session: { source: "verification", cookieHeader: "" },
+    fetchImpl: async () => { throw new TypeError("fetch failed"); },
+  }), { code: "NETWORK_ERROR", message: "Could not reach Glovo" });
+});
+
+test("Glovo never retries a mutation after a network failure", async () => {
+  let attempts = 0;
+  await assert.rejects(() => glovoInternals.request("/v1/authenticated/customers/7/baskets", {
+    method: "POST",
+    body: { synthetic: true },
+    session: { source: "verification", cookieHeader: "" },
+    fetchImpl: async () => { attempts += 1; throw new TypeError("fetch failed"); },
+  }), { code: "NETWORK_ERROR" });
+  assert.equal(attempts, 1);
+});
+
 test("Glovo treats an invalid refresh grant as an expired login", async () => {
   const session = {
     version: 2,
@@ -246,6 +276,48 @@ test("Glovo searches a discovered store catalog and surfaces its legal-age gate"
   assert.deepEqual(catalog.offers[0].source.catalogQueriesMatched, ["ice"]);
   assert.equal(catalog.offers[0].source.eligibility.restrictions[0].id, "TBC");
   assert.ok(calls.some((value) => value.includes("query=ice")));
+});
+
+test("Glovo stops immediately on a catalog rate limit instead of amplifying it with retries", async () => {
+  const store = {
+    id: "580573", addressId: "935347", categoryId: "22", name: "Estanco", categories: ["Vapeo"],
+    open: true, url: "https://glovoapp.com/es/es/marbella/stores/estanco-marbella",
+  };
+  let searchAttempts = 0;
+  await assert.rejects(() => glovoStoreCatalog(store, ["ice"], { latitude: 36.5, longitude: -4.8, cityCode: "MBA" }, {
+    requireEligibility: true,
+    session: { source: "verification", cookieHeader: `glovo_auth_info=${encodeURIComponent(JSON.stringify({ accessToken: "a".repeat(40) }))}` },
+    fetchImpl: async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith("/node/store_menu")) return Response.json({ data: { elements: [] } });
+      if (parsed.pathname.endsWith("/search")) {
+        searchAttempts += 1;
+        return Response.json({ message: "slow down" }, { status: 429 });
+      }
+      return Response.json({});
+    },
+  }), { code: "RATE_LIMITED" });
+  assert.equal(searchAttempts, 1);
+});
+
+test("Glovo records a partial catalog rate limit when other catalog terms succeed", async () => {
+  const store = { id: "1", addressId: "2", name: "Restricted shop", open: true, url: "https://glovoapp.com/es/es/marbella/stores/test" };
+  const attempts = new Map();
+  const catalog = await glovoStoreCatalog(store, ["ice", "mentol"], { latitude: 36.5, longitude: -4.8, cityCode: "MBA" }, {
+    session: { source: "verification", cookieHeader: `glovo_auth_info=${encodeURIComponent(JSON.stringify({ accessToken: "a".repeat(40) }))}` },
+    fetchImpl: async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith("/node/store_menu")) return Response.json({ data: { elements: [] } });
+      const query = parsed.searchParams.get("query");
+      attempts.set(query, Number(attempts.get(query) ?? 0) + 1);
+      if (query === "ice") return Response.json({ message: "slow down" }, { status: 429 });
+      return Response.json({ results: [{ products: [{ id: "m", name: "Mentol", price: 5 }] }] });
+    },
+  });
+  assert.equal(catalog.failedQueries, 1);
+  assert.equal(catalog.rateLimitedQueries, 1);
+  assert.equal(catalog.products.length, 1);
+  assert.deepEqual(Object.fromEntries(attempts), { ice: 1, mentol: 1 });
 });
 
 test("Glovo parses the current PRODUCT_TILE flight format and detects restricted collections", async () => {
