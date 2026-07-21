@@ -456,7 +456,20 @@ export async function resolveSavedLocation(token, index = 0, fetchImpl = fetch) 
       city: address.city,
     };
   }
-  const query = [...address.lines, address.postcode, address.city].filter(Boolean).join(", ");
-  if (!query) throw new CliError("The saved address has no usable location", "INVALID_LOCATION");
-  return { ...await resolveLocation(query, fetchImpl), source: "saved-address", addressIndex: index };
+  const queries = [...new Set([
+    [...address.lines, address.postcode, address.city].filter(Boolean).join(", "),
+    [address.lines[0], address.postcode, address.city].filter(Boolean).join(", "),
+  ].filter(Boolean))];
+  if (!queries.length) throw new CliError("The saved address has no usable location", "INVALID_LOCATION");
+  let lastError;
+  for (const [queryIndex, query] of queries.entries()) {
+    try {
+      return { ...await resolveLocation(query, fetchImpl), source: "saved-address", addressIndex: index };
+    } catch (error) {
+      lastError = error;
+      const retryableSavedAddressShape = error.code === "LOCATION_NOT_FOUND" || error.details?.status === 404;
+      if (!retryableSavedAddressShape || queryIndex === queries.length - 1) throw error;
+    }
+  }
+  throw lastError;
 }
