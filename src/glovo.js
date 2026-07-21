@@ -673,10 +673,25 @@ async function mapConcurrent(values, concurrency, mapper) {
   return output;
 }
 
+function catalogQueryMatchesProduct(query, product) {
+  const text = cacheText([product?.name, product?.description, product?.categoryName].filter(Boolean).join(" "));
+  const terms = cacheText(query).split(/\s+/).filter((term) => term.length > 2)
+    .map((term) => term.endsWith("s") && term.length > 4 ? term.slice(0, -1) : term);
+  return terms.length > 0 && terms.every((term) => text.includes(term));
+}
+
 export async function glovoStoreCatalog(store, queries, location, options = {}) {
   if (!store?.id || !store?.addressId) throw new CliError("Glovo store identifiers are required", "SOURCE_PLAN_MISSING");
   const catalogQueries = [...new Set((Array.isArray(queries) ? queries : [queries])
     .map((value) => String(value ?? "").trim()).filter(Boolean))].slice(0, Math.max(1, Number(options.queryLimit ?? 8)));
+  const batchSize = options.batchQueries === true
+    ? Math.max(1, Math.min(8, Number(options.batchSize ?? 4)))
+    : 1;
+  const queryBatches = [];
+  for (let index = 0; index < catalogQueries.length; index += batchSize) {
+    const members = catalogQueries.slice(index, index + batchSize);
+    queryBatches.push({ query: members.join(" "), members });
+  }
   const cacheEnabled = (options.fetchImpl ?? fetch) === fetch;
   const menuRead = await cachedProviderRead("glovo-catalog-menu", { storeId: store.id, addressId: store.addressId }, () => request(`/v3/stores/${encodeURIComponent(store.id)}/addresses/${encodeURIComponent(store.addressId)}/node/store_menu`, {
     location, fetchImpl: options.fetchImpl, session: options.session,
@@ -698,7 +713,11 @@ export async function glovoStoreCatalog(store, queries, location, options = {}) 
     restrictions: (restrictions?.restrictions ?? []).map((entry) => ({ id: entry.id, text: entry.text, hyperlink: entry.hyperlink ?? null })),
     providerActionUrl: store.url,
   } : null;
-  const searched = await mapConcurrent(catalogQueries, Number(options.concurrency ?? 2), async (query) => {
+  let requestSlot = 0;
+  const searchBatch = async ({ query, members }) => {
+    const slot = requestSlot++;
+    const requestDelayMs = Math.max(0, Math.min(2_000, Number(options.requestDelayMs ?? (options.batchQueries === true ? 200 : 0))));
+    if (slot > 0 && requestDelayMs) await new Promise((resolveDelay) => setTimeout(resolveDelay, requestDelayMs));
     const result = await cachedProviderRead("glovo-catalog-query", {
       storeId: store.id,
       addressId: store.addressId,
@@ -713,12 +732,25 @@ export async function glovoStoreCatalog(store, queries, location, options = {}) 
     }, { ttlMs: CATALOG_QUERY_CACHE_TTL_MS, staleIfErrorMs: CATALOG_STALE_IF_ERROR_MS, enabled: cacheEnabled });
     return {
       query,
+      members,
       products: result.value,
       cacheHit: result.cache.hit,
       cacheStale: result.cache.stale === true,
       fallbackErrorCode: result.cache.fallbackErrorCode ?? null,
     };
-  });
+  };
+  const initialSearches = await mapConcurrent(queryBatches, Number(options.concurrency ?? 2), searchBatch);
+  const missingIndependentQueries = options.batchQueries === true
+    ? catalogQueries.filter((query) => !initialSearches.some((entry) => !entry?.error
+      && (entry.members ?? []).includes(query)
+      && (entry.products ?? []).some((product) => catalogQueryMatchesProduct(query, product))))
+    : [];
+  const fallbackSearches = await mapConcurrent(
+    missingIndependentQueries.map((query) => ({ query, members: [query] })),
+    Number(options.fallbackConcurrency ?? 1),
+    searchBatch,
+  );
+  const searched = [...initialSearches, ...fallbackSearches];
   if (searched.length && searched.every((entry) => entry?.error)) throw searched[0].error;
   const productsById = new Map();
   for (const entry of searched) {
@@ -726,9 +758,11 @@ export async function glovoStoreCatalog(store, queries, location, options = {}) 
     for (const product of entry?.products ?? []) {
       const key = String(product.storeProductId ?? product.externalId ?? product.id);
       const existing = productsById.get(key);
+      const matchedQueries = (entry.members ?? [entry.query]).filter((query) =>
+        entry.members?.length === 1 || catalogQueryMatchesProduct(query, product));
       productsById.set(key, {
         ...(existing ?? product),
-        matchedQueries: [...new Set([...(existing?.matchedQueries ?? []), entry.query])],
+        matchedQueries: [...new Set([...(existing?.matchedQueries ?? []), ...matchedQueries])],
       });
     }
   }
@@ -736,6 +770,8 @@ export async function glovoStoreCatalog(store, queries, location, options = {}) 
   return {
     store,
     queries: catalogQueries,
+    queryBatches: queryBatches.map((entry) => entry.query),
+    fallbackQueries: missingIndependentQueries,
     categories: summary.categories,
     restrictionsDetected: summary.restrictionsDetected,
     eligibility,
@@ -750,6 +786,7 @@ export async function glovoStoreCatalog(store, queries, location, options = {}) 
       queryHits: searched.filter((entry) => entry?.cacheHit).length,
       queryStale: searched.filter((entry) => entry?.cacheStale).length,
       liveQueries: searched.filter((entry) => entry && !entry.error && !entry.cacheHit).length,
+      requestCount: searched.length,
     },
   };
 }
@@ -1112,6 +1149,65 @@ export function glovoCheckoutUrl(offer) {
   const url = new URL(`${WEB}/es/es/${city}/order-summary`);
   url.searchParams.set("storeId", offer.source.storeId);
   return url.toString();
+}
+
+function safePaymentSummary(value) {
+  if (!value || typeof value !== "object") return null;
+  const label = value.label ?? value.title ?? value.displayName ?? value.name ?? null;
+  const brand = value.brand ?? value.cardBrand ?? value.type ?? null;
+  const lastFour = String(value.lastFour ?? value.last4 ?? value.cardLastFour ?? "").match(/\d{4}$/)?.[0] ?? null;
+  if (!label && !brand && !lastFour) return null;
+  return {
+    ...(label ? { label: String(label) } : {}),
+    ...(brand ? { brand: String(brand) } : {}),
+    ...(lastFour ? { lastFour } : {}),
+  };
+}
+
+export function glovoCheckoutReview(quote, options = {}) {
+  const components = Array.isArray(quote?.components) ? quote.components : [];
+  const addressComponent = components.find((component) => component.id === "deliveryAddress" || component.type === "addressPicker");
+  const addressData = addressComponent?.addressPickerData ?? addressComponent?.deliveryAddressData ?? addressComponent?.data ?? {};
+  const addressValue = addressData.value ?? addressData.selectedAddress ?? addressData.address ?? {};
+  const addressLabel = addressValue.label ?? addressValue.title ?? addressData.label ?? null;
+
+  const timeComponent = components.find((component) => component.id === "schedulingTime" || component.type === "timeSelector");
+  const selectors = timeComponent?.timeSelectorData?.selectors ?? [];
+  const standard = selectors.find((selector) => String(selector?.value ?? "").toUpperCase() === "STANDARD")
+    ?? selectors.find((selector) => /^(?:standard|estándar)$/i.test(String(selector?.label ?? "")));
+  const timing = options.fulfilment?.status === "verified"
+    ? { mode: "scheduled", status: "verified", window: options.fulfilment.selectedWindow ?? null }
+    : standard && standard.disabled !== true
+      ? { mode: "now", status: "verified", label: standard.label ?? null, description: standard.description ?? null }
+      : { mode: "now", status: "unavailable" };
+
+  const paymentComponent = components.find((component) => component.id === "paymentMethod" || component.type === "paymentMethodPicker");
+  const paymentData = paymentComponent?.paymentMethodPickerData ?? paymentComponent?.paymentMethodData ?? paymentComponent?.data ?? {};
+  const paymentValue = paymentData.value ?? paymentData.selectedPaymentMethod ?? paymentData.paymentMethod ?? null;
+  const paymentSummary = safePaymentSummary(paymentValue);
+  const payment = paymentSummary
+    ? { status: "configured", ...paymentSummary }
+    : { status: "unavailable", cashAllowed: paymentData.cash === true };
+
+  const pricing = options.pricing ?? normalizeGlovoQuote(quote);
+  const placeOrder = components.find((component) => component.id === "placeOrder" || component.type === "button");
+  const checkoutEnabled = quote?.enabled !== false && placeOrder
+    && placeOrder.buttonData?.disabled !== true && placeOrder.buttonData?.enabled !== false;
+  const missing = [
+    ...(!addressLabel ? ["delivery address summary"] : []),
+    ...(timing.status !== "verified" ? ["delivery timing"] : []),
+    ...(payment.status !== "configured" ? ["payment method summary"] : []),
+    ...(!checkoutEnabled ? ["enabled purchase action"] : []),
+  ];
+  return {
+    address: addressLabel ? { status: "configured", label: String(addressLabel) } : { status: "unavailable" },
+    timing,
+    payment,
+    pricing,
+    checkoutEnabled: Boolean(checkoutEnabled),
+    purchaseApprovalReady: missing.length === 0 && pricing?.exact === true,
+    missing,
+  };
 }
 
 export function glovoOrderConfirmation(offer, quote) {

@@ -8,7 +8,7 @@ import { openSystemUrl } from "./auth.js";
 import { offersForFulfilment, storesForFulfilment } from "./availability.js";
 import { beginBrowserLogin, importChromeSession, loadBrowserSession, logoutBrowserSession } from "./browser-session.js";
 import {
-  createGlovoBasket, glovoAddresses, glovoBaskets, glovoCheckoutUrl, glovoMe, glovoMenu, glovoMenuOffers, glovoStoreCatalog, placeGlovoOrder, quoteGlovoBasket, searchGlovo,
+  createGlovoBasket, glovoAddresses, glovoBaskets, glovoCheckoutReview, glovoCheckoutUrl, glovoMe, glovoMenu, glovoMenuOffers, glovoStoreCatalog, placeGlovoOrder, quoteGlovoBasket, searchGlovo,
 } from "./glovo.js";
 import { CliError, parseArgs, resolveLocation } from "./lib.js";
 import { errorEnvelope, exitCodeFor, writeOutput } from "./output.js";
@@ -89,7 +89,7 @@ function stringArrayFlag(flags, key) {
 
 export function shoppingItemsFlag(flags) {
   const value = jsonFlag(flags, "shopping-items", []);
-  if (!Array.isArray(value) || value.length > 12) throw new CliError("--shopping-items must be a JSON array with at most 12 items", "INVALID_SHOPPING_ITEMS");
+  if (!Array.isArray(value) || value.length > 24) throw new CliError("--shopping-items must be a JSON array with at most 24 items", "INVALID_SHOPPING_ITEMS");
   return value.map((item, index) => {
     if (!item || typeof item !== "object" || typeof item.intent !== "string" || !item.intent.trim()) {
       throw new CliError(`Shopping item ${index + 1} requires a non-empty intent`, "INVALID_SHOPPING_ITEMS");
@@ -298,7 +298,9 @@ async function saveCheckoutResult(searchId, offerId, result, pricing) {
       fulfillable: quote?.quote?.isFulfillable ?? quote?.isFulfillable ?? null,
       issues: quote?.quote?.issues ?? quote?.issues ?? [],
       paymentMethods: quote?.quote?.paymentMethods ?? quote?.paymentMethods ?? [],
-    } : null,
+    } : result.provider === "glovo"
+      ? glovoCheckoutReview(quote, { pricing, fulfilment: result.fulfilment })
+      : null,
     comparison: {
       exactPriceComparison: current.comparison.exactPriceComparison,
       exactPriceCoverage: current.comparison.exactPriceCoverage,
@@ -634,18 +636,43 @@ async function collectGlovo(intent, flags) {
   const fullMenus = [];
   const catalogErrors = [];
   let failedCatalogs = 0;
+  const catalogStorePattern = /supermerc|grocer|market|alimentaci[oó]n|convenien|farmacia|parafarmacia|tienda|shop|bio|bebida|licor|estanco|vape|mascota|pet|electr[oó]nica/i;
+  const storeNeedsCatalog = (store) => requireEligibility
+    || catalogStorePattern.test([store.name, ...(store.categories ?? [])].filter(Boolean).join(" "));
+  const catalogCandidates = stores.filter(storeNeedsCatalog).sort((left, right) => {
+    const groceryScore = (store) => (store.categories ?? []).some((category) => /supermerc|grocer|market/i.test(category)) ? 1 : 0;
+    return groceryScore(right) - groceryScore(left)
+      || Number(right.rating ?? 0) - Number(left.rating ?? 0)
+      || Number(right.ratingCount ?? 0) - Number(left.ratingCount ?? 0);
+  });
+  const defaultCatalogStoreLimit = requireEligibility ? 3 : catalogQueries.length > 12 ? 1 : 2;
+  const catalogStoreLimit = Math.min(catalogCandidates.length, defaultCatalogStoreLimit);
+  const catalogStoreKeys = new Set(catalogCandidates.slice(0, catalogStoreLimit)
+    .map((store) => `${store.id}:${store.addressId}`));
   const menuOutcomes = await settleConcurrent(stores, 4, async (store) => {
     const menu = await glovoMenu(store.url);
-    let catalog = null;
-    if (shouldExpandGlovoRestrictedCatalog(requireEligibility)) {
-      catalog = await glovoStoreCatalog(store, catalogQueries, location, {
-        requireEligibility,
-        queryLimit: Math.max(1, catalogQueries.length),
-        concurrency: 1,
-      });
-    }
-    return { store, menu, catalog };
+    return { store, menu, catalog: null, catalogError: null };
   });
+  // Glovo's catalog endpoint begins throttling after a short burst. Menu reads
+  // stay concurrent, while bounded in-store catalog scans run sequentially so
+  // one broad user request cannot rate-limit every remaining merchant.
+  for (const outcome of menuOutcomes) {
+    if (outcome.status !== "fulfilled") continue;
+    const { store } = outcome.value;
+    if (catalogStoreKeys.has(`${store.id}:${store.addressId}`)) {
+      try {
+        outcome.value.catalog = await glovoStoreCatalog(store, catalogQueries, location, {
+          requireEligibility,
+          queryLimit: Math.max(1, catalogQueries.length),
+          concurrency: 1,
+          fallbackConcurrency: 1,
+          batchQueries: true,
+          batchSize: 4,
+          requestDelayMs: 200,
+        });
+      } catch (error) { outcome.value.catalogError = error; }
+    }
+  }
   for (const outcome of menuOutcomes) {
     if (outcome.status === "rejected") {
       failedCatalogs += 1;
@@ -654,6 +681,10 @@ async function collectGlovo(intent, flags) {
     }
     fullMenus.push(outcome.value);
     if (outcome.value.catalog) catalogs.push(outcome.value.catalog);
+    if (outcome.value.catalogError) {
+      failedCatalogs += 1;
+      catalogErrors.push(outcome.value.catalogError);
+    }
   }
   if (stores.length && !fullMenus.length) {
     if (catalogErrors.some((error) => error?.code === "RATE_LIMITED")) {
@@ -683,7 +714,7 @@ async function collectGlovo(intent, flags) {
   return {
     offers: discovered,
     providerMeta: {
-      strategy: "merchant-discovery-then-complete-menu-scan",
+      strategy: "merchant-discovery-then-menu-and-batched-retail-catalog-search",
       discoveryQueries,
       failedDiscoveryQueries: discoveryFailures.length,
       rateLimitedDiscoveryQueries: discoveryFailures.filter((result) => result.reason?.code === "RATE_LIMITED").length
@@ -696,13 +727,18 @@ async function collectGlovo(intent, flags) {
       eligibleStores: fulfilmentStores.length,
       excludedUnavailableStores: allStores.length - fulfilmentStores.length,
       searchedStores: fullMenus.length,
-      catalogProducts: menuOffers.length,
+      eligibleCatalogStores: catalogCandidates.length,
+      searchedCatalogStores: catalogs.length,
+      catalogStoreLimit,
+      menuProducts: menuOffers.length,
+      catalogProducts: catalogs.reduce((sum, catalog) => sum + catalog.offers.length, 0),
       cachedMenus: fullMenus.filter(({ menu }) => menu.cache?.hit).length,
       staleMenus: fullMenus.filter(({ menu }) => menu.cache?.stale).length,
       liveMenus: fullMenus.filter(({ menu }) => !menu.cache?.hit).length,
       cachedCatalogQueries: catalogs.reduce((sum, catalog) => sum + Number(catalog.cache?.queryHits ?? 0), 0),
       staleCatalogQueries: catalogs.reduce((sum, catalog) => sum + Number(catalog.cache?.queryStale ?? 0), 0),
       liveCatalogQueries: catalogs.reduce((sum, catalog) => sum + Number(catalog.cache?.liveQueries ?? 0), 0),
+      catalogRequests: catalogs.reduce((sum, catalog) => sum + Number(catalog.cache?.requestCount ?? 0), 0),
       failedCatalogs,
       rateLimitedCatalogs: catalogErrors.filter((error) => error?.code === "RATE_LIMITED").length,
       failedCatalogQueries: catalogs.reduce((sum, catalog) => sum + catalog.failedQueries, 0),
@@ -800,6 +836,8 @@ async function collectUberEats(intent, flags) {
       crossCatalogFailedStores: crossCatalog.failedStores,
       crossCatalogRateLimitedStores: crossCatalog.rateLimitedStores,
       crossCatalogOffers: crossCatalog.offers.length,
+      crossCatalogPages: crossCatalog.catalogPages ?? 0,
+      incompleteCatalogStores: crossCatalog.incompleteStores ?? 0,
       cachedCatalogs: crossCatalog.cachedStores ?? 0,
       staleCatalogs: crossCatalog.staleStores ?? 0,
       liveCatalogs: crossCatalog.liveStores ?? crossCatalog.searchedStores,
@@ -812,6 +850,7 @@ async function collectUberEats(intent, flags) {
       retrievalPlan: flags.retrievalPlan ?? null,
       deliveryLocation,
       partial: failures.length > 0 || crossCatalog.failedStores > 0 || Boolean(crossCatalogError)
+        || Number(crossCatalog.incompleteStores ?? 0) > 0
         || Number(crossCatalog.staleStores ?? 0) > 0
         || flags.retrievalPlan?.complete === false,
     },
@@ -1170,7 +1209,24 @@ export async function runOrderScout(argv) {
       const url = offer.provider === "glovo" ? glovoCheckoutUrl(offer) : null;
       if (!url) throw new CliError("This provider has no basket handoff", "BASKET_HANDOFF_REQUIRED");
       if (!flags["no-open"]) await openSystemUrl(url);
-      return writeOutput({ provider: offer.provider, opened: !flags["no-open"], url, submitted: false }, flags);
+      const expectedLines = (offer.lines?.length ? offer.lines : [{ item: offer.item, quantity: offer.quantity ?? 1 }])
+        .map((line) => ({ name: line.item?.name ?? "Item", quantity: Number(line.quantity ?? 1) }));
+      return writeOutput({
+        provider: offer.provider,
+        opened: !flags["no-open"],
+        url,
+        submitted: false,
+        handoff: {
+          mode: "api_checkout_review",
+          basketId: offer.basket?.id ?? null,
+          merchantName: offer.merchant?.name ?? null,
+          expectedLines,
+          apiSessionAuthenticated: true,
+          browserSessionTransfer: "unsupported",
+          visualReviewOptional: true,
+          reviewTool: "orderscout_checkout_review_task",
+        },
+      }, flags);
     }
     assertAllergenReview(search, flags);
     if (action === "checkout") {

@@ -441,7 +441,7 @@ export async function expandUberEatsCatalogs(stores, queries, options = {}) {
     }
     let menuPromise = options.menuCache?.get(store.id);
     if (!menuPromise) {
-      menuPromise = uberEatsMenu(store.id, options);
+      menuPromise = uberEatsMenu(store.id, { ...options, fullCatalog: true });
       options.menuCache?.set(store.id, menuPromise);
     }
     let menu;
@@ -453,7 +453,13 @@ export async function expandUberEatsCatalogs(stores, queries, options = {}) {
     const cacheHit = menu.cache?.hit === true;
     const cacheStale = menu.cache?.stale === true;
     if (cacheHit && store.orderable !== false) menu = { ...menu, isOpen: true };
-    return { offers: queries.flatMap((query) => uberEatsMenuOffers(store, menu, query)), cacheHit, cacheStale };
+    return {
+      offers: queries.flatMap((query) => uberEatsMenuOffers(store, menu, query)),
+      cacheHit,
+      cacheStale,
+      catalogComplete: menu.catalogComplete !== false,
+      catalogPageCount: Number(menu.catalogPageCount ?? 1),
+    };
   });
   const fulfilled = outcomes.filter((outcome) => outcome.status === "fulfilled");
   const offers = fulfilled.flatMap((outcome) => outcome.value.offers);
@@ -466,6 +472,8 @@ export async function expandUberEatsCatalogs(stores, queries, options = {}) {
     cachedStores: fulfilled.filter((outcome) => outcome.value.cacheHit).length,
     staleStores: fulfilled.filter((outcome) => outcome.value.cacheStale).length,
     liveStores: fulfilled.filter((outcome) => !outcome.value.cacheHit).length,
+    incompleteStores: fulfilled.filter((outcome) => !outcome.value.catalogComplete).length,
+    catalogPages: fulfilled.reduce((sum, outcome) => sum + outcome.value.catalogPageCount, 0),
   };
 }
 
@@ -586,13 +594,36 @@ export async function uberEatsMenu(storeUuid, options = {}) {
     longitude: Number(Number(location.longitude).toFixed(5)),
   } : null;
   const requestOptions = session?.cookieHeader ? { ...options, cookieHeader: session.cookieHeader } : options;
-  const { value, cache } = await cachedProviderRead("ubereats-menu", { storeUuid, target, location: locationKey }, async () => {
+  const fullCatalog = options.fullCatalog === true;
+  const { value, cache } = await cachedProviderRead("ubereats-menu", {
+    storeUuid, target, location: locationKey, catalogMode: fullCatalog ? "complete-grocery" : "initial",
+  }, async () => {
     const payload = await request("getStoreV1", {
       storeUuid,
       sfNuggetCount: 0,
       diningMode: "DELIVERY",
       ...(target ? { time: target, cbType: "EATER_ENDORSED" } : {}),
     }, requestOptions);
+    const pages = [payload];
+    const isGrocery = payload?.isGr === true;
+    let nextOffset = payload?.catalogSectionPagingInfo?.offset ?? null;
+    const visitedOffsets = new Set();
+    const maximumPages = Math.max(1, Math.min(50, Number(options.maxCatalogPages ?? 30)));
+    while (fullCatalog && isGrocery && nextOffset !== null && nextOffset !== undefined && pages.length < maximumPages) {
+      const offsetKey = String(nextOffset);
+      if (visitedOffsets.has(offsetKey)) break;
+      visitedOffsets.add(offsetKey);
+      const pageDelayMs = Math.max(0, Math.min(2_000, Number(options.pageDelayMs ?? 175)));
+      if (pageDelayMs) await new Promise((resolveDelay) => setTimeout(resolveDelay, pageDelayMs));
+      const page = await request("getStoreV1", {
+        storeUuid,
+        catalogSectionOffset: nextOffset,
+        storeSessionUuid: payload?.storeSessionUuid,
+      }, requestOptions);
+      pages.push(page);
+      nextOffset = page?.catalogSectionPagingInfo?.offset ?? null;
+    }
+    const items = [...new Map(pages.flatMap(collectCatalog).map((item) => [item.uuid, item])).values()];
     const unavailableMessage = /(?:delivery |currently |not )?unavailable|no disponible|cerrad|closed/i.test(String(payload.closedMessage ?? ""));
     const scheduledRanges = target ? payload.adaptedDeliveryHoursInfos?.timeRanges?.[target.date] : null;
     const scheduledSlotAvailable = !target || !Array.isArray(scheduledRanges)
@@ -604,8 +635,12 @@ export async function uberEatsMenu(storeUuid, options = {}) {
         && !unavailableMessage && scheduledSlotAvailable,
       closedMessage: payload.closedMessage ?? null,
       scheduledSlotAvailable,
-      items: collectCatalog(payload),
-      raw: options.raw ? payload : undefined,
+      items,
+      isGrocery,
+      catalogPageCount: pages.length,
+      catalogComplete: !isGrocery || nextOffset === null || nextOffset === undefined,
+      nextCatalogOffset: nextOffset,
+      raw: options.raw ? pages : undefined,
     };
   }, {
     ttlMs: MENU_CACHE_TTL_MS,

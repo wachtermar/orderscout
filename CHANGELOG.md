@@ -2,6 +2,14 @@
 
 This project follows Semantic Versioning. It is currently pre-1.0; command and normalized response changes may occur between minor releases and will be listed here.
 
+## 0.1.21 - 2026-07-21
+
+- Traverse every official Uber Eats grocery catalog page instead of treating the first approximately 50 products as a complete supermarket menu.
+- Query bounded Glovo retail catalogs for ordinary grocery and shop requests, recover individual terms hidden by capped combined results, and pace scans below the provider's burst limit.
+- Preserve up to 24 atomic shopping lines so recipes never collapse ingredients into impossible combined cart requirements.
+- Return a privacy-safe Glovo API checkout review with address label, verified timing, exact pricing, payment availability, and the actual approval blocker.
+- Mark Glovo's in-app-browser cookie transfer as unsupported and keep authenticated API checkout authoritative instead of falsely telling signed-in users to log in again.
+
 ## 0.1.20 - 2026-07-21
 
 - Add owner-only persistent menu caching for Just Eat, Glovo, and Uber Eats, plus in-process coalescing for identical concurrent reads.
